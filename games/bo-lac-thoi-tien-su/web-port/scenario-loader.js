@@ -927,6 +927,108 @@ function spawnUnit(data, owner, x, y, indexSeed) {
   return uid;
 }
 
+export function spawnMeatCarcass(data, x, y, amount = 20) {
+  if (!data?.entityData || !data.occupancy) return -1;
+  const px = Math.max(1, Math.min(data.width - 2, x));
+  const py = Math.max(1, Math.min(data.height - 2, y));
+  if (data.occupancy[py]?.[px] !== 0) return -1;
+  const e = data.entityData;
+  let slot = -1;
+  for (let i = 0; i < 50; i++) {
+    if (e[9833 + i] === 0) {
+      slot = i;
+      break;
+    }
+  }
+  if (slot === -1) return -1;
+  e[9833 + slot] = 6; // kind 6 = fresh meat carcass (turns into kind 7 animal bones when meat runs out!)
+  e[9733 + slot] = px;
+  e[9783 + slot] = py;
+  e[9883 + slot] = amount;
+  e[9933 + slot] = 3;
+  data.occupancy[py][px] = -61 - slot;
+  return slot;
+}
+
+export function populateForestWildlife(data, targetCount = 10) {
+  if (!data?.entityData || !data.occupancy || !data.terrain) return 0;
+  const e = data.entityData;
+  const w = data.width;
+  const h = data.height;
+  let existing = 0;
+  for (let i = 0; i < 22; i++) {
+    if ((e[9513 + i] & 0xff) > 0) existing++;
+  }
+  const need = Math.min(22 - existing, Math.max(0, targetCount - existing));
+  if (need <= 0) return 0;
+
+  // Gather existing building centers so wild animals spawn in forests away from town centers
+  const blds = [];
+  for (let bid = 1; bid <= 60; bid++) {
+    if ((e[8505 + bid] & 0xff) > 0) {
+      blds.push({ x: e[8383 + bid] & 0xff, y: e[8444 + bid] & 0xff });
+    }
+  }
+  const distToNearestBld = (x, y) => {
+    let best = 999;
+    for (const b of blds) {
+      const d = Math.hypot(b.x - x, b.y - y);
+      if (d < best) best = d;
+    }
+    return best;
+  };
+  const isNearTree = (x, y) => {
+    for (let dy = -2; dy <= 2; dy++) {
+      for (let dx = -2; dx <= 2; dx++) {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+        const t = data.terrain[ny][nx] & 0xff;
+        if (t >= 180 && t <= 231) return true;
+      }
+    }
+    return false;
+  };
+
+  // Collect forest-edge grass tiles
+  const candidates = [];
+  for (let y = 2; y < h - 2; y++) {
+    for (let x = 2; x < w - 2; x++) {
+      if (data.occupancy[y][x] !== 0) continue;
+      if ((data.terrain[y][x] & 0xff) >= 175) continue;
+      const bDist = distToNearestBld(x, y);
+      if (bDist < 6) continue;
+      if (isNearTree(x, y)) {
+        candidates.push({ x, y, bDist });
+      }
+    }
+  }
+  if (candidates.length === 0) return 0;
+
+  // Deterministic spread across the map (Deer=2, Boar=0, Tiger=1)
+  const speciesOrder = [2, 0, 2, 1, 2, 0, 2, 1, 0, 2];
+  let spawned = 0;
+  const chosen = [];
+  const step = Math.max(1, Math.floor(candidates.length / (need * 3)));
+  for (let pass = 0; pass < 2 && spawned < need; pass++) {
+    for (let idx = (pass * 7) % candidates.length; idx < candidates.length && spawned < need; idx += step) {
+      const c = candidates[idx];
+      if (data.occupancy[c.y][c.x] !== 0) continue;
+      const minSep = pass === 0 ? 7 : 3;
+      if (chosen.some((p) => Math.hypot(p.x - c.x, p.y - c.y) < minSep)) continue;
+      const kind = speciesOrder[(existing + spawned) % speciesOrder.length];
+      // Keep Tigers (kind 1) slightly deeper in the forest (>= 10 tiles from bases)
+      if (kind === 1 && c.bDist < 10 && pass === 0) continue;
+      const aid = spawnWildAnimal(data, kind, c.x, c.y, (existing + spawned) % 4);
+      if (aid >= 0) {
+        chosen.push(c);
+        spawned++;
+      }
+    }
+  }
+  return spawned;
+}
+
 function spawnWildAnimal(data, kind, x, y, group) {
   const e = data.entityData;
   const m = data.mapTableData;
@@ -981,6 +1083,7 @@ function cloneFirstMapSnapshot(baseData) {
         syncUnitAvatar(cloned, uid, uid);
       }
     }
+  populateForestWildlife(cloned, 8);
   return cloned;
 }
 
@@ -1266,6 +1369,7 @@ export function loadScenarioFromMa(baseData, maBytes, scenarioIndex, options = {
   data.cursorY = Math.max(0, Math.min(height - 1, focusY));
   data.hoverUnit = firstPlayerUnit || 1;
   revealFog(data, data.cursorX, data.cursorY, 5);
+  populateForestWildlife(data, 10);
 
   return data;
 }
@@ -1417,6 +1521,7 @@ export function prepareMultiplayerMatch(baseData, maBytes, scenarioIndex = 1, lo
   const t0 = setupTribe(0, a0);
   const t1 = setupTribe(1, a1);
   data.mpBases = [t0, t1];
+  populateForestWildlife(data, 12);
 
   // Reset fogOfWar AFTER placing both bases (placeBuilding reveals fog during placement!)
   // so each player ONLY sees their own side of the map until they scout!

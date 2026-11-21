@@ -32,6 +32,8 @@ import {
   demolishBuilding,
   syncUnitAvatar,
   spawnBonePile,
+  spawnMeatCarcass,
+  populateForestWildlife,
   spawnNewbornVillager,
   captureTribeCarryover,
   loadScenarioFromMa,
@@ -4302,14 +4304,23 @@ function stepSimulation() {
       setUnitAnim(unitId, 25, Math.floor(task.workTicks / 2) % 6);
       task.workTicks++;
       if (task.workTicks >= 36) {
+        const aKind = e[9535 + aid] & 0xff;
+        const meatAmt = (d.mapTableData?.[d.mapTableOffsets?.[183] + aKind] & 0xff) || 20;
         e[9513 + aid] = 0;
         if (d.occupancy[ay][ax] === 101 + aid) d.occupancy[ay][ax] = 0;
-        state.tools += 2; // hunting yields +2 bones (xương - 4th HUD resource)
-        syncResourcesToData();
-        task.phase = 'pickup';
-        task.workTicks = 0;
+        const carcassSlot = spawnMeatCarcass(d, ax, ay, meatAmt);
         const info = getVillagerInfo(unitId);
-        state.message = `${info.role} đã hạ thú hoang (+2 xương) và đang vác thịt về trại!`;
+        const animalLabel = aKind === 1 ? 'Cọp' : aKind === 0 ? 'Lợn rừng' : 'Hươu';
+        state.tasks.delete(unitId);
+        const carcassTarget = carcassSlot >= 0 ? classifyGatherable(ax, ay) : null;
+        if (carcassTarget && assignGatherTask(unitId, carcassTarget)) {
+          state.message = `🥩 ${info.role} đã săn được ${animalLabel} (${meatAmt} thịt) và đang xẻ thịt vác về kho!`;
+        } else {
+          state.food += Math.min(10, meatAmt);
+          syncResourcesToData();
+          setUnitAnim(unitId, 8, 0);
+          state.message = `🥩 ${info.role} đã săn được ${animalLabel}!`;
+        }
         uiChanged = true;
       }
     } else if (task.kind === 'rest') {
@@ -5454,7 +5465,10 @@ function stepVillagerNeeds() {
   }
   const finishedHuts = getPlayerBuildings().filter((b) => !b.underConstruction && b.targetType === 2);
 
-  // Authentic berry bush & mushroom gradual regrowth (b.java:4660-4675)
+  // Authentic berry bush & mushroom gradual regrowth (b.java:4660-4675) + gentle forest wildlife respawn
+  if (state.animTick % 600 === 0 && getWildAnimals().length < 6) {
+    populateForestWildlife(d, 8);
+  }
   if (state.animTick % 112 === 0) {
     for (let idx = 0; idx < 50; idx++) {
       const kind = e[9833 + idx] & 0xff;
