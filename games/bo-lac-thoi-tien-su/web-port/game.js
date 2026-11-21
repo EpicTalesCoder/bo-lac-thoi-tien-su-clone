@@ -2482,6 +2482,11 @@ function castShamanSpell(spell, bldArg = null) {
 }
 
 function performUpgradeBuilding(bld) {
+  if (bld.underConstruction) {
+    state.message = `${bld.spec.name} chưa xây xong nên chưa thể nâng cấp!`;
+    render();
+    return;
+  }
   const d = state.data;
   const e = d.entityData;
   const maxLevel = getBuildingMaxLevel(d, bld.targetType);
@@ -6717,7 +6722,7 @@ function openCanvasBuildingMenu(bld) {
 
   // Upgrade building (anim 16) — ONLY when this building has upgrade stage textures in the original game!
   const maxLevel = getBuildingMaxLevel(state.data, bld.targetType);
-  if (level < maxLevel) {
+  if (!bld.underConstruction && level < maxLevel) {
     items.push({
       label: `NÂNG CẤP CẤP ${level + 1}`,
       iconAnim: 16,
@@ -6732,7 +6737,7 @@ function openCanvasBuildingMenu(bld) {
   }
 
   // Repair building (anim 26)
-  if (bld.hp < bld.maxHp) {
+  if (!bld.underConstruction && bld.hp < bld.maxHp) {
     items.push({
       label: 'SỬA CHỮA CÔNG TRÌNH',
       iconAnim: 26,
@@ -7483,7 +7488,9 @@ function updatePanel() {
           }
         }
 
-        if (bld.targetType === 0) {
+        if (bld.underConstruction) {
+          // Unfinished scaffold: only occupant leave / demolish below — no weapons, spells, jobs or upgrades yet!
+        } else if (bld.targetType === 0) {
           // Kho vũ khí: craft & equip all 6 authentic weapons!
           for (const w of WEAPONS) {
             const ok = state.wood >= w.wood && state.stone >= w.stone && state.tools >= w.bones;
@@ -7498,7 +7505,9 @@ function updatePanel() {
           }
         }
 
-        if (bld.targetType === 2) {
+        if (bld.underConstruction) {
+          // no jobs on scaffolds
+        } else if (bld.targetType === 2) {
           addChoiceButton('CỬ DÂN VÀO NGỦ HỒI SỨC (Zzz)', btnIdx++, false, () => {
             const uid = state.selectedUnit || findNearestVillager(bld.x, bld.y, true);
             if (uid && assignRestTask(uid, bld)) {
@@ -7528,11 +7537,11 @@ function updatePanel() {
         }
 
         const maxLevel = getBuildingMaxLevel(state.data, bld.targetType);
-        if (level < maxLevel) {
+        if (!bld.underConstruction && level < maxLevel) {
           const canUp = state.wood >= 15 && state.stone >= 10;
           addChoiceButton(`NÂNG CẤP LÊN CẤP ${level + 1}`, btnIdx++, false, () => performUpgradeBuilding(bld), '🪵15 🪨10', !canUp);
         }
-        if (bld.hp < bld.maxHp) {
+        if (!bld.underConstruction && bld.hp < bld.maxHp) {
           addChoiceButton('SỬA CHỮA CÔNG TRÌNH', btnIdx++, false, () => {
             state.data.entityData[8505 + bld.bid] = bld.maxHp;
             addPopup(bld.x + 1, bld.y, 'Đã sửa đầy HP!', '#9cff7b');

@@ -936,17 +936,8 @@ function drawMenuVillagerFullBody(ctx, data, uid, sx, sy, imageCache) {
   e[2929 + uid] = isChild ? 14 : 8; // Authentic standing full-body pose (adult=8, child=14)
   e[3030 + uid] = 0;
   e[3535 + uid] = 0;
-  ctx.save();
-  if (isChild) {
-    ctx.translate(sx + 12, sy + 13);
-    ctx.scale(0.78, 0.78);
-    drawEntitySprite(ctx, data, uid, -14, -9, 4, 29, imageCache, { menuPreview: true });
-  } else {
-    ctx.translate(sx + 12, sy + 12);
-    ctx.scale(0.62, 0.62);
-    drawEntitySprite(ctx, data, uid, -12, 1, 4, 29, imageCache, { menuPreview: true });
-  }
-  ctx.restore();
+  // Exact 1:1 native pixel port of f.java:2499: this.a(-n10, sx + 1, sy + 13, -8, 29) — ZERO scaling, razor-sharp pixel art!
+  drawEntitySprite(ctx, data, uid, sx + 1, sy + (isChild ? 8 : 10), -8, 29, imageCache, { menuPreview: true });
   e[2929 + uid] = savedAnim;
   e[3030 + uid] = savedFrame;
   e[3535 + uid] = savedCarry;
