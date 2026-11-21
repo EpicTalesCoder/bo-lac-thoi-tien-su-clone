@@ -31,7 +31,10 @@ import {
   spawnNewbornVillager,
   captureTribeCarryover,
   loadScenarioFromMa,
+  MP_MAPS,
+  prepareMultiplayerMatch,
 } from './scenario-loader.js';
+import { MultiplayerClient, packWorldSnapshot, applyWorldSnapshot } from './multiplayer.js';
 import {
   DIFFICULTIES,
   parseStoryD0,
@@ -62,6 +65,14 @@ const midiSynth = new PrehistoricMidiSynth();
 const canvas = document.querySelector('#game');
 let ctx = null;
 let phaserRuntime = null;
+let mpClient = null;
+
+function showMpLobby(visible) {
+  const el = document.getElementById('mp-lobby');
+  if (!el) return;
+  if (visible) el.classList.remove('hidden');
+  else el.classList.add('hidden');
+}
 
 const panelTitle = document.querySelector('#screen-title');
 const panelCopy = document.querySelector('#screen-copy');
@@ -177,6 +188,9 @@ const state = {
   buildPreview: null,
   animTick: 0,
   lastAlertTick: -999,
+  mpMode: true,
+  localTribe: 0, // 0 = Host (Blue Tribe 1..50), 1 = Guest (Red Tribe 51..100)
+  mpWinner: null,
   food: 0,
   wood: 0,
   stone: 0,
@@ -202,62 +216,51 @@ function addDust(x, y, w, h) {
   state.dustEffects.push({ x, y, w, h, frame: 0, maxFrames: 20 });
 }
 
-function syncResourcesToData() {
-  if (!state.data?.resources?.[0]) return;
-  const r = state.data.resources[0];
-  r[0] = state.food;
-  r[1] = state.wood;
-  r[2] = state.stone;
-  r[3] = state.tools;
-  r[11] = state.population;
-  r[16] = state.housingCap;
+function syncResourcesToData(owner = state.localTribe ?? 0) {
+  if (!state.data?.resources) return;
+  if (!state.data.resources[owner]) state.data.resources[owner] = new Array(26).fill(0);
+  if (owner === (state.localTribe ?? 0)) {
+    const r = state.data.resources[owner];
+    r[0] = state.food;
+    r[1] = state.wood;
+    r[2] = state.stone;
+    r[3] = state.tools;
+    r[11] = state.population;
+    r[16] = state.housingCap;
+  }
 }
 
-function getVillagerIds() {
+function pullLocalResourcesFromData() {
+  const owner = state.localTribe ?? 0;
+  const r = state.data?.resources?.[owner];
+  if (!r) return;
+  state.food = r[0] || 0;
+  state.wood = r[1] || 0;
+  state.stone = r[2] || 0;
+  state.tools = r[3] || 0;
+  state.population = getVillagerIds(owner).length;
+  const huts = getPlayerBuildings(owner).filter((b) => !b.underConstruction && b.targetType === 2).length;
+  state.housingCap = Math.max(6, 6 + huts * 6);
+}
+
+function getVillagerIds(owner = state.localTribe ?? 0) {
   if (!state.data) return [];
   const e = state.data.entityData;
+  const start = owner === 1 ? 51 : 1;
+  const end = owner === 1 ? 100 : 50;
   const ids = [];
-  for (let id = 1; id <= 50; id++) {
+  for (let id = start; id <= end; id++) {
     if ((e[1919 + id] & 0xff) > 0) ids.push(id);
   }
   return ids;
 }
 
-function getEnemyIds() {
-  if (!state.data) return [];
-  const e = state.data.entityData;
-  const ids = [];
-  for (let id = 51; id <= 100; id++) {
-    if ((e[1919 + id] & 0xff) > 0) ids.push(id);
-  }
-  return ids;
+function getEnemyIds(owner = state.localTribe ?? 0) {
+  return getVillagerIds(owner === 1 ? 0 : 1);
 }
 
-function getEnemyBuildings() {
-  if (!state.data) return [];
-  const e = state.data.entityData;
-  const list = [];
-  for (let bid = 31; bid <= 60; bid++) {
-    const hp = e[8505 + bid] & 0xff;
-    if (hp <= 0) continue;
-    const rawType = e[8749 + bid];
-    const isScaffold = rawType >= 12 && rawType <= 19;
-    const targetType = isScaffold ? e[9237 + bid] : rawType;
-    const spec = getBuildingSpec(state.data, targetType);
-    list.push({
-      bid,
-      bType: rawType,
-      targetType,
-      x: e[8383 + bid] & 0xff,
-      y: e[8444 + bid] & 0xff,
-      w: spec.width,
-      h: spec.height,
-      hp,
-      maxHp: Math.max(1, e[8566 + bid] & 0xff),
-      spec,
-    });
-  }
-  return list;
+function getEnemyBuildings(owner = state.localTribe ?? 0) {
+  return getPlayerBuildings(owner === 1 ? 0 : 1);
 }
 
 function getActiveSelectionIds() {
@@ -690,11 +693,13 @@ function attackNearestEnemy() {
   render();
 }
 
-function getPlayerBuildings() {
+function getPlayerBuildings(owner = state.localTribe ?? 0) {
   if (!state.data) return [];
   const e = state.data.entityData;
+  const start = owner === 1 ? 31 : 1;
+  const end = owner === 1 ? 60 : 30;
   const list = [];
-  for (let bid = 1; bid <= 30; bid++) {
+  for (let bid = start; bid <= end; bid++) {
     const hp = e[8505 + bid] & 0xff;
     if (hp <= 0) continue;
     const rawType = e[8749 + bid];
@@ -1074,47 +1079,96 @@ function assignBuildTask(unitId, bld, carryWood = false) {
   return true;
 }
 
-function confirmBuildAtCursor() {
-  updateBuildPreview();
-  const bp = state.buildPreview;
+function confirmBuildAtCursor(owner = state.localTribe ?? 0, overridePayload = null) {
+  if (!overridePayload) {
+    updateBuildPreview();
+  }
+  const bp = overridePayload
+    ? {
+        bType: overridePayload.bType,
+        x: overridePayload.x,
+        y: overridePayload.y,
+        spec: getBuildingSpec(state.data, overridePayload.bType),
+        width: getBuildingSpec(state.data, overridePayload.bType).width,
+        height: getBuildingSpec(state.data, overridePayload.bType).height,
+        valid: canPlaceBuilding(state.data, overridePayload.bType, overridePayload.x, overridePayload.y),
+      }
+    : state.buildPreview;
   if (!bp || !bp.valid) {
-    state.message = 'Vị trí này bị vướng vật cản. Hãy di chuyển tới bãi đất/cỏ trống (màu xanh).';
+    if (!overridePayload) {
+      state.message = 'Vị trí này bị vướng vật cản. Hãy di chuyển tới bãi đất/cỏ trống (màu xanh).';
+      render();
+    }
+    return;
+  }
+  // If Guest in 1v1 Multiplayer, forward build command to Host
+  if (state.mpMode && state.localTribe === 1 && !overridePayload) {
+    mpClient?.sendCommand({
+      kind: 'placeBuild',
+      bType: bp.bType,
+      x: bp.x,
+      y: bp.y,
+      unitIds: getActiveSelectionIds(),
+    });
+    cancelBuildPlacement();
+    state.message = `Đã gửi lệnh dựng công trường ${bp.spec.name}!`;
     render();
     return;
   }
+
   const spec = bp.spec;
-  if (state.wood < spec.woodCost || state.stone < spec.stoneCost || state.tools < spec.toolsCost) {
-    state.message = `Không đủ nguyên liệu để xây ${spec.name}!`;
-    cancelBuildPlacement();
-    render();
+  const r = state.data?.resources?.[owner];
+  const curWood = owner === (state.localTribe ?? 0) ? state.wood : (r?.[1] || 0);
+  const curStone = owner === (state.localTribe ?? 0) ? state.stone : (r?.[2] || 0);
+  const curTools = owner === (state.localTribe ?? 0) ? state.tools : (r?.[3] || 0);
+  if (curWood < spec.woodCost || curStone < spec.stoneCost || curTools < spec.toolsCost) {
+    if (!overridePayload) {
+      state.message = `Không đủ nguyên liệu để xây ${spec.name}!`;
+      cancelBuildPlacement();
+      render();
+    }
     return;
   }
 
-  state.wood -= spec.woodCost;
-  state.stone -= spec.stoneCost;
-  state.tools -= spec.toolsCost;
-  const bid = placeConstructionSite(state.data, bp.bType, bp.x, bp.y, 0);
+  if (owner === (state.localTribe ?? 0)) {
+    state.wood -= spec.woodCost;
+    state.stone -= spec.stoneCost;
+    state.tools -= spec.toolsCost;
+    syncResourcesToData(owner);
+  } else if (r) {
+    r[1] = Math.max(0, (r[1] || 0) - spec.woodCost);
+    r[2] = Math.max(0, (r[2] || 0) - spec.stoneCost);
+    r[3] = Math.max(0, (r[3] || 0) - spec.toolsCost);
+  }
+
+  const bid = placeConstructionSite(state.data, bp.bType, bp.x, bp.y, owner);
   if (bid < 0) {
-    state.message = 'Đã đạt giới hạn công trình trên bản đồ.';
-    cancelBuildPlacement();
-    render();
+    if (!overridePayload) {
+      state.message = 'Đã đạt giới hạn công trình trên bản đồ.';
+      cancelBuildPlacement();
+      render();
+    }
     return;
   }
 
-  syncResourcesToData();
-  addPopup(bp.x + Math.floor(bp.width / 2), bp.y, `Công trường ${spec.name}`, '#ffd84d');
-
-  // Dispatch selected or nearest villager carrying wood to enter the scaffold and build
-  const builderId = state.selectedUnit || findNearestVillager(bp.x, bp.y, true);
+  // Dispatch selected or nearest villager of that tribe carrying wood to enter the scaffold and build
+  const builderId =
+    overridePayload?.unitIds?.[0] ||
+    (owner === (state.localTribe ?? 0) ? state.selectedUnit : 0) ||
+    getVillagerIds(owner)[0];
   const bldObj = { bid, x: bp.x, y: bp.y, w: bp.width, h: bp.height, spec };
   if (builderId && assignBuildTask(builderId, bldObj, true)) {
-    const info = getVillagerInfo(builderId);
-    state.message = `Đã dựng công trường ${spec.name}! ${info.role} đang vác gỗ vào công trường thi công.`;
-  } else {
+    if (!overridePayload) {
+      const info = getVillagerInfo(builderId);
+      state.message = `Đã dựng công trường ${spec.name}! ${info.role} đang vác gỗ vào công trường thi công.`;
+    }
+  } else if (!overridePayload) {
     state.message = `Đã dựng công trường ${spec.name} tại (${bp.x}, ${bp.y}). Click dân rồi click công trường để xây.`;
   }
-  cancelBuildPlacement();
-  render();
+  if (!overridePayload) {
+    cancelBuildPlacement();
+    render();
+  }
 }
 
 function selectUnit(unitId) {
@@ -1601,8 +1655,8 @@ function performDemolishBuilding(bld) {
   render();
 }
 
-function findNearestDropoff(x, y) {
-  const finished = getPlayerBuildings().filter((b) => !b.underConstruction);
+function findNearestDropoff(x, y, owner = state.localTribe ?? 0) {
+  const finished = getPlayerBuildings(owner).filter((b) => !b.underConstruction);
   // In the original game (b.java:819 & /0/d0[20]), gathered resources (wood, stone, meat, fish, berries, bones)
   // are ONLY deposited into a finished Kho chứa (targetType === 6) or Lều của Tù trưởng (targetType === 3)!
   const storageBuildings = finished.filter((b) => b.targetType === 6 || b.targetType === 3);
@@ -1660,53 +1714,71 @@ function assignHuntTask(unitId, animalOcc) {
   return true;
 }
 
-function commandUnitTo(tx, ty) {
+function commandUnitTo(tx, ty, overrideIds = null, owner = state.localTribe ?? 0) {
   const d = state.data;
-  const activeIds = getActiveSelectionIds();
+  const activeIds = overrideIds ? overrideIds.filter((id) => (d?.entityData?.[1919 + id] & 0xff) > 0) : getActiveSelectionIds();
   if (!d || activeIds.length === 0) return;
-  const unitId = activeIds[0];
-  const occ = d.occupancy[ty]?.[tx] ?? 0;
 
-  // Click an enemy warrior (51..100) to attack with selected unit(s)
-  if (occ >= 51 && occ <= 100) {
-    const dispatched = issueGroupAttack(activeIds, 'unit', occ);
-    if (dispatched > 0) {
-      state.message =
-        dispatched > 1
-          ? `${dispatched} chiến binh đang xung phong tấn công quân địch!`
-          : `${getVillagerInfo(unitId).role} đang tấn công chiến binh địch!`;
-      render();
-      return;
-    }
-    state.message = 'Không tìm được đường tiếp cận chiến binh địch.';
-    render();
+  // If Guest in 1v1 Multiplayer, forward command to Host!
+  if (state.mpMode && state.localTribe === 1 && !overrideIds) {
+    mpClient?.sendCommand({ kind: 'commandTo', tx, ty, unitIds: activeIds });
     return;
   }
 
-  // Click an enemy building (-31..-60) to attack/raze with selected unit(s)
-  if (occ <= -31 && occ >= -60) {
+  const unitId = activeIds[0];
+  const occ = d.occupancy[ty]?.[tx] ?? 0;
+  const isEnemyUnitOcc = owner === 1 ? occ >= 1 && occ <= 50 : occ >= 51 && occ <= 100;
+  const isEnemyBldOcc = owner === 1 ? occ <= -1 && occ >= -30 : occ <= -31 && occ >= -60;
+  const isOwnBldOcc = owner === 1 ? occ <= -31 && occ >= -60 : occ <= -1 && occ >= -30;
+
+  // Click an enemy warrior to attack with selected unit(s)
+  if (isEnemyUnitOcc) {
+    const dispatched = issueGroupAttack(activeIds, 'unit', occ);
+    if (dispatched > 0) {
+      if (!overrideIds) {
+        state.message =
+          dispatched > 1
+            ? `${dispatched} chiến binh đang xung phong tấn công quân địch!`
+            : `${getVillagerInfo(unitId).role} đang tấn công chiến binh địch!`;
+        render();
+      }
+      return;
+    }
+    if (!overrideIds) {
+      state.message = 'Không tìm được đường tiếp cận chiến binh địch.';
+      render();
+    }
+    return;
+  }
+
+  // Click an enemy building to attack/raze with selected unit(s)
+  if (isEnemyBldOcc) {
     const bid = -occ;
-    const ebld = getEnemyBuildings().find((b) => b.bid === bid);
+    const ebld = getEnemyBuildings(owner).find((b) => b.bid === bid);
     if (ebld) {
       const dispatched = issueGroupAttack(activeIds, 'building', bid);
       if (dispatched > 0) {
-        state.message =
-          dispatched > 1
-            ? `${dispatched} chiến binh đang tấn công ${ebld.spec.name} của địch!`
-            : `${getVillagerInfo(unitId).role} đang phá hủy ${ebld.spec.name} của địch!`;
-        render();
+        if (!overrideIds) {
+          state.message =
+            dispatched > 1
+              ? `${dispatched} chiến binh đang tấn công ${ebld.spec.name} của địch!`
+              : `${getVillagerInfo(unitId).role} đang phá hủy ${ebld.spec.name} của địch!`;
+          render();
+        }
         return;
       }
-      state.message = `Không tìm được đường tiếp cận ${ebld.spec.name} của địch.`;
-      render();
+      if (!overrideIds) {
+        state.message = `Không tìm được đường tiếp cận ${ebld.spec.name} của địch.`;
+        render();
+      }
       return;
     }
   }
 
-  // Click an unfinished building to build, or a finished Lều to rest / Bếp to eat
-  if (occ <= -1 && occ >= -30) {
+  // Click an own unfinished building to build, or a finished Lều to rest / Bếp to eat
+  if (isOwnBldOcc) {
     const bid = -occ;
-    const bld = getPlayerBuildings().find((b) => b.bid === bid);
+    const bld = getPlayerBuildings(owner).find((b) => b.bid === bid);
     if (bld && bld.underConstruction) {
       let builders = 0;
       for (const uid of activeIds) {
@@ -2282,6 +2354,8 @@ function stepUnitMovement(unitId, task, isEnemy = false) {
 
 function stepSimulation() {
   if (!state.data || state.phase !== 'game' || state.paused || state.storyDialog || state.missionResult) return;
+  // In 1v1 Multiplayer, Guest (Tribe 1) receives authoritative world snapshots from Host!
+  if (state.mpMode && state.localTribe === 1) return;
   state.lastSimTime = performance.now();
   state.animTick++;
   const d = state.data;
@@ -2506,7 +2580,8 @@ function stepSimulation() {
       addPopup(ux, uy, `+${cap} ${gt.label}`, '#c5f285');
 
       // Immediately carry bundle back to nearest finished Chief's Tent or Storage (anim 1)
-      const dropoff = findNearestDropoff(ux, uy);
+      const unitOwner = unitId > 50 ? 1 : 0;
+      const dropoff = findNearestDropoff(ux, uy, unitOwner);
       if (dropoff) {
         const retPath = findPath(ux, uy, dropoff.x, dropoff.y, unitId, false, dropoff);
         if (retPath !== null) {
@@ -2525,18 +2600,27 @@ function stepSimulation() {
         }
       }
       // Fallback direct deposit if no dropoff reachable
-      if (gt.type === 'wood') state.wood += cap;
-      else if (gt.type === 'stone') state.stone += cap;
-      else if (gt.type === 'bones') state.tools += cap;
-      else state.food += cap;
+      if (unitOwner === (state.localTribe ?? 0)) {
+        if (gt.type === 'wood') state.wood += cap;
+        else if (gt.type === 'stone') state.stone += cap;
+        else if (gt.type === 'bones') state.tools += cap;
+        else state.food += cap;
+        syncResourcesToData(unitOwner);
+      } else if (d.resources?.[unitOwner]) {
+        const r = d.resources[unitOwner];
+        if (gt.type === 'wood') r[1] = (r[1] || 0) + cap;
+        else if (gt.type === 'stone') r[2] = (r[2] || 0) + cap;
+        else if (gt.type === 'bones') r[3] = (r[3] || 0) + cap;
+        else r[0] = (r[0] || 0) + cap;
+      }
       setUnitCarry(unitId, 0, 0);
-      syncResourcesToData();
       setUnitAnim(unitId, 8, 0);
       state.tasks.delete(unitId);
       uiChanged = true;
     } else if (task.kind === 'return') {
       const carry = task.carrying;
       const dropoff = task.target;
+      const unitOwner = unitId > 50 ? 1 : 0;
       e[606 + unitId] = directionFromDelta(dropoff.x + Math.floor(dropoff.w / 2) - ux, dropoff.y + Math.floor(dropoff.h / 2) - uy);
       // Authentic unloading animation: anim 22 (14 frames), sets bundle down at frame 10
       const frame = task.workTicks;
@@ -2544,9 +2628,19 @@ function stepSimulation() {
         setUnitAnim(unitId, 22, frame);
         if (frame === 10 && carry) {
           setUnitCarry(unitId, 0, 0);
-          if (carry.type === 'wood') state.wood += carry.amount;
-          else if (carry.type === 'stone') state.stone += carry.amount;
-          else if (carry.type === 'bones') state.tools += carry.amount;
+          if (unitOwner === (state.localTribe ?? 0)) {
+            if (carry.type === 'wood') state.wood += carry.amount;
+            else if (carry.type === 'stone') state.stone += carry.amount;
+            else if (carry.type === 'bones') state.tools += carry.amount;
+            else state.food += carry.amount;
+            syncResourcesToData(unitOwner);
+          } else if (d.resources?.[unitOwner]) {
+            const r = d.resources[unitOwner];
+            if (carry.type === 'wood') r[1] = (r[1] || 0) + carry.amount;
+            else if (carry.type === 'stone') r[2] = (r[2] || 0) + carry.amount;
+            else if (carry.type === 'bones') r[3] = (r[3] || 0) + carry.amount;
+            else r[0] = (r[0] || 0) + carry.amount;
+          }
           else state.food += carry.amount;
           syncResourcesToData();
           addPopup(ux, uy, `Nộp +${carry.amount} ${carry.label}`, '#fff37b');
@@ -3073,28 +3167,55 @@ function stepSimulation() {
     }
   }
 
-  // Wild animal movement & animation, flying projectiles, and Enemy Tribe AI
+  // Wild animal movement & animation, flying projectiles, and Enemy Tribe AI (disabled in 1v1 PvP!)
   stepWildAnimals();
   if (stepProjectiles()) uiChanged = true;
-  if (stepEnemyAI()) uiChanged = true;
+  if (!state.mpMode && stepEnemyAI()) uiChanged = true;
 
   // Periodic villager survival needs, thought bubbles, auto self-care & tribe births
   if (state.animTick % 28 === 0) {
     if (stepVillagerNeeds()) uiChanged = true;
   }
 
-  // Periodic Tribe Auto-AI assignment
-  if (state.animTick % 18 === 0) {
+  // Periodic Tribe Auto-AI assignment (disabled in 1v1 PvP so player has full control)
+  if (!state.mpMode && state.animTick % 18 === 0) {
     runTribeAutoAI();
   }
 
   // Keep overhead job badges (e[2222]) strictly synced with each villager's actual current task
-  for (const id of getVillagerIds()) {
+  for (const id of getVillagerIds(0)) {
     syncUnitJobBadge(id);
   }
+  if (state.mpMode) {
+    for (const id of getVillagerIds(1)) {
+      syncUnitJobBadge(id);
+    }
+  }
 
-  // Evaluate Victory / Defeat mission objectives periodically
-  if (!state.victoryDismissed && state.animTick % 12 === 0) {
+  // Evaluate 1v1 Multiplayer Victory OR Campaign Mission Victory
+  if (state.mpMode && state.localTribe === 0 && state.mpWinner === null && state.animTick % 10 === 0) {
+    const t0Alive = getVillagerIds(0).length;
+    const t1Alive = getVillagerIds(1).length;
+    if (t1Alive === 0 || t0Alive === 0) {
+      state.mpWinner = t1Alive === 0 ? 0 : 1;
+      const hostWon = state.mpWinner === 0;
+      state.missionResult = {
+        status: hostWon ? 'victory' : 'defeat',
+        reason: hostWon ? 'Bộ lạc Xanh đã đánh bại Bộ lạc Đỏ!' : 'Bộ lạc Đỏ đã chiến thắng trận đấu!',
+        epilogue: '',
+        score: {
+          population: t0Alive,
+          buildingsBuilt: state.missionStats.buildingsBuilt,
+          enemiesKilled: state.missionStats.enemiesKilled,
+          enemyBuildingsDestroyed: state.missionStats.enemyBuildingsDestroyed,
+          resourcesTotal: state.food + state.wood + state.stone + state.tools,
+          totalScore: (t0Alive * 100) + (state.missionStats.enemiesKilled * 50),
+        },
+      };
+      state.message = hostWon ? '🏆 CHIẾN THẮNG! Bộ lạc Xanh đã giành thắng lợi!' : '💀 THẤT BẠI! Bộ lạc Đỏ đã chiến thắng!';
+      uiChanged = true;
+    }
+  } else if (!state.mpMode && !state.victoryDismissed && state.animTick % 12 === 0) {
     const evalRes = getCurrentMissionEvaluation();
     if (evalRes.status === 'victory' || evalRes.status === 'defeat') {
       const score = computeMissionScore({
@@ -3126,6 +3247,11 @@ function stepSimulation() {
         e[fo[30] + id] = (e[fo[30] + id] + 1) % frameCount;
       }
     }
+  }
+
+  // Broadcast authoritative world snapshot from Host -> Guest in 1v1 Multiplayer
+  if (state.mpMode && state.localTribe === 0 && mpClient?.connected) {
+    mpClient.sendSnapshot(packWorldSnapshot(d, state));
   }
 
   draw();
@@ -4799,6 +4925,14 @@ function confirm() {
       return;
     }
     if (state.missionResult) {
+      if (state.mpMode) {
+        state.missionResult = null;
+        state.mpWinner = null;
+        mpClient?.returnToLobby();
+        showMpLobby(true);
+        render();
+        return;
+      }
       if (state.missionResult.status === 'victory' && !state.isCustomGame && state.scenarioIndex < SCENARIOS.length - 1) {
         proceedToNextMission();
       } else {
@@ -4817,12 +4951,18 @@ function confirm() {
     }
     const { x, y } = state.cursor;
     const occ = state.data.occupancy[y]?.[x] ?? 0;
-    if (occ >= 1 && occ <= 50) {
+    const myTribe = state.localTribe ?? 0;
+    const isOwnUnitOcc = myTribe === 1 ? occ >= 51 && occ <= 100 : occ >= 1 && occ <= 50;
+    const isEnemyUnitOcc = myTribe === 1 ? occ >= 1 && occ <= 50 : occ >= 51 && occ <= 100;
+    const isOwnBldOcc = myTribe === 1 ? occ <= -31 && occ >= -60 : occ <= -1 && occ >= -30;
+    const isEnemyBldOcc = myTribe === 1 ? occ <= -1 && occ >= -30 : occ <= -31 && occ >= -60;
+
+    if (isOwnUnitOcc) {
       selectUnit(occ);
       return;
     }
-    if (occ <= -1 && occ >= -30) {
-      const bld = getPlayerBuildings().find((b) => b.bid === -occ);
+    if (isOwnBldOcc) {
+      const bld = getPlayerBuildings(myTribe).find((b) => b.bid === -occ);
       if (bld && bld.underConstruction && getActiveSelectionIds().length > 0) {
         commandUnitTo(x, y);
         return;
@@ -4837,12 +4977,12 @@ function confirm() {
     }
     if (getActiveSelectionIds().length > 0) {
       commandUnitTo(x, y);
-    } else if (occ >= 51 && occ <= 100) {
+    } else if (isEnemyUnitOcc) {
       const ehp = state.data.entityData[1919 + occ] & 0xff;
       const emax = state.data.entityData[6767 + occ] & 0xff;
       state.message = `Chiến binh địch (HP ${ehp}/${emax}) — hãy chọn chiến binh của bạn trước để tấn công!`;
       render();
-    } else if (occ <= -31 && occ >= -60) {
+    } else if (isEnemyBldOcc) {
       const ebld = getEnemyBuildings().find((b) => b.bid === -occ);
       state.message = ebld
         ? `${ebld.spec.name} của địch (HP ${ebld.hp}/${ebld.maxHp}) — hãy chọn chiến binh để phá hủy!`
@@ -5226,6 +5366,16 @@ function finishCanvasPointerDrag(event, cancelled = false) {
 
   if (isDoubleClick && activeIds.length > 0) {
     // Double left-click with villager(s) already selected -> SPRINT (e[7777]=1, authentic anim 7, ~2x speed)!
+    if (state.mpMode && state.localTribe === 1) {
+      mpClient?.sendCommand({ kind: 'sprint', tx: cell.x, ty: cell.y, unitIds: activeIds });
+      state.message =
+        activeIds.length > 1
+          ? `🏃 ${activeIds.length} dân làng đang chạy nhanh!`
+          : `🏃 ${getVillagerInfo(activeIds[0]).role} đang chạy nhanh!`;
+      render();
+      lastMapClick = { time: 0, x: -99, y: -99 };
+      return;
+    }
     // Ensure a movement task exists if not already moving
     const anyMoving = activeIds.some((id) => state.tasks.get(id)?.path?.length > 0);
     if (!anyMoving) {
@@ -5444,14 +5594,249 @@ Promise.all([
     });
     syncViewportToWindow();
 
-    if (requested === 'game' || requested === 'strategy') {
+    // === 1v1 Multiplayer Lobby & Real-Time Sync Setup ===
+    const mpHomeView = document.getElementById('mp-home-view');
+    const mpRoomView = document.getElementById('mp-room-view');
+    const mpNameInput = document.getElementById('mp-name-input');
+    const mpCodeInput = document.getElementById('mp-code-input');
+    const mpCreateBtn = document.getElementById('mp-create-btn');
+    const mpJoinBtn = document.getElementById('mp-join-btn');
+    const mpCopyBtn = document.getElementById('mp-copy-btn');
+    const mpOpenTab2Btn = document.getElementById('mp-open-tab2-btn');
+    const mpLeaveBtn = document.getElementById('mp-leave-btn');
+    const mpReadyBtn = document.getElementById('mp-ready-btn');
+    const mpMapSelect = document.getElementById('mp-map-select');
+    const mpRoomCodeDisplay = document.getElementById('mp-room-code-display');
+    const mpHostNameEl = document.getElementById('mp-host-name');
+    const mpHostStatusEl = document.getElementById('mp-host-status');
+    const mpGuestNameEl = document.getElementById('mp-guest-name');
+    const mpGuestStatusEl = document.getElementById('mp-guest-status');
+    const mpCountdownEl = document.getElementById('mp-countdown-banner');
+    const mpHomeMsgEl = document.getElementById('mp-home-msg');
+    const mpRoomMsgEl = document.getElementById('mp-room-msg');
+    const openLobbyToolbarBtn = document.getElementById('btn-mp-lobby');
+
+    if (mpMapSelect) {
+      mpMapSelect.innerHTML = '';
+      for (const m of MP_MAPS) {
+        const opt = document.createElement('option');
+        opt.value = String(m.scenarioIndex);
+        opt.textContent = m.name;
+        mpMapSelect.appendChild(opt);
+      }
+    }
+
+    const executeGuestCommand = (cmd) => {
+      if (!cmd || !state.data || state.localTribe !== 0) return;
+      const e = state.data.entityData;
+      if (cmd.kind === 'commandTo') {
+        const ids = (cmd.unitIds || []).filter((id) => id >= 51 && id <= 100 && (e[1919 + id] & 0xff) > 0);
+        for (const id of ids) e[7777 + id] = 0;
+        if (ids.length > 0) commandUnitTo(cmd.tx, cmd.ty, ids, 1);
+      } else if (cmd.kind === 'sprint') {
+        const ids = (cmd.unitIds || []).filter((id) => id >= 51 && id <= 100 && (e[1919 + id] & 0xff) > 0);
+        if (ids.length > 0) {
+          const anyMoving = ids.some((id) => state.tasks.get(id)?.path?.length > 0);
+          if (!anyMoving) commandUnitTo(cmd.tx, cmd.ty, ids, 1);
+          for (const id of ids) {
+            if (state.tasks.get(id)?.path?.length > 0 && (e[1414 + id] & 0xff) >= 12 && (e[3535 + id] & 0xff) === 0) {
+              e[7777 + id] = 1;
+            }
+          }
+        }
+      } else if (cmd.kind === 'placeBuild') {
+        confirmBuildAtCursor(1, cmd);
+      }
+    };
+
+    const startMultiplayerMatch = (mapIdx, myTribe) => {
+      state.mpMode = true;
+      state.localTribe = myTribe;
+      state.mpWinner = null;
+      state.missionResult = null;
+      state.storyDialog = null;
+      state.canvasMenu = null;
+      state.buildType = null;
+      state.buildPreview = null;
+      state.showMinimap = false;
+      state.tasks.clear();
+      state.enemyTasks.clear();
+      state.projectiles = [];
+      state.dustEffects = [];
+      state.selectedUnits.clear();
+      state.scenarioIndex = mapIdx;
+
+      state.data = prepareMultiplayerMatch(baseData, maBytes, mapIdx, myTribe);
+      pullLocalResourcesFromData();
+      const myUnits = getVillagerIds(myTribe);
+      state.selectedUnit = myUnits[0] || 0;
+      if (state.selectedUnit) state.selectedUnits = new Set([state.selectedUnit]);
+      state.cameraX = state.data.cameraX;
+      state.cameraY = state.data.cameraY;
+      state.smoothCamX = state.cameraX;
+      state.smoothCamY = state.cameraY;
+      state.cursor = { x: state.data.cursorX, y: state.data.cursorY };
+      state.phase = 'game';
+      state.paused = false;
+      state.message =
+        myTribe === 0
+          ? '🟢 Trận đấu 1v1 bắt đầu! Bạn điều khiển BỘ LẠC XANH (Chủ phòng).'
+          : '🔴 Trận đấu 1v1 bắt đầu! Bạn điều khiển BỘ LẠC ĐỎ (Khách).';
+      clampCamera();
+      showMpLobby(false);
+      render();
+    };
+
+    const updateLobbyUI = (lob) => {
+      if (!lob) return;
+      const inRoom = lob.status !== 'idle';
+      mpHomeView?.classList.toggle('hidden', inRoom);
+      mpRoomView?.classList.toggle('hidden', !inRoom);
+      if (!inRoom) return;
+
+      if (mpRoomCodeDisplay) mpRoomCodeDisplay.textContent = lob.roomCode || '----';
+      if (mpHostNameEl) mpHostNameEl.textContent = lob.hostName || 'Tù trưởng Xanh';
+      if (mpHostStatusEl) {
+        mpHostStatusEl.textContent = lob.hostReady ? '✓ ĐÃ SẴN SÀNG' : 'Chưa sẵn sàng';
+        mpHostStatusEl.classList.toggle('ready', Boolean(lob.hostReady));
+      }
+      if (mpGuestNameEl) mpGuestNameEl.textContent = lob.guestJoined ? lob.guestName || 'Tù trưởng Đỏ' : 'Đang chờ đối thủ...';
+      if (mpGuestStatusEl) {
+        mpGuestStatusEl.textContent = !lob.guestJoined ? 'Trống' : lob.guestReady ? '✓ ĐÃ SẴN SÀNG' : 'Chưa sẵn sàng';
+        mpGuestStatusEl.classList.toggle('ready', Boolean(lob.guestJoined && lob.guestReady));
+      }
+      if (mpMapSelect) {
+        mpMapSelect.value = String(lob.mapIdx ?? 1);
+        mpMapSelect.disabled = lob.role !== 'host' || lob.status === 'countdown';
+      }
+      const myReady = lob.role === 'host' ? lob.hostReady : lob.guestReady;
+      if (mpReadyBtn) {
+        mpReadyBtn.disabled = !lob.guestJoined && lob.role === 'host';
+        mpReadyBtn.classList.toggle('is-ready', Boolean(myReady));
+        mpReadyBtn.textContent = myReady ? '✕ HỦY SẴN SÀNG' : '✓ SẴN SÀNG CHIẾN ĐẤU';
+      }
+      if (mpCountdownEl) {
+        if (lob.status === 'countdown' && lob.countdown > 0) {
+          mpCountdownEl.classList.remove('hidden');
+          mpCountdownEl.textContent = `⚔️ CẢ 2 ĐÃ SẴN SÀNG! BẮT ĐẦU SAU ${lob.countdown}...`;
+        } else {
+          mpCountdownEl.classList.add('hidden');
+        }
+      }
+      if (mpRoomMsgEl) {
+        mpRoomMsgEl.textContent = !lob.guestJoined
+          ? `Gửi mã phòng ${lob.roomCode} hoặc bấm "Mở Tab 2" để đối thủ vào phòng (${lob.transport || 'Đang mở kết nối...'}).`
+          : `Đã kết nối (${lob.transport || 'P2P'})! Cả 2 hãy bấm Sẵn sàng để bắt đầu trận đấu.`;
+      }
+    };
+
+    mpClient = new MultiplayerClient({
+      onLobbyUpdate(lob) {
+        updateLobbyUI(lob);
+      },
+      onStartMatch(mapIdx, myTribe) {
+        startMultiplayerMatch(mapIdx, myTribe);
+      },
+      onGuestCommand(cmd) {
+        executeGuestCommand(cmd);
+      },
+      onSnapshot(snap) {
+        if (!state.data || state.localTribe !== 1) return;
+        applyWorldSnapshot(state.data, state, snap, revealFog, getBuildingSpec);
+        pullLocalResourcesFromData();
+        if (snap.winner !== null && snap.winner !== undefined && !state.missionResult) {
+          const guestWon = snap.winner === 1;
+          state.missionResult = {
+            status: guestWon ? 'victory' : 'defeat',
+            reason: guestWon ? 'Bộ lạc Đỏ đã đánh bại Bộ lạc Xanh!' : 'Bộ lạc Xanh đã chiến thắng trận đấu!',
+            epilogue: '',
+            score: {
+              population: state.population,
+              buildingsBuilt: 0,
+              enemiesKilled: 0,
+              enemyBuildingsDestroyed: 0,
+              resourcesTotal: state.food + state.wood + state.stone + state.tools,
+              totalScore: state.population * 100,
+            },
+          };
+        }
+        draw();
+      },
+      onReturnLobby() {
+        state.missionResult = null;
+        showMpLobby(true);
+      },
+      onDisconnect(reason) {
+        if (mpRoomMsgEl) mpRoomMsgEl.textContent = reason;
+        state.message = reason;
+      },
+    });
+
+    mpCreateBtn?.addEventListener('click', () => {
+      const name = mpNameInput?.value?.trim() || 'Tù trưởng Xanh';
+      const mapIdx = Number.parseInt(mpMapSelect?.value || '1', 10) || 1;
+      mpClient.createRoom(name, mapIdx);
+    });
+    mpJoinBtn?.addEventListener('click', () => {
+      const code = mpCodeInput?.value?.trim();
+      if (!code) {
+        if (mpHomeMsgEl) mpHomeMsgEl.textContent = 'Vui lòng nhập mã phòng 4 số từ Chủ phòng!';
+        return;
+      }
+      const name = mpNameInput?.value?.trim() || 'Tù trưởng Đỏ';
+      mpClient.joinRoom(code, name);
+    });
+    mpMapSelect?.addEventListener('change', () => {
+      const idx = Number.parseInt(mpMapSelect.value, 10) || 1;
+      mpClient.setMap(idx);
+    });
+    mpReadyBtn?.addEventListener('click', () => {
+      const myReady = mpClient.role === 'host' ? mpClient.lobby.hostReady : mpClient.lobby.guestReady;
+      mpClient.setReady(!myReady);
+    });
+    mpCopyBtn?.addEventListener('click', () => {
+      const url = `${window.location.origin}${window.location.pathname}?room=${mpClient.roomCode}`;
+      navigator.clipboard?.writeText(url).catch(() => {});
+      if (mpRoomMsgEl) mpRoomMsgEl.textContent = `📋 Đã copy link mời: ${url}`;
+    });
+    mpOpenTab2Btn?.addEventListener('click', () => {
+      const url = `${window.location.origin}${window.location.pathname}?room=${mpClient.roomCode}&autojoin=1`;
+      window.open(url, '_blank');
+    });
+    mpLeaveBtn?.addEventListener('click', () => {
+      mpClient.leaveRoom();
+      updateLobbyUI({ ...mpClient.lobby, role: null, connected: false });
+    });
+    openLobbyToolbarBtn?.addEventListener('click', () => {
+      const el = document.getElementById('mp-lobby');
+      showMpLobby(el?.classList.contains('hidden'));
+    });
+
+    // Render live background map behind the Multiplayer Lobby
+    state.data = prepareMultiplayerMatch(baseData, maBytes, 1, 0);
+    state.phase = 'game';
+    state.paused = true;
+    state.cameraX = state.data.cameraX;
+    state.cameraY = state.data.cameraY;
+    state.smoothCamX = state.cameraX;
+    state.smoothCamY = state.cameraY;
+    draw();
+
+    const roomParam = params.get('room');
+    if (roomParam) {
+      if (mpCodeInput) mpCodeInput.value = roomParam;
+      if (mpNameInput) mpNameInput.value = 'Tù trưởng Đỏ';
+      showMpLobby(true);
+      if (params.get('autojoin') === '1') {
+        mpClient.joinRoom(roomParam, 'Tù trưởng Đỏ');
+      }
+    } else if (requested === 'game' || requested === 'strategy') {
+      state.mpMode = false;
+      state.paused = false;
+      showMpLobby(false);
       loadScenario(startScenario, { showStory: wantStory });
-    } else if (requested === 'custom') {
-      state.data = loadScenarioFromMa(baseData, maBytes, 0);
-      setPhase('customSetup');
     } else {
-      state.data = loadScenarioFromMa(baseData, maBytes, 0);
-      setPhase('language');
+      showMpLobby(true);
     }
   })
   .catch((err) => {

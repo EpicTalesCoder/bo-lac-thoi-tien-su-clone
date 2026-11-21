@@ -14,9 +14,82 @@
 
         <div class="floating-toolbar" aria-label="Tiện ích cửa sổ">
           <span class="runtime-badge" id="viewport-badge"><span></span> WebGL · 60 FPS</span>
+          <button type="button" id="btn-mp-lobby" title="Mở phòng Multiplayer 1v1">⚔️ Phòng</button>
           <button type="button" id="btn-zoom" title="Đổi độ phóng đại pixel (1x / 2x / 3x)">🔍 2x</button>
           <button type="button" id="btn-fullscreen" title="Toàn màn hình (Fullscreen)">⛶</button>
           <button type="button" id="btn-toggle-drawer" title="Mở/đóng bảng phụ debug">⚙</button>
+        </div>
+
+        <!-- 1v1 Multiplayer Lobby Overlay -->
+        <div class="mp-lobby-overlay" id="mp-lobby" role="dialog" aria-label="Phòng chơi Multiplayer 1v1">
+          <div class="mp-card">
+            <div class="mp-brand">
+              <span class="mp-pill">⚔️ CHẾ ĐỘ ĐỐI KHÁNG 1v1 REAL-TIME</span>
+              <h1>Prehistoric Tribes</h1>
+              <p class="mp-sub">Tạo phòng & mời bạn chơi 2 bên bản đồ — cả 2 bấm Sẵn sàng để vào trận!</p>
+            </div>
+
+            <!-- Landing: Create or Join -->
+            <div id="mp-home-view" class="mp-view">
+              <label class="mp-field">
+                <span>TÊN TÙ TRƯỞNG CỦA BẠN</span>
+                <input type="text" id="mp-name-input" maxlength="16" value="Tù trưởng" placeholder="Nhập tên của bạn..." />
+              </label>
+
+              <button type="button" id="mp-create-btn" class="mp-btn mp-btn-primary">
+                🏰 TẠO PHÒNG MỚI (BỘ LẠC XANH)
+              </button>
+
+              <div class="mp-divider"><span>HOẶC VÀO PHÒNG ĐÃ CÓ</span></div>
+
+              <div class="mp-join-row">
+                <input type="text" id="mp-code-input" maxlength="6" placeholder="Nhập mã phòng (VD: 4829)" />
+                <button type="button" id="mp-join-btn" class="mp-btn mp-btn-danger">⚔️ VÀO PHÒNG</button>
+              </div>
+              <p class="mp-hint" id="mp-home-msg">Hỗ trợ chơi qua mạng (WebRTC P2P) hoặc mở 2 tab trên cùng máy để test ngay!</p>
+            </div>
+
+            <!-- Room Waiting View -->
+            <div id="mp-room-view" class="mp-view hidden">
+              <div class="mp-room-bar">
+                <div>
+                  <span class="mp-room-label">MÃ PHÒNG</span>
+                  <strong class="mp-room-code" id="mp-room-code-display">----</strong>
+                </div>
+                <div class="mp-room-actions">
+                  <button type="button" id="mp-copy-btn" class="mp-btn-sm">📋 Copy Link</button>
+                  <button type="button" id="mp-open-tab2-btn" class="mp-btn-sm">🪟 Mở Tab 2</button>
+                  <button type="button" id="mp-leave-btn" class="mp-btn-sm mp-btn-ghost">Rời phòng</button>
+                </div>
+              </div>
+
+              <div class="mp-versus">
+                <div class="mp-slot mp-slot-blue">
+                  <span class="mp-tribe-tag">🟢 BỘ LẠC XANH · TRIBE 1</span>
+                  <strong id="mp-host-name">Đang chờ...</strong>
+                  <span class="mp-ready-badge" id="mp-host-status">Chưa sẵn sàng</span>
+                </div>
+                <div class="mp-vs-badge">VS</div>
+                <div class="mp-slot mp-slot-red">
+                  <span class="mp-tribe-tag">🔴 BỘ LẠC ĐỎ · TRIBE 2</span>
+                  <strong id="mp-guest-name">Đang chờ đối thủ...</strong>
+                  <span class="mp-ready-badge" id="mp-guest-status">Trống</span>
+                </div>
+              </div>
+
+              <label class="mp-field">
+                <span>BẢN ĐỒ CHIẾN ĐẤU (2 BỘ LẠC ĐỐI ĐẦU CÂN BẰNG)</span>
+                <select id="mp-map-select"></select>
+              </label>
+
+              <div class="mp-countdown hidden" id="mp-countdown-banner">Trận đấu bắt đầu sau 3...</div>
+
+              <button type="button" id="mp-ready-btn" class="mp-btn mp-btn-ready">
+                ✓ SẴN SÀNG CHIẾN ĐẤU
+              </button>
+              <p class="mp-hint" id="mp-room-msg">Khi cả 2 người chơi đều bấm Sẵn sàng, trận đấu sẽ tự động bắt đầu!</p>
+            </div>
+          </div>
         </div>
 
         <aside class="side-panel" id="side-drawer" aria-hidden="true">
@@ -45,6 +118,7 @@
       </section>
     </main>
     <script src="https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.min.js"></script>
+    <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
     <script type="module" src="game.js"></script>
   </body>
 </html>

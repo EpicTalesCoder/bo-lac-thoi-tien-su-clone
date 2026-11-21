@@ -340,7 +340,8 @@ function drawMapObject(ctx, data, n, layer, ah, ai, camX, camY, originY, animTic
       if (n8 === 6 && resCounter < 5) {
         // Exact port of f.java:1063-1072 using mo[142] = [25(weapons), 2(stone), 1(wood), 3(bones), 4(special)]:
         // Only draw each pile when that exact resource > 0, scaling strictly from lvl 0 (small) to lvl 4 (full)!
-        const resArr = data.resources?.[0] || [];
+        const resOwner = n9 > 30 ? 1 : 0;
+        const resArr = data.resources?.[resOwner] || [];
         const weaponsAmt =
           (resArr[5] || 0) +
           (resArr[6] || 0) +
@@ -356,9 +357,9 @@ function drawMapObject(ctx, data, n, layer, ah, ai, camX, camY, originY, animTic
           resArr[4] || 0,   // U=4 (comp 1268..1272): Special/Extra (res[4])
         ];
         const amt = resSlotMap[resCounter] || 0;
-        if (amt > 0 || n9 >= 31) {
+        if (amt > 0) {
           const step = resCounter === 0 ? 3 : 10;
-          const lvl = n9 >= 31 ? 4 : Math.min(4, Math.floor((amt - 1) / step));
+          const lvl = Math.min(4, Math.floor((amt - 1) / step));
           drawComposite(ctx, data, (shorts[1][idx] & 0xfff) + lvl, px, py, imageCache);
         }
         resCounter++;
@@ -783,7 +784,8 @@ export function drawOriginalVillagerHud(ctx, data, state, imageCache) {
 }
 
 export function drawOriginalHud(ctx, data, state, imageCache) {
-  const res = data.resources?.[0] || [];
+  const localTribe = state.localTribe ?? 0;
+  const res = data.resources?.[localTribe] || [];
   const pop = state.population ?? res[11] ?? 9;
   const cap = state.housingCap ?? res[16] ?? 1;
   const food = state.food ?? res[0] ?? 0;
@@ -1187,7 +1189,7 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
   const curWY = state.cursor?.y ?? data.cursorY;
   if (curWY >= 0 && curWY < data.height && curWX >= 0 && curWX < data.width) {
     const curOcc = data.occupancy[curWY][curWX];
-    if (buildingOwner(curOcc) === 0) {
+    if (buildingOwner(curOcc) === (state.localTribe ?? 0)) {
       const bid = -curOcc;
       const e = data.entityData;
       const m = data.mapTableData;

@@ -569,18 +569,20 @@ export function enterRestHut(data, bid, unitId) {
   return { slotIdx: freeSlot, breeding: canBreed };
 }
 
-export function spawnNewbornVillager(data, x, y) {
+export function spawnNewbornVillager(data, x, y, owner = 0) {
   const e = data.entityData;
   const fo = data.entityFieldOffsets;
+  const startId = owner === 0 ? 1 : 51;
+  const endId = owner === 0 ? 50 : 100;
   let uid = -1;
-  for (let i = 1; i <= 50; i++) {
+  for (let i = startId; i <= endId; i++) {
     if ((e[1919 + i] & 0xff) === 0) {
       uid = i;
       break;
     }
   }
   if (uid === -1) return -1;
-  const spawned = spawnUnit(data, 0, x, y, uid + 7);
+  const spawned = spawnUnit(data, owner, x, y, uid + 7);
   if (spawned > 0) {
     // Authentic newborn / child (age < 12 uses toddler/child sprite in render-original.js)
     e[1414 + spawned] = 1;
@@ -1124,5 +1126,164 @@ export function loadScenarioFromMa(baseData, maBytes, scenarioIndex, options = {
   data.hoverUnit = firstPlayerUnit || 1;
   revealFog(data, data.cursorX, data.cursorY, 5);
 
+  return data;
+}
+
+export const MP_MAPS = [
+  { scenarioIndex: 1, name: 'Trả thù (64×48 · Nhanh)' },
+  { scenarioIndex: 2, name: 'Chạy trốn (64×80 · Vừa)' },
+  { scenarioIndex: 5, name: 'Hồ rộng (64×96 · Đối đầu)' },
+  { scenarioIndex: 7, name: 'Rừng dây leo (96×64 · Rộng)' },
+  { scenarioIndex: 8, name: 'Tàn sát (80×80 · Chiến trường)' },
+  { scenarioIndex: 9, name: 'Mảnh đất (96×48 · Hai bờ)' },
+];
+
+export function prepareMultiplayerMatch(baseData, maBytes, scenarioIndex = 1, localTribe = 0) {
+  const data = loadScenarioFromMa(baseData, maBytes, scenarioIndex);
+  const e = data.entityData;
+  const w = data.width;
+  const h = data.height;
+
+  // 1. Discover opposite base anchors for Tribe 0 and Tribe 1 from the map's natural spawn areas
+  let a0 = null;
+  let a1 = null;
+  for (let bid = 1; bid <= 30; bid++) {
+    if ((e[8505 + bid] & 0xff) > 0) {
+      a0 = { x: e[8383 + bid] & 0xff, y: e[8444 + bid] & 0xff };
+      break;
+    }
+  }
+  for (let bid = 31; bid <= 60; bid++) {
+    if ((e[8505 + bid] & 0xff) > 0) {
+      a1 = { x: e[8383 + bid] & 0xff, y: e[8444 + bid] & 0xff };
+      break;
+    }
+  }
+  if (!a0) a0 = { x: Math.max(5, Math.min(w - 10, data.cursorX || 8)), y: Math.max(5, Math.min(h - 10, data.cursorY || 8)) };
+  if (!a1) a1 = { x: Math.max(5, Math.min(w - 10, w - 10)), y: Math.max(5, Math.min(h - 10, h - 10)) };
+
+  // 2. Clear asymmetric campaign buildings & units so both sides start 100% fair and balanced
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const occ = data.occupancy[y][x];
+      if ((occ >= 1 && occ <= 100) || (occ <= -1 && occ >= -60)) {
+        data.occupancy[y][x] = 0;
+      }
+      data.fog[y][x] = 2; // reset fog of war
+    }
+  }
+  for (let uid = 1; uid <= 100; uid++) {
+    e[1919 + uid] = 0;
+    e[4444 + uid] = 0;
+    e[4545 + uid] = 0;
+    e[4646 + uid] = -1;
+    e[1313 + uid] = 0;
+    e[3535 + uid] = 0;
+    e[3636 + uid] = 0;
+    e[7777 + uid] = 0;
+  }
+  for (let bid = 1; bid <= 60; bid++) {
+    e[8505 + bid] = 0;
+    e[8566 + bid] = 0;
+    e[8627 + bid] = 0;
+    e[8749 + bid] = 0;
+    e[8993 + bid] = 0;
+    e[9115 + bid] = 0;
+    e[9237 + bid] = 0;
+  }
+
+  // Helper to clear a small building pad if trees/rocks obstruct starter placement
+  const forcePlaceStarterBuilding = (bType, cx, cy, owner) => {
+    const spec = getBuildingSpec(data, bType);
+    for (let r = 0; r <= 7; r++) {
+      for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          const bx = cx + dx;
+          const by = cy + dy;
+          if (bx < 2 || by < 2 || bx + spec.width >= w - 2 || by + spec.height >= h - 2) continue;
+          let ok = true;
+          for (let py = 0; py < spec.height && ok; py++) {
+            for (let px = 0; px < spec.width && ok; px++) {
+              const occ = data.occupancy[by + py][bx + px];
+              const terr = data.terrain[by + py][bx + px] & 0xff;
+              // Never overwrite another building or water/cliff
+              if (occ < 0 && occ >= -60) ok = false;
+              if (terr >= 232 && terr !== 243) ok = false;
+              if (r < 4 && (occ !== 0 || terr >= 175)) ok = false;
+            }
+          }
+          if (ok) {
+            for (let py = 0; py < spec.height; py++) {
+              for (let px = 0; px < spec.width; px++) {
+                if (data.occupancy[by + py][bx + px] !== 0) data.occupancy[by + py][bx + px] = 0;
+                if ((data.terrain[by + py][bx + px] & 0xff) >= 175) data.terrain[by + py][bx + px] = 0;
+              }
+            }
+            return placeBuilding(data, bType, bx, by, owner, 1);
+          }
+        }
+      }
+    }
+    return -1;
+  };
+
+  const setupTribe = (owner, anchor) => {
+    const chiefBid = forcePlaceStarterBuilding(3, anchor.x, anchor.y, owner);
+    const hutBid = forcePlaceStarterBuilding(2, anchor.x + 4, anchor.y + 1, owner);
+    forcePlaceStarterBuilding(6, anchor.x - 4, anchor.y + 1, owner);
+
+    const baseX = chiefBid > 0 ? (e[8383 + chiefBid] & 0xff) : anchor.x;
+    const baseY = chiefBid > 0 ? (e[8444 + chiefBid] & 0xff) : anchor.y;
+
+    let firstUid = 0;
+    let count = 0;
+    for (let k = 0; k < 8; k++) {
+      const uid = spawnUnit(data, owner, baseX + (k % 4), baseY + 3 + Math.floor(k / 4), k + 1 + owner * 10);
+      if (uid > 0) {
+        e[1515 + uid] = k % 2; // balanced 4 males + 4 females
+        e[1414 + uid] = 20 + (k % 8);
+        e[6767 + uid] = 42;
+        e[1919 + uid] = 42;
+        e[2020 + uid] = 100;
+        e[2121 + uid] = 100;
+        e[505 + uid] = 95;
+        if (!firstUid) firstUid = uid;
+        count++;
+      }
+    }
+    if (!data.resources[owner]) data.resources[owner] = new Array(26).fill(0);
+    data.resources[owner].fill(0);
+    data.resources[owner][0] = 20; // Food
+    data.resources[owner][1] = 30; // Wood
+    data.resources[owner][2] = 20; // Stone
+    data.resources[owner][3] = 5;  // Bones
+    data.resources[owner][11] = count;
+    data.resources[owner][16] = hutBid > 0 ? 12 : 6;
+    data.resources[owner][17] = firstUid || (owner === 0 ? 1 : 51);
+    return { baseX, baseY, firstUid };
+  };
+
+  const t0 = setupTribe(0, a0);
+  const t1 = setupTribe(1, a1);
+  data.mpBases = [t0, t1];
+
+  // Reveal fog of war ONLY for localTribe's own base & units
+  const myBase = localTribe === 1 ? t1 : t0;
+  revealFog(data, myBase.baseX + 1, myBase.baseY + 1, 8);
+  const startU = localTribe === 1 ? 51 : 1;
+  const endU = localTribe === 1 ? 100 : 50;
+  for (let uid = startU; uid <= endU; uid++) {
+    if ((e[1919 + uid] & 0xff) > 0) {
+      revealFog(data, e[uid] & 0xff, e[101 + uid] & 0xff, 5);
+    }
+  }
+
+  const cols = data.viewportColumns || 16;
+  const rows = data.viewportRows || 18;
+  data.cameraX = Math.max(0, Math.min(w - cols, myBase.baseX - Math.floor(cols / 2)));
+  data.cameraY = Math.max(0, Math.min(h - rows, myBase.baseY - Math.floor(rows / 2)));
+  data.cursorX = Math.max(0, Math.min(w - 1, myBase.baseX));
+  data.cursorY = Math.max(0, Math.min(h - 1, myBase.baseY));
+  data.hoverUnit = myBase.firstUid;
   return data;
 }
