@@ -2356,7 +2356,7 @@ function assignWorkAtBuilding(unitId, bld, preferredSlots = null) {
   }
   // Authentic job hats: 4=Bếp (54 Chef hat), 7=Sàn Disco (86 DJ hat), 8=Khu thánh địa (57 Shaman hat)
   const hatJob = !isGuestOnly && !slot0Taken ? (bt === 4 ? 54 : bt === 7 ? 86 : bt === 8 ? 57 : 69) : 69;
-  const isBreakVisit = (bt === 4 || bt === 7) && (isGuestOnly || slot0Taken);
+  const isBreakVisit = (bt === 4 || bt === 7 || bt === 8) && (isGuestOnly || slot0Taken);
   if (!isBreakVisit) {
     state.savedJobs.set(unitId, { kind: 'workBuilding', bid: bld.bid, preferredSlots });
   }
@@ -5017,16 +5017,46 @@ function stepSimulation() {
       }
 
       // Authentic Khu thánh địa (bType 8):
-      // - Slot 0 (Shaman): lies down & naps (anim 39, 8f) when NO spell ritual is ordered; only beats drum (anim 140) while casting!
-      // - Slot 1+ (Patient): stands calmly (anim 8, frame 0) — NEVER alternates 8/9 or wobbles!
+      // - Slot 0 (Shaman): lies down & naps (anim 39, 8f) when idle; beats drum (anim 140) while casting a spell OR healing a patient!
+      // - Slot 1+ (Patient): stands calmly (anim 8, frame 0), heals +4 HP every 6 ticks when Shaman is present, then exits & resumes job!
       if (bType === 8) {
         if (slotIdx > 0) {
           setUnitCarry(unitId, 0, 0);
           setUnitAnim(unitId, 8, 0);
+          const curHp = e[1919 + unitId] & 0xff;
+          const maxHp = Math.max(1, e[6767 + unitId] & 0xff);
+          const shamanPresent = isBuildingSlot0ActiveInside(bld.bid);
+          if (shamanPresent && curHp < maxHp && task.workTicks % 6 === 0) {
+            const nextHp = Math.min(maxHp, curHp + 4);
+            e[1919 + unitId] = nextHp;
+            if (nextHp >= maxHp) {
+              if ((e[3333 + unitId] & 0xff) === 3) e[3333 + unitId] = -1;
+              exitBuildingSlot(d, unitId);
+              state.tasks.delete(unitId);
+              if (!resumeSavedJob(unitId)) {
+                setUnitAnim(unitId, 8, 0);
+              }
+              if ((unitId > 50 ? 1 : 0) === (state.localTribe ?? 0)) {
+                state.message = `💚 ${getVillagerInfo(unitId).role} đã được Pháp sư chữa khỏi đầy máu (${maxHp}/${maxHp} HP)!`;
+              }
+            }
+            uiChanged = true;
+          } else if (curHp >= maxHp || (!shamanPresent && task.workTicks >= 16)) {
+            if ((e[3333 + unitId] & 0xff) === 3) e[3333 + unitId] = -1;
+            exitBuildingSlot(d, unitId);
+            state.tasks.delete(unitId);
+            if (!resumeSavedJob(unitId)) {
+              setUnitAnim(unitId, 8, 0);
+            }
+            uiChanged = true;
+          }
           continue;
         }
         const ritual = state.shrineRituals.get(bld.bid);
-        if (!ritual) {
+        const hasInjuredPatient = getBuildingOccupants(bld.bid).some(
+          (pid) => pid !== unitId && e[4646 + pid] > 0 && (e[1919 + pid] & 0xff) < (e[6767 + pid] & 0xff)
+        );
+        if (!ritual && !hasInjuredPatient) {
           setUnitCarry(unitId, 0, 0);
           setUnitAnim(unitId, 39, Math.floor(task.workTicks / 3) % 8);
           continue;
@@ -5734,7 +5764,15 @@ function stepVillagerNeeds() {
     const finishedHuts = tribeBlds.filter((b) => !b.underConstruction && b.targetType === 2);
     const finishedKitchens = tribeBlds.filter((b) => !b.underConstruction && b.targetType === 4);
     const finishedDiscos = tribeBlds.filter((b) => !b.underConstruction && b.targetType === 7);
+    const finishedShrines = tribeBlds.filter((b) => !b.underConstruction && b.targetType === 8);
     const finishedKindergartens = tribeBlds.filter((b) => !b.underConstruction && b.targetType === 10);
+    const isShrinePatientBusy = (bid) => {
+      if (getBuildingOccupants(bid).some((uid) => e[4646 + uid] > 0)) return true;
+      for (const t of state.tasks.values()) {
+        if (t.kind === 'workBuilding' && t.target?.bid === bid && t.preferredSlots?.[0] === 1) return true;
+      }
+      return false;
+    };
     const tribeFood = tribe === (state.localTribe ?? 0) ? state.food : (d.resources?.[tribe]?.[0] || 0);
 
     for (const id of ids) {
@@ -5779,6 +5817,13 @@ function stepVillagerNeeds() {
 
       if (task?.kind === 'rest' || task?.kind === 'eat' || task?.kind === 'courtship') continue;
       if (task?.kind === 'workBuilding' && task.target?.targetType === 7 && (task.insideSlot?.slotIdx ?? 0) > 0) continue;
+      if (
+        task?.kind === 'workBuilding' &&
+        task.target?.targetType === 8 &&
+        ((task.insideSlot?.slotIdx ?? 0) > 0 || task.preferredSlots?.[0] === 1)
+      ) {
+        continue;
+      }
 
       const working = Boolean(task);
       const satiety = Math.max(0, (e[2121 + id] & 0xff) - (working ? 2 : 1));
@@ -5802,6 +5847,9 @@ function stepVillagerNeeds() {
       // - Hungry -> seek Bếp (if Bếp exists & food > 0); otherwise just keep showing thought bubble!
       // - Sleepy -> seek Lều (if Lều exists); otherwise just keep showing thought bubble!
       // - Bored  -> seek Sàn disco (if Sàn disco exists); otherwise just keep showing thought bubble!
+      const curHp = e[1919 + id] & 0xff;
+      const maxHp = Math.max(1, e[6767 + id] & 0xff);
+      const isLowHp = curHp > 0 && curHp < maxHp && (curHp <= Math.floor(maxHp * 0.55) || curHp <= 18);
       const isCombatTask =
         task &&
         (task.kind === 'attackUnit' ||
@@ -5809,7 +5857,7 @@ function stepVillagerNeeds() {
           task.kind === 'armForBattle' ||
           task.kind === 'hunt');
       const thresh = task ? 20 : 38;
-      const canBreak = !isCombatTask && (!task || satiety <= thresh || energy <= thresh || mood <= thresh);
+      const canBreak = !isCombatTask && (!task || isLowHp || satiety <= thresh || energy <= thresh || mood <= thresh);
       if (canBreak) {
         const info = getVillagerInfo(id);
         const ux = info.x;
@@ -5818,9 +5866,22 @@ function stepVillagerNeeds() {
           task?.kind === 'workBuilding' && task.target?.targetType === 4 && (task.insideSlot?.slotIdx ?? 0) === 0;
         const isDjInDisco =
           task?.kind === 'workBuilding' && task.target?.targetType === 7 && (task.insideSlot?.slotIdx ?? 0) === 0;
+        const isShamanInShrine =
+          task?.kind === 'workBuilding' && task.target?.targetType === 8 && (task.insideSlot?.slotIdx ?? 0) === 0;
+        const shrinesReady = finishedShrines.filter(
+          (b) => isBuildingSlot0ActiveInside(b.bid) && !isShrinePatientBusy(b.bid)
+        );
         const kitchensReady = finishedKitchens.filter((b) => canKitchenServeFood(b.bid));
         const discosWithDj = finishedDiscos.filter((b) => isBuildingSlot0ActiveInside(b.bid));
-        if (satiety <= thresh && !isChefInKitchen && kitchensReady.length > 0) {
+        if (isLowHp && !isShamanInShrine && shrinesReady.length > 0) {
+          const shrine = pickNearestBld(shrinesReady, ux, uy);
+          if (shrine && assignWorkAtBuilding(id, shrine, [1])) {
+            if (tribe === (state.localTribe ?? 0)) {
+              state.message = `🏥 ${info.role} đang thấp máu (${curHp}/${maxHp} HP) và tự đi vào Khu thánh địa chữa trị!`;
+            }
+            changed = true;
+          }
+        } else if (satiety <= thresh && !isChefInKitchen && kitchensReady.length > 0) {
           const kitchen = pickNearestBld(kitchensReady, ux, uy);
           if (kitchen && assignEatTask(id, kitchen)) changed = true;
         } else if (energy <= thresh && finishedHuts.length > 0) {
