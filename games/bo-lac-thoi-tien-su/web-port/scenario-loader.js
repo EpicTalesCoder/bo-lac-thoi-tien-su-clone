@@ -1074,7 +1074,7 @@ function spawnWildAnimal(data, kind, x, y, group) {
   e[9425 + aid] = 0;
   e[9491 + aid] = (aid * 3) % 8;
   e[9469 + aid] = group;
-  e[9557 + aid] = m[mo[184] + kind] & 0xff;
+  e[9557 + aid] = 10 + kind; // authentic calm idle anim (b.java:4560)
   e[9579 + aid] = 0;
   if (data.occupancy[py][px] === 0) {
     data.occupancy[py][px] = 101 + aid;

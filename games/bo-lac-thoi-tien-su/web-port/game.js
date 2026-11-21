@@ -217,7 +217,9 @@ const state = {
   enemyTasks: new Map(),
   weaponQueues: new Map(), // bid -> [q0..q5] weapon forge orders (starts at 0)
   shrineRituals: new Map(), // bid -> { spell, ticks, duration } active Shaman spell rituals
-  animalMoves: new Map(), // aid -> { fromX, fromY, toX, toY, progress, total, walkAnim } smooth sub-tile animal movement
+  animalMoves: new Map(), // aid -> { dx, dy, progress, total, anim } smooth sub-tile animal movement
+  animalIdle: new Map(), // aid -> { anim, ticks } random idle variant (grazing/sniffing) from mo[184]
+  animalFight: new Map(), // aid -> { ticks } attack animation cycle
   siteMaterials: new Map(), // bid -> { wood, stone, tools, owner } pending material deliveries from Storage
   upgradingBuildings: new Map(), // bid -> { targetLevel, targetType } active builder-driven building upgrades
   treeWood: new Map(), // remaining wood per tree cell "x,y" (12 wood/tree; clears to grass when depleted)
@@ -5567,7 +5569,7 @@ function stepWildAnimals() {
   const canStepAnimal = (nx, ny) =>
     nx >= 1 && ny >= 1 && nx < w - 1 && ny < h - 1 && d.occupancy[ny][nx] === 0 && (d.terrain[ny][nx] & 0xff) < 175;
 
-  const startAnimalStep = (aid, ax, ay, nx, ny, walkAnim, totalTicks) => {
+  const startAnimalStep = (aid, ax, ay, nx, ny, anim, totalTicks) => {
     if (d.occupancy[ay][ax] === 101 + aid) d.occupancy[ay][ax] = 0;
     const dx = nx - ax;
     const dy = ny - ay;
@@ -5578,34 +5580,91 @@ function stepWildAnimals() {
     e[9403 + aid] = (-dx * CELL_WIDTH) & 0xff;
     e[9425 + aid] = (-dy * CELL_HEIGHT) & 0xff;
     e[9491 + aid] = directionFromDelta(dx, dy);
-    e[9557 + aid] = walkAnim;
-    const frames = Math.max(1, d.byteSpriteTables[4][walkAnim] & 0xff);
-    e[9579 + aid] = ((e[9579 + aid] & 0xff) + 1) % frames;
+    e[9557 + aid] = anim;
+    e[9579 + aid] = 0;
     d.occupancy[ny][nx] = 101 + aid;
-    state.animalMoves.set(aid, { dx, dy, progress: 0, total: totalTicks, walkAnim });
+    state.animalMoves.set(aid, { dx, dy, progress: 0, total: totalTicks, anim });
+    state.animalIdle.delete(aid);
+    state.animalFight.delete(aid);
     changed = true;
+  };
+
+  // Everyone nearby (same tribe, adult, outside, not already fighting) rushes to help a villager attacked by a wild animal!
+  const rallyDefenders = (aid, victimUid) => {
+    const last = state.animalRally?.get(aid) ?? -999;
+    if (state.animTick - last < 16) return;
+    if (!state.animalRally) state.animalRally = new Map();
+    state.animalRally.set(aid, state.animTick);
+    const ax = e[9359 + aid] & 0xff;
+    const ay = e[9381 + aid] & 0xff;
+    const lo = victimUid > 50 ? 51 : 1;
+    const hi = victimUid > 50 ? 100 : 50;
+    let called = 0;
+    for (const p of people) {
+      if (p.uid < lo || p.uid > hi || p.uid === victimUid || p.age < 12) continue;
+      if (Math.max(Math.abs(p.x - ax), Math.abs(p.y - ay)) > 14) continue;
+      const t = state.tasks.get(p.uid);
+      if (t && (t.kind === 'hunt' || t.kind === 'attackUnit' || t.kind === 'armForBattle' || t.kind === 'attackBuilding')) continue;
+      if (assignHuntTask(p.uid, 101 + aid)) called++;
+    }
+    if (called > 0 && victimUid <= 50 === ((state.localTribe ?? 0) === 0)) {
+      state.message = `⚔ ${called} dân làng chạy tới cứu đồng bạn bị thú dữ tấn công!`;
+    }
+  };
+
+  // Which animals are currently being attacked by a hunting villager?
+  const huntedBy = new Map();
+  for (const [uid, t] of state.tasks.entries()) {
+    if (t.kind === 'hunt' && t.phase !== 'pickup' && t.target?.aid !== undefined) {
+      if (!huntedBy.has(t.target.aid)) huntedBy.set(t.target.aid, []);
+      huntedBy.get(t.target.aid).push(uid);
+    }
+  }
+
+  const fleeStep = (aid, ax, ay, from, total) => {
+    let bestMove = null;
+    let bestScore = Math.hypot(ax - from.x, ay - from.y);
+    for (const s of DIRS) {
+      const nx = ax + s.dx;
+      const ny = ay + s.dy;
+      if (!canStepAnimal(nx, ny)) continue;
+      const nd = Math.hypot(nx - from.x, ny - from.y);
+      if (nd > bestScore) {
+        bestScore = nd;
+        bestMove = { nx, ny };
+      }
+    }
+    if (!bestMove) return false;
+    startAnimalStep(aid, ax, ay, bestMove.nx, bestMove.ny, 2 + (e[9535 + aid] & 0xff), total);
+    return true;
   };
 
   for (let aid = 0; aid < 22; aid++) {
     const hp = e[9513 + aid] & 0xff;
     if (hp <= 0) {
       state.animalMoves.delete(aid);
+      state.animalIdle.delete(aid);
+      state.animalFight.delete(aid);
       continue;
     }
     const kind = e[9535 + aid] & 0xff; // 0 = Boar, 1 = Tiger, 2 = Deer
-    const idleAnim = kind === 0 ? 48 : kind === 1 ? 50 : 52;
-    const walkAnim = kind === 0 ? 47 : kind === 1 ? 49 : 51;
+    // Authentic anim ids (b.java:4545/4560/4630): walk = 2+kind, calm idle = 10+kind, attack = 37+kind (Boar/Tiger only).
+    // mo[184] idle variants (47/49/51 grazing, 48/50/52 sniffing) are only played occasionally while standing still.
+    const idleAnim = 10 + kind;
+    const walkAnim = 2 + kind;
+    const attackAnim = 37 + kind;
+    const stepTicks = kind === 1 ? 4 : kind === 2 ? 4 : 5;
 
-    // 1. Continue smooth sub-tile glide if currently stepping between tiles
+    // 1. Continue smooth sub-tile glide if currently stepping between tiles (upright walking frames, no sliding)
     const mv = state.animalMoves.get(aid);
     if (mv) {
       mv.progress++;
       const fracLeft = Math.max(0, 1 - mv.progress / mv.total);
       e[9403 + aid] = Math.round(-mv.dx * CELL_WIDTH * fracLeft) & 0xff;
       e[9425 + aid] = Math.round(-mv.dy * CELL_HEIGHT * fracLeft) & 0xff;
-      e[9557 + aid] = mv.walkAnim;
-      const frames = Math.max(1, d.byteSpriteTables[4][mv.walkAnim] & 0xff);
-      e[9579 + aid] = ((e[9579 + aid] & 0xff) + 1) % frames;
+      e[9557 + aid] = mv.anim;
+      const frames = Math.max(1, d.byteSpriteTables[4][mv.anim] & 0xff);
+      e[9579 + aid] = Math.floor((mv.progress * frames) / Math.max(1, mv.total)) % frames;
       if (mv.progress >= mv.total) {
         e[9403 + aid] = 0;
         e[9425 + aid] = 0;
@@ -5617,13 +5676,15 @@ function stepWildAnimals() {
 
     const ax = e[9359 + aid] & 0xff;
     const ay = e[9381 + aid] & 0xff;
+    const hunters = huntedBy.get(aid) || [];
+    const hunterSet = new Set(hunters);
 
-    // Find nearest living person (Deer flees from anyone; Boars/Tigers aggro adults of BOTH player & enemy tribes!)
+    // Find nearest living person (Deer flees from anyone; Boars/Tigers aggro adults of BOTH tribes, preferring whoever hits them)
     let nearest = null;
     let bestDist = Infinity;
     for (const p of people) {
       if (kind !== 2 && p.age < 12) continue; // Predators only attack adults (children are invulnerable)
-      const dist = Math.max(Math.abs(p.x - ax), Math.abs(p.y - ay));
+      const dist = Math.max(Math.abs(p.x - ax), Math.abs(p.y - ay)) - (hunterSet.has(p.uid) ? 0.5 : 0);
       if (dist < bestDist) {
         bestDist = dist;
         nearest = p;
@@ -5631,57 +5692,70 @@ function stepWildAnimals() {
     }
 
     if (kind === 2) {
-      // === DEER (Hươu): flees smoothly when any person comes within 4 tiles ===
-      if (nearest && bestDist <= 4) {
-        let bestMove = null;
-        let bestScore = bestDist;
-        for (const s of DIRS) {
-          const nx = ax + s.dx;
-          const ny = ay + s.dy;
-          if (!canStepAnimal(nx, ny)) continue;
-          const nd = Math.hypot(nx - nearest.x, ny - nearest.y);
-          if (nd > bestScore) {
-            bestScore = nd;
-            bestMove = { nx, ny };
-          }
-        }
-        if (bestMove) {
-          startAnimalStep(aid, ax, ay, bestMove.nx, bestMove.ny, walkAnim, 4);
-          continue;
-        }
+      // === DEER (Hươu): bolts away when a person is near OR when being hunted ===
+      const scared = nearest && (bestDist <= 4 || hunters.length > 0);
+      if (scared && nearest) {
+        if (fleeStep(aid, ax, ay, nearest, 3)) continue;
+        // Cornered: kick back with a little hop instead of standing still
+        e[9491 + aid] = directionFromDelta(ax - nearest.x, ay - nearest.y);
       }
     } else {
-      // === BOAR (Lợn rừng, kind 0) & TIGER (Cọp, kind 1): chase & attack BOTH player & enemy adults! ===
-      const aggroRange = kind === 1 ? 5 : 4;
+      // === BOAR (Lợn rừng, kind 0) & TIGER (Cọp, kind 1): chase & attack, fight back when hunted ===
+      const aggroRange = hunters.length > 0 ? 8 : kind === 1 ? 5 : 4;
       if (nearest && bestDist <= aggroRange) {
-        if (bestDist <= 1) {
-          // Adjacent -> attack adult (player OR enemy) with fluid attack/run animation!
-          e[9491 + aid] = directionFromDelta(nearest.x - ax, nearest.y - ay);
-          e[9557 + aid] = walkAnim;
-          const frames = Math.max(1, d.byteSpriteTables[4][walkAnim] & 0xff);
-          e[9579 + aid] = ((e[9579 + aid] & 0xff) + 1) % frames;
-          if ((state.animTick + aid) % 8 === 0) {
+        if (bestDist <= 1.5) {
+          // Adjacent -> real attack animation (anim 37/38) with a forward lunge, never frozen
+          const tx = nearest.x - ax;
+          const ty = nearest.y - ay;
+          e[9491 + aid] = directionFromDelta(tx, ty);
+          const fight = state.animalFight.get(aid) || { ticks: 0 };
+          const frames = Math.max(1, d.byteSpriteTables[4][attackAnim] & 0xff);
+          const perFrame = 2;
+          const frame = Math.floor(fight.ticks / perFrame) % frames;
+          e[9557 + aid] = attackAnim;
+          e[9579 + aid] = frame;
+          const lunge = [0, 3, 8, 5, 1][frame % 5] || 0;
+          e[9403 + aid] = (Math.sign(tx) * lunge) & 0xff;
+          e[9425 + aid] = (Math.sign(ty) * Math.round(lunge * 0.7)) & 0xff;
+          fight.ticks++;
+          state.animalFight.set(aid, fight);
+          if (fight.ticks % (frames * perFrame) === frames * perFrame - 1) {
             const dmg = kind === 1 ? 7 : 4;
             applyUnitDamage(0, nearest.uid, dmg);
-            // Attacked adult (player OR enemy tribe) automatically retaliates!
+            rallyDefenders(aid, nearest.uid);
+            // The victim fights back too
             if ((e[1919 + nearest.uid] & 0xff) > 0 && nearest.age >= 12) {
               const curT = state.tasks.get(nearest.uid);
               if (!curT || (curT.kind !== 'hunt' && curT.kind !== 'attackUnit' && curT.kind !== 'armForBattle')) {
                 assignHuntTask(nearest.uid, 101 + aid);
               }
             }
+            // After each bite, circle around the target to a new adjacent tile so the fight keeps moving
+            if ((state.animTick + aid) % 3 !== 0) {
+              const opts = DIRS.map((sd) => ({ nx: ax + sd.dx, ny: ay + sd.dy })).filter(
+                (o) => canStepAnimal(o.nx, o.ny) && Math.max(Math.abs(o.nx - nearest.x), Math.abs(o.ny - nearest.y)) === 1
+              );
+              if (opts.length > 0) {
+                const o = opts[(state.animTick + aid) % opts.length];
+                e[9403 + aid] = 0;
+                e[9425 + aid] = 0;
+                startAnimalStep(aid, ax, ay, o.nx, o.ny, walkAnim, 3);
+              }
+            }
+            changed = true;
+          } else {
             changed = true;
           }
           continue;
         } else {
-          // Chase closer toward the target (avoiding chasing deep inside the player's town center)
+          // Charge toward the target (avoiding chasing deep inside the player's town center)
           let bestMove = null;
           let bestStepDist = Infinity;
-          for (const s of DIRS) {
-            const nx = ax + s.dx;
-            const ny = ay + s.dy;
+          for (const sd of DIRS) {
+            const nx = ax + sd.dx;
+            const ny = ay + sd.dy;
             if (!canStepAnimal(nx, ny)) continue;
-            if (nearest.uid <= 50 && nearPlayerBld(nx, ny, 8) && !nearPlayerBld(ax, ay, 8)) continue;
+            if (nearest.uid <= 50 && nearPlayerBld(nx, ny, 8) && !nearPlayerBld(ax, ay, 8) && hunters.length === 0) continue;
             const nd = Math.hypot(nx - nearest.x, ny - nearest.y);
             if (nd < bestStepDist) {
               bestStepDist = nd;
@@ -5689,9 +5763,10 @@ function stepWildAnimals() {
             }
           }
           if (bestMove) {
-            startAnimalStep(aid, ax, ay, bestMove.nx, bestMove.ny, walkAnim, kind === 1 ? 4 : 5);
-            // If an adult sees a boar/tiger charging right next to them (<= 2 tiles), fight back!
-            if (bestStepDist <= 2 && nearest.age >= 12) {
+            state.animalFight.delete(aid);
+            startAnimalStep(aid, ax, ay, bestMove.nx, bestMove.ny, walkAnim, Math.max(3, stepTicks - 1));
+            if (bestStepDist <= 2.5 && nearest.age >= 12) {
+              rallyDefenders(aid, nearest.uid);
               const curT = state.tasks.get(nearest.uid);
               if (!curT || (curT.kind !== 'hunt' && curT.kind !== 'attackUnit' && curT.kind !== 'armForBattle')) {
                 assignHuntTask(nearest.uid, 101 + aid);
@@ -5702,22 +5777,41 @@ function stepWildAnimals() {
         }
       }
     }
+    state.animalFight.delete(aid);
 
     // Relaxed forest wandering (keeps Boars/Tigers >= 14 tiles from player's buildings and Deer >= 10 tiles)
     if ((state.animTick + aid * 13) % 36 === 0) {
-      const s = DIRS[(Math.floor(state.animTick / 7) + aid * 3) % DIRS.length];
-      const nx = ax + s.dx;
-      const ny = ay + s.dy;
+      const sd = DIRS[(Math.floor(state.animTick / 7) + aid * 3) % DIRS.length];
+      const nx = ax + sd.dx;
+      const ny = ay + sd.dy;
       const safeFromPlayer = kind === 2 ? !nearPlayerBld(nx, ny, 10) : !nearPlayerBld(nx, ny, 14);
       if (canStepAnimal(nx, ny) && safeFromPlayer && !nearAnyBld(nx, ny, 6)) {
-        startAnimalStep(aid, ax, ay, nx, ny, walkAnim, 7);
+        startAnimalStep(aid, ax, ay, nx, ny, walkAnim, stepTicks + 2);
         continue;
       }
     }
-    e[9557 + aid] = idleAnim;
-    if (state.animTick % 2 === 0) {
-      const idleFrames = Math.max(1, d.byteSpriteTables[4][idleAnim] & 0xff);
-      e[9579 + aid] = ((e[9579 + aid] & 0xff) + 1) % idleFrames;
+
+    // Standing still: calm idle pose (anim 10+kind), occasionally a short grazing / sniffing variant from mo[184]
+    let idle = state.animalIdle.get(aid);
+    if (!idle && (state.animTick + aid * 17) % 70 === 0) {
+      const roll = (state.animTick * 7 + aid * 31) % 100;
+      const variant = d.mapTableData[d.mapTableOffsets[184] + Math.floor(roll / 50) * 3 + kind] & 0xff;
+      if (variant > 0) {
+        const vFrames = Math.max(1, d.byteSpriteTables[4][variant] & 0xff);
+        idle = { anim: variant, ticks: vFrames * 3 };
+        state.animalIdle.set(aid, idle);
+      }
+    }
+    if (idle) {
+      e[9557 + aid] = idle.anim;
+      const vFrames = Math.max(1, d.byteSpriteTables[4][idle.anim] & 0xff);
+      e[9579 + aid] = Math.floor(idle.ticks / 3) % vFrames;
+      idle.ticks--;
+      if (idle.ticks <= 0) state.animalIdle.delete(aid);
+      changed = true;
+    } else {
+      e[9557 + aid] = idleAnim;
+      e[9579 + aid] = 0;
     }
   }
   return changed;
@@ -8659,6 +8753,9 @@ Promise.all([
       state.siteMaterials.clear();
       state.shrineRituals.clear();
       state.animalMoves.clear();
+      state.animalIdle.clear();
+      state.animalFight.clear();
+      state.animalRally?.clear();
       state.projectiles = [];
       state.dustEffects = [];
       state.selectedUnits.clear();
