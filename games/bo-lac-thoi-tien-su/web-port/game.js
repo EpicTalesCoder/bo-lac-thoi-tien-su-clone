@@ -1130,6 +1130,13 @@ function describeTask(task) {
   if (task.kind === 'rest') return 'Nghỉ ngủ trong Lều';
   if (task.kind === 'eat') return 'Đi ăn';
   if (task.kind === 'workBuilding') return `Làm việc tại ${task.target.spec.name}`;
+  if (task.kind === 'courtship') {
+    const st = task.pair?.stage;
+    if (st === 'pickFlower') return 'Hái hoa tặng người thương';
+    if (st === 'giveFlower') return 'Tặng hoa trước Lều';
+    if (st === 'enterHut' || st === 'inHut') return 'Vào Lều sinh con';
+    return 'Hẹn hò trước Lều';
+  }
   return 'Di chuyển';
 }
 
@@ -1253,6 +1260,147 @@ function assignRestTask(unitId, hut) {
   return true;
 }
 
+function findCourtshipMeetSpot(hut) {
+  const d = state.data;
+  if (!d || !hut) return null;
+  const candidates = [
+    [hut.x, hut.y + hut.h],
+    [hut.x + 1, hut.y + hut.h],
+    [hut.x - 1, hut.y + hut.h],
+    [hut.x, hut.y + hut.h + 1],
+    [hut.x + 1, hut.y + hut.h + 1],
+    [hut.x, hut.y - 1],
+    [hut.x - 2, hut.y + 1],
+    [hut.x + hut.w, hut.y + 1],
+  ];
+  const isTileOpen = (tx, ty) => {
+    if (tx < 1 || ty < 1 || tx >= d.width - 1 || ty >= d.height - 1) return false;
+    const occ = d.occupancy[ty][tx];
+    const terr = d.terrain[ty][tx] & 0xff;
+    return terr < 175 && (occ === 0 || (occ >= 1 && occ <= 50));
+  };
+  for (const [mx, my] of candidates) {
+    if (isTileOpen(mx, my) && isTileOpen(mx + 1, my)) {
+      return { x1: mx, y1: my, x2: mx + 1, y2: my };
+    }
+  }
+  return null;
+}
+
+function startCourtshipPair(force = false, preferredHut = null) {
+  const d = state.data;
+  if (!d) return false;
+  if (state.population >= state.housingCap) return false;
+
+  // Allow 1 active courtship pair at a time unless forced
+  for (const t of state.tasks.values()) {
+    if (t.kind === 'courtship') return false;
+  }
+
+  const e = d.entityData;
+  const huts = preferredHut
+    ? [preferredHut]
+    : getPlayerBuildings().filter((b) => !b.underConstruction && b.targetType === 2);
+  if (huts.length === 0) return false;
+
+  // Pick a Lều with < 2 occupants and a clear meeting spot in front
+  let chosenHut = null;
+  let meetSpot = null;
+  for (const hut of huts) {
+    let occCount = 0;
+    let cur = e[8993 + hut.bid];
+    let g = 0;
+    while (cur > 0 && g++ < 16) {
+      occCount++;
+      cur = e[4545 + cur];
+    }
+    if (occCount > 1) continue;
+    const spot = findCourtshipMeetSpot(hut);
+    if (spot) {
+      chosenHut = hut;
+      meetSpot = spot;
+      break;
+    }
+  }
+  if (!chosenHut || !meetSpot) return false;
+
+  // Find eligible adult male (sex 0, age >= 12) and adult female (sex 1, age >= 12)
+  const isEligible = (id) => {
+    if ((e[1414 + id] & 0xff) < 12) return false;
+    if ((e[1919 + id] & 0xff) <= 0) return false;
+    const mood = e[505 + id] & 0xff;
+    if (!force && mood < 50) return false;
+    const task = state.tasks.get(id);
+    if (!task) return true;
+    // Allow interrupting passive gathering/move when forced, or idle/move naturally
+    if (force && (task.kind === 'gather' || task.kind === 'move' || task.kind === 'workBuilding')) return true;
+    return task.kind === 'move';
+  };
+
+  const ids = getVillagerIds();
+  const males = ids.filter((id) => (e[1515 + id] & 0xff) === 0 && isEligible(id));
+  const females = ids.filter((id) => (e[1515 + id] & 0xff) === 1 && isEligible(id));
+  if (males.length === 0 || females.length === 0) return false;
+
+  const maleId = males[Math.floor(Math.random() * males.length)];
+  const femaleId = females[Math.floor(Math.random() * females.length)];
+
+  ensureUnitOutside(maleId);
+  ensureUnitOutside(femaleId);
+  setUnitCarry(maleId, 0, 0);
+  setUnitCarry(femaleId, 0, 0);
+
+  const femalePlanned = planUnitPath(femaleId, meetSpot.x2, meetSpot.y2, true);
+  if (femalePlanned === null) return false;
+
+  const pair = {
+    maleId,
+    femaleId,
+    hut: chosenHut,
+    meetX1: meetSpot.x1,
+    meetY1: meetSpot.y1,
+    meetX2: meetSpot.x2,
+    meetY2: meetSpot.y2,
+    stage: 'pickFlower',
+    pickTicks: 0,
+    giftTicks: 0,
+    hutTicks: 0,
+    waitTicks: 0,
+    maleReady: false,
+    femaleReady: false,
+    maleInHut: false,
+    femaleInHut: false,
+    born: false,
+  };
+
+  // Male bends down to pick a flower first (anim 155/156), then carries flower (carry=15) to meetX1, meetY1
+  state.tasks.set(maleId, {
+    kind: 'courtship',
+    role: 'male',
+    pair,
+    path: [],
+    stepProgress: 0,
+    target: chosenHut,
+    workTicks: 0,
+  });
+
+  // Female walks straight to meetX2, meetY2 right in front of the Lều and waits for him
+  state.tasks.set(femaleId, {
+    kind: 'courtship',
+    role: 'female',
+    pair,
+    path: femalePlanned.path,
+    stepProgress: femalePlanned.stepProgress,
+    target: chosenHut,
+    workTicks: 0,
+  });
+
+  const mName = getVillagerName(d, maleId);
+  const fName = getVillagerName(d, femaleId);
+  state.message = `🌸 ${mName} đang hái hoa để hẹn gặp ${fName} trước Lều!`;
+  return true;
+}
+
 function assignEatTask(unitId, foodBuilding) {
   ensureUnitOutside(unitId);
   setUnitCarry(unitId, 0, 0);
@@ -1359,17 +1507,13 @@ function castShamanSpell(spell) {
     for (const id of ids) {
       e[2222 + id] = 0;
       e[2020 + id] = 100;
+      e[505 + id] = 100;
       e[3333 + id] = -1;
     }
-    const camp = getPlayerBuildings().find((b) => !b.underConstruction);
-    if (camp && state.population < state.housingCap) {
-      const newId = spawnNewbornVillager(state.data, camp.x + 1, camp.y + camp.h);
-      if (newId > 0) {
-        state.population = getVillagerIds().length;
-        addPopup(camp.x + 1, camp.y, `${getVillagerName(state.data, newId)} được sinh ra!`, '#ff9ee5');
-      }
-    }
-    state.message = 'Pháp sư thi triển Thuốc tình yêu: tinh thần bộ lạc dâng cao 100%!';
+    const started = startCourtshipPair(true);
+    state.message = started
+      ? 'Pháp sư thi triển Thuốc tình yêu: một cặp đôi đang hái hoa hẹn hò trước Lều!'
+      : 'Pháp sư thi triển Thuốc tình yêu: tinh thần bộ lạc dâng cao 100%!';
   } else if (spell.id === 'plague') {
     let hit = 0;
     for (const eid of getEnemyIds()) {
@@ -1977,6 +2121,7 @@ function runTribeAutoAI() {
     if (state.tasks.has(id)) continue;
     if (assignedCount >= 2) break;
     const info = getVillagerInfo(id);
+    if (info.age < 12) continue; // Children play until age 12!
     if (pendingBuildings.length > 0) {
       const bld = pendingBuildings[0];
       if (assignBuildTask(id, bld, true)) {
@@ -2046,7 +2191,8 @@ function stepUnitMovement(unitId, task, isEnemy = false) {
   task.stepProgress++;
   // Authentic original pace from mo[15] + e[1010+uid]: 8 ticks/tile cardinal, 11 ticks/tile diagonal at 120ms/tick
   const stepsPerTile = getUnitStepTicks(unitId, dx, dy);
-  const walkAnim = !isEnemy && e[3535 + unitId] > 0 && e[3636 + unitId] > 0 ? 1 : 0;
+  const isChild = !isEnemy && (e[1414 + unitId] & 0xff) < 12;
+  const walkAnim = isChild ? 6 : !isEnemy && e[3535 + unitId] > 0 && e[3636 + unitId] > 0 ? 1 : 0;
   const walkFrame = Math.floor((task.stepProgress * 4) / stepsPerTile) % 4;
   setUnitAnim(unitId, walkAnim, walkFrame);
 
@@ -2734,6 +2880,150 @@ function stepSimulation() {
         // Trung tâm PIA / Chòi canh: expands fog of war radius!
         revealFog(d, bld.x + Math.floor(bld.w / 2), bld.y + Math.floor(bld.h / 2), bType === 11 ? 8 : 7);
       }
+    } else if (task.kind === 'courtship') {
+      // Authentic Prehistoric Tribes courtship & reproduction (b.java:3357-3473, 4142-4210):
+      // 1) Male picks a flower (anim 155/156 -> carry=15) while Female walks to Lều meeting spot
+      // 2) Both stand side-by-side facing each other (dir 0 vs dir 4); waiting male holds flower (anim 9)
+      // 3) Flower gifting (anim 157 male / anim 158 female; at frame 6 flower transfers carry=15 to female)
+      // 4) Both enter the Lều -> e[1313]=2 (rocking tent anim 116 + d(90)) -> newborn baby (age=1) is born!
+      const pair = task.pair;
+      const partnerId = task.role === 'male' ? pair.femaleId : pair.maleId;
+      const partnerTask = state.tasks.get(partnerId);
+      const cancelPair = () => {
+        for (const uid of [pair.maleId, pair.femaleId]) {
+          if (isUnitInsideBuilding(d, uid)) exitBuildingSlot(d, uid);
+          setUnitCarry(uid, 0, 0);
+          setUnitAnim(uid, 8, 0);
+          state.tasks.delete(uid);
+        }
+        uiChanged = true;
+      };
+
+      // Abort cleanly if either partner was reassigned or died
+      if (!partnerTask || partnerTask.kind !== 'courtship' || partnerTask.pair !== pair) {
+        cancelPair();
+        continue;
+      }
+
+      task.workTicks++;
+      if (pair.stage === 'pickFlower') {
+        if (task.role === 'male') {
+          pair.pickTicks++;
+          // Bend down & pick flower: anim 155 (10f) then anim 156 (10f)
+          if (pair.pickTicks <= 10) {
+            setUnitAnim(unitId, 155, (pair.pickTicks - 1) % 10);
+          } else if (pair.pickTicks <= 18) {
+            setUnitCarry(unitId, 15, 1); // flower bouquet in hand!
+            setUnitAnim(unitId, 156, (pair.pickTicks - 11) % 10);
+          } else {
+            setUnitCarry(unitId, 15, 1);
+            const planned = planUnitPath(unitId, pair.meetX1, pair.meetY1, true);
+            if (planned === null) {
+              cancelPair();
+              continue;
+            }
+            task.path = planned.path;
+            task.stepProgress = planned.stepProgress;
+            pair.stage = 'walkToMeet';
+          }
+        } else {
+          // Female arrived early at meeting spot -> wait facing West (dir 4)
+          e[606 + unitId] = 4;
+          setUnitAnim(unitId, 8, 0);
+          pair.femaleReady = true;
+        }
+      } else if (pair.stage === 'walkToMeet') {
+        if (task.role === 'male') {
+          pair.maleReady = true;
+          e[606 + unitId] = 0; // face East toward partner
+          setUnitAnim(unitId, 9, 0); // standing idle holding flower bouquet (aw=2)
+        } else {
+          pair.femaleReady = true;
+          e[606 + unitId] = 4; // face West toward partner
+          setUnitAnim(unitId, 8, 0);
+        }
+        pair.waitTicks++;
+        if (pair.maleReady && pair.femaleReady) {
+          pair.stage = 'giveFlower';
+          pair.giftTicks = 0;
+          const mName = getVillagerName(d, pair.maleId);
+          const fName = getVillagerName(d, pair.femaleId);
+          state.message = `💐 ${mName} đang tặng hoa cho ${fName} trước Lều!`;
+          uiChanged = true;
+        } else if (pair.waitTicks > 220) {
+          cancelPair();
+          continue;
+        }
+      } else if (pair.stage === 'giveFlower') {
+        // Advance shared gift timer once per tick (driven by male)
+        if (task.role === 'male') pair.giftTicks++;
+        const giftFrame = Math.min(8, Math.floor(pair.giftTicks / 2));
+        e[606 + pair.maleId] = 0;
+        e[606 + pair.femaleId] = 4;
+        if (giftFrame >= 6 && (e[3535 + pair.maleId] & 0xff) === 15) {
+          // Exact port of b.java:3444: flower bouquet transfers from male to female at frame 6!
+          setUnitCarry(pair.maleId, 0, 0);
+          setUnitCarry(pair.femaleId, 15, 1);
+        }
+        setUnitAnim(pair.maleId, 157, giftFrame);
+        setUnitAnim(pair.femaleId, 158, giftFrame);
+        if (pair.giftTicks >= 18) {
+          pair.stage = 'enterHut';
+          const mHutPath = planUnitPath(pair.maleId, pair.hut.x, pair.hut.y, false, pair.hut);
+          const fHutPath = planUnitPath(pair.femaleId, pair.hut.x, pair.hut.y, false, pair.hut);
+          const mTask = state.tasks.get(pair.maleId);
+          const fTask = state.tasks.get(pair.femaleId);
+          if (mTask && mHutPath) {
+            mTask.path = mHutPath.path;
+            mTask.stepProgress = mHutPath.stepProgress;
+          }
+          if (fTask && fHutPath) {
+            fTask.path = fHutPath.path;
+            fTask.stepProgress = fHutPath.stepProgress;
+          }
+        }
+      } else if (pair.stage === 'enterHut' || pair.stage === 'inHut') {
+        if (!isUnitInsideBuilding(d, unitId)) {
+          setUnitCarry(unitId, 0, 0);
+          const slot = enterRestHut(d, pair.hut.bid, unitId);
+          if (!slot) {
+            cancelPair();
+            continue;
+          }
+          if (task.role === 'male') pair.maleInHut = true;
+          else pair.femaleInHut = true;
+          if (pair.maleInHut && pair.femaleInHut) {
+            pair.stage = 'inHut';
+            pair.hutTicks = 0;
+          }
+        }
+        e[3030 + unitId] = task.workTicks & 0xff;
+        if (pair.maleInHut && pair.femaleInHut) {
+          if (task.role === 'male') pair.hutTicks++;
+          if (pair.hutTicks >= 36 && !pair.born) {
+            pair.born = true;
+            if (state.population < state.housingCap) {
+              const newId = spawnNewbornVillager(d, pair.hut.x + 1, pair.hut.y + pair.hut.h);
+              if (newId > 0) {
+                state.population = getVillagerIds().length;
+                const babyName = getVillagerName(d, newId);
+                state.message = `🎉 Em bé sơ sinh ${babyName} đã chào đời tại Lều!`;
+              }
+            }
+            for (const uid of [pair.maleId, pair.femaleId]) {
+              exitBuildingSlot(d, uid);
+              setUnitCarry(uid, 0, 0);
+              e[2020 + uid] = 100;
+              e[505 + uid] = 100;
+              e[2222 + uid] = 0;
+              e[3333 + uid] = -1;
+              setUnitAnim(uid, 8, 0);
+              state.tasks.delete(uid);
+            }
+            uiChanged = true;
+          }
+        }
+      }
     }
   }
 
@@ -2807,7 +3097,32 @@ function stepVillagerNeeds() {
 
   for (const id of ids) {
     const task = state.tasks.get(id);
-    if (task?.kind === 'rest' || task?.kind === 'eat') continue;
+    const age = e[1414 + id] & 0xff;
+
+    // Children (age < 12) grow up gradually and play around the village
+    if (age < 12) {
+      e[2121 + id] = 100;
+      e[2020 + id] = 100;
+      e[505 + id] = 100;
+      e[3333 + id] = -1;
+      if (state.animTick % 84 === 0) {
+        const nextAge = age + 1;
+        e[1414 + id] = nextAge;
+        if (nextAge >= 12) {
+          e[6767 + id] = 42;
+          e[1919 + id] = 42;
+          setUnitAnim(id, 8, 0);
+          state.message = `🎂 ${getVillagerName(d, id)} đã trưởng thành và sẵn sàng lao động!`;
+          changed = true;
+        }
+      } else if (!task) {
+        // Idle child plays (anim 46, 9f) or stands (anim 14)
+        setUnitAnim(id, Math.random() < 0.45 ? 46 : 14, 0);
+      }
+      continue;
+    }
+
+    if (task?.kind === 'rest' || task?.kind === 'eat' || task?.kind === 'courtship') continue;
 
     const working = Boolean(task);
     let satiety = Math.max(0, (e[2121 + id] & 0xff) - (working ? 2 : 1));
@@ -2847,6 +3162,17 @@ function stepVillagerNeeds() {
         }
       }
     }
+  }
+
+  // Authentic automatic courtship & tribe reproduction (b.java:3357-3473):
+  // Periodically pairs an adult male + female to pick flowers, gift them in front of a Lều, and have a baby!
+  if (
+    state.population < state.housingCap &&
+    finishedHuts.length > 0 &&
+    state.animTick >= 112 &&
+    state.animTick % 168 === 0
+  ) {
+    if (startCourtshipPair(false)) changed = true;
   }
 
   return changed;
@@ -3213,13 +3539,28 @@ function openCanvasBuildingMenu(bld) {
       },
     });
   } else if (bld.targetType === 2) {
-    // Lều: rest/sleep
+    // Lều: rest/sleep + courtship & reproduction
     items.push({
       label: 'VÀO LỀU NGỦ HỒI SỨC',
       iconAnim: 13,
       action: () => {
         const uid = state.selectedUnit || findNearestVillager(bld.x, bld.y, true);
         if (uid) assignRestTask(uid, bld);
+        state.canvasMenu = null;
+        render();
+      },
+    });
+    items.push({
+      label: 'HẸN HÒ SINH CON',
+      iconAnim: 21,
+      action: () => {
+        const ok = startCourtshipPair(true, bld);
+        if (!ok) {
+          state.message =
+            state.population >= state.housingCap
+              ? 'Bộ lạc đã đủ dân số tối đa, hãy xây thêm Lều!'
+              : 'Cần ít nhất 1 nam & 1 nữ trưởng thành rảnh để hẹn hò sinh con.';
+        }
         state.canvasMenu = null;
         render();
       },

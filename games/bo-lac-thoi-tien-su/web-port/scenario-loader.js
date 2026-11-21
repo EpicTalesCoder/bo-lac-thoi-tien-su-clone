@@ -323,7 +323,7 @@ export function exitBuildingSlot(data, unitId) {
     let rem = e[8993 + bid];
     let g1 = 0;
     while (rem > 0 && g1++ < 16) {
-      if ((e[1414 + rem] & 0xff) >= 16) {
+      if ((e[1414 + rem] & 0xff) >= 12) {
         if ((e[1515 + rem] & 0xff) === 0) hasM = true;
         else hasF = true;
       }
@@ -544,7 +544,7 @@ export function enterRestHut(data, bid, unitId) {
   let occupant = e[8993 + bid];
   let chk = 0;
   while (occupant > 0 && chk++ < 16) {
-    if ((e[1414 + occupant] & 0xff) >= 16) {
+    if ((e[1414 + occupant] & 0xff) >= 12) {
       if ((e[1515 + occupant] & 0xff) === 0) hasAdultMale = true;
       else hasAdultFemale = true;
     }
@@ -571,6 +571,7 @@ export function enterRestHut(data, bid, unitId) {
 
 export function spawnNewbornVillager(data, x, y) {
   const e = data.entityData;
+  const fo = data.entityFieldOffsets;
   let uid = -1;
   for (let i = 1; i <= 50; i++) {
     if ((e[1919 + i] & 0xff) === 0) {
@@ -579,7 +580,23 @@ export function spawnNewbornVillager(data, x, y) {
     }
   }
   if (uid === -1) return -1;
-  return spawnUnit(data, 0, x, y, uid + 7);
+  const spawned = spawnUnit(data, 0, x, y, uid + 7);
+  if (spawned > 0) {
+    // Authentic newborn / child (age < 12 uses toddler/child sprite in render-original.js)
+    e[1414 + spawned] = 1;
+    e[6767 + spawned] = 20;
+    e[1919 + spawned] = 20;
+    e[2020 + spawned] = 100;
+    e[2121 + spawned] = 100;
+    e[505 + spawned] = 100;
+    e[6464 + spawned] = 69;
+    e[6565 + spawned] = 9;
+    if (fo) {
+      e[fo[29] + spawned] = 14; // child idle pose (pose 489)
+      e[fo[30] + spawned] = 0;
+    }
+  }
+  return spawned;
 }
 
 export function finishConstructionSite(data, bid) {
