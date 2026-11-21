@@ -415,16 +415,15 @@ function drawMapObject(ctx, data, n, layer, ah, ai, camX, camY, originY, animTic
     } else if ((kind === 3 || kind === 5 || kind === 7) && flagH[slotId] === 0 && unitInSlot > 0 && layer !== 2) {
       let dir = 0;
       let shouldDraw = false;
-      if (n9 < 31 || (e[9176 + n9] & 3) >= 2) {
-        if (kind === 7 && e[1313 + unitInSlot] === 50) {
-          shouldDraw = true;
-        } else if (kind === 3 && e[1313 + unitInSlot] >= 1 && e[1313 + unitInSlot] !== 50) {
-          dir = m[mo[139] + m[mo[140] + n8] + slotId];
-          if (dir === -1) dir = e[606 + unitInSlot];
-          shouldDraw = true;
-        } else if (kind === 5 && e[1313 + unitInSlot] <= 0) {
-          shouldDraw = true;
-        }
+      // Draw interior builders & workers for BOTH Tribe 0 (n9 < 31) and Tribe 1 (n9 >= 31) whenever visible!
+      if (kind === 7 && e[1313 + unitInSlot] === 50) {
+        shouldDraw = true;
+      } else if (kind === 3 && e[1313 + unitInSlot] >= 1 && e[1313 + unitInSlot] !== 50) {
+        dir = m[mo[139] + m[mo[140] + n8] + slotId];
+        if (dir === -1) dir = e[606 + unitInSlot];
+        shouldDraw = true;
+      } else if (kind === 5 && e[1313 + unitInSlot] <= 0) {
+        shouldDraw = true;
       }
       if (shouldDraw) {
         drawEntitySprite(ctx, data, unitInSlot, px, py, dir, 29, imageCache, uiState);
@@ -1472,23 +1471,26 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
       }
     }
 
-    // 2. Authentic INTACT building structure ghost sprite (skip kind 0 ground tiles which sit on the green/red grid)
+    // 2. Authentic COMPLETE building ghost sprite (kind 0 base panels at exact bytes[1]/[2] offsets + kind 1 walls + kind 2/6 decor, skipping fire slot 2)
     if (bp.bType !== undefined && bp.bType >= 0 && bp.bType <= 11) {
       const shorts = data.shortSpriteTables;
       const bytes = data.byteSpriteTables;
-      let idx = shorts[0][bp.bType + 1];
-      let remaining = bytes[0][bp.bType + 1] & 0xff;
-      // Advance past all leading kind===0 ground footprint entries exactly like drawMapObject Layer 1
-      while (remaining > 0 && idx < bytes[3].length && (bytes[3][idx] & 7) === 0) {
-        idx++;
-        remaining--;
-      }
+      const startIdx = shorts[0][bp.bType + 1];
+      const partCount = bytes[0][bp.bType + 1] & 0xff;
       let resSkip = 0;
       ctx.globalAlpha = bp.valid ? 0.85 : 0.55;
-      for (let i = 0; i < remaining && idx < shorts[1].length; i++, idx++) {
+      for (let i = 0, idx = startIdx; i < partCount && idx < shorts[1].length; i++, idx++) {
         const kind = bytes[3][idx] & 7;
+        const slotId = (bytes[3][idx] & 0x3f) >>> 3;
         const stageReq = (bytes[3][idx] & 0xff) >>> 6;
-        if (kind === 0 || stageReq > 1) continue;
+        if (stageReq > 1) continue;
+        if (kind === 0) {
+          // Exact drawMapObject Layer 0 placement: bytes[1]/[2] already hold building-relative (0,0), (22,0), (0,16), (22,16) offsets (NO xHi!)
+          const px = bx + toSignedByte(bytes[1][idx]);
+          const py = by + toSignedByte(bytes[2][idx]);
+          drawComposite(ctx, data, shorts[1][idx] & 0xfff, px, py, imageCache);
+          continue;
+        }
         const xHi = ((shorts[1][idx] & 0xc000) >>> 14) << 7;
         const px = bx + toSignedByte(bytes[1][idx]) + xHi;
         const py = by + toSignedByte(bytes[2][idx]);
@@ -1502,7 +1504,7 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
             continue;
           }
           drawComposite(ctx, data, shorts[1][idx] & 0xfff, px, py, imageCache);
-        } else if (kind === 2 || kind === 6) {
+        } else if (kind === 2 || (kind === 6 && slotId !== 2)) {
           drawAnimation(ctx, data, shorts[1][idx] & 0xfff, px, py, animTick, imageCache);
         }
       }
