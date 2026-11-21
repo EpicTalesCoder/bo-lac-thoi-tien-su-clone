@@ -3003,31 +3003,6 @@ function gatherNearest() {
   commandUnitTo(best.x, best.y);
 }
 
-function stepWildAnimals() {
-  const d = state.data;
-  const e = d.entityData;
-  const animals = getWildAnimals();
-  for (const a of animals) {
-    const aid = a.aid;
-    const animId = e[9557 + aid] & 0xff;
-    const frameCount = d.byteSpriteTables[4][animId] & 0xff;
-    if (frameCount > 1) {
-      e[9579 + aid] = (e[9579 + aid] + 1) % frameCount;
-    }
-    if ((state.animTick + aid * 3) % 12 !== 0) continue;
-    const dirObj = DIRS[(state.animTick + aid * 5) % DIRS.length];
-    const nx = a.x + dirObj.dx;
-    const ny = a.y + dirObj.dy;
-    if (nx > 1 && ny > 1 && nx < d.width - 2 && ny < d.height - 2 && d.occupancy[ny][nx] === 0 && (d.terrain[ny][nx] & 0xff) < 175) {
-      d.occupancy[a.y][a.x] = 0;
-      e[9359 + aid] = nx;
-      e[9381 + aid] = ny;
-      e[9491 + aid] = dirObj.dir;
-      d.occupancy[ny][nx] = a.occ;
-    }
-  }
-}
-
 function stepProjectiles() {
   if (state.projectiles.length === 0) return false;
   let changed = false;
@@ -5171,8 +5146,7 @@ function stepSimulation() {
     }
   }
 
-  // Wild animal movement & animation, flying projectiles, and Enemy AI
-  stepWildAnimals();
+  // Flying projectiles and Enemy AI
   if (stepProjectiles()) uiChanged = true;
   if (state.aiMode && state.animTick % 22 === 0) {
     if (stepAiCommander()) uiChanged = true;
@@ -5236,6 +5210,11 @@ function stepSimulation() {
         }
       }
     }
+  }
+
+  // Periodic wild animal behavior: Deer (kind 2) flee from people; Boars (kind 0) & Tigers (kind 1) attack nearby people and villagers retaliate!
+  if (state.animTick % 4 === 0) {
+    if (stepWildAnimals()) uiChanged = true;
   }
 
   // Periodic villager survival needs, thought bubbles, auto self-care & tribe births
@@ -5323,6 +5302,156 @@ function stepSimulation() {
 
   draw();
   if (uiChanged) updatePanel();
+}
+
+function stepWildAnimals() {
+  const d = state.data;
+  if (!d) return false;
+  const e = d.entityData;
+  const w = d.width;
+  const h = d.height;
+  let changed = false;
+
+  // Collect living outside villagers/warriors of both tribes
+  const people = [];
+  for (let uid = 1; uid <= 100; uid++) {
+    if ((e[1919 + uid] & 0xff) <= 0) continue;
+    if (isUnitInsideBuilding(d, uid)) continue;
+    people.push({ uid, x: e[uid] & 0xff, y: e[101 + uid] & 0xff, age: e[1414 + uid] & 0xff });
+  }
+
+  // Collect building centers so wandering animals don't drift into villages
+  const blds = [];
+  for (let bid = 1; bid <= 60; bid++) {
+    if ((e[8505 + bid] & 0xff) > 0) {
+      blds.push({ x: e[8383 + bid] & 0xff, y: e[8444 + bid] & 0xff });
+    }
+  }
+  const nearAnyBld = (x, y) => blds.some((b) => Math.hypot(b.x - x, b.y - y) < 8);
+
+  const canStepAnimal = (nx, ny) =>
+    nx >= 1 && ny >= 1 && nx < w - 1 && ny < h - 1 && d.occupancy[ny][nx] === 0 && (d.terrain[ny][nx] & 0xff) < 175;
+
+  const moveAnimalOneTile = (aid, ax, ay, nx, ny, walkAnim) => {
+    if (d.occupancy[ay][ax] === 101 + aid) d.occupancy[ay][ax] = 0;
+    e[9359 + aid] = nx;
+    e[9381 + aid] = ny;
+    e[9645 + aid] = nx;
+    e[9667 + aid] = ny;
+    e[9403 + aid] = 0;
+    e[9425 + aid] = 0;
+    e[9491 + aid] = directionFromDelta(nx - ax, ny - ay);
+    e[9557 + aid] = walkAnim;
+    e[9579 + aid] = ((e[9579 + aid] & 0xff) + 1) % Math.max(1, d.byteSpriteTables[4][walkAnim] & 0xff);
+    d.occupancy[ny][nx] = 101 + aid;
+    changed = true;
+  };
+
+  for (let aid = 0; aid < 22; aid++) {
+    const hp = e[9513 + aid] & 0xff;
+    if (hp <= 0) continue;
+    const kind = e[9535 + aid] & 0xff; // 0 = Boar, 1 = Tiger, 2 = Deer
+    const ax = e[9359 + aid] & 0xff;
+    const ay = e[9381 + aid] & 0xff;
+    const idleAnim = kind === 0 ? 48 : kind === 1 ? 50 : 52;
+    const walkAnim = kind === 0 ? 47 : kind === 1 ? 49 : 51;
+
+    // Find nearest living person outside a building
+    let nearest = null;
+    let bestDist = Infinity;
+    for (const p of people) {
+      const dist = Math.max(Math.abs(p.x - ax), Math.abs(p.y - ay));
+      if (dist < bestDist) {
+        bestDist = dist;
+        nearest = p;
+      }
+    }
+
+    if (kind === 2) {
+      // === DEER (Hươu): flees away when any person comes within 4 tiles! ===
+      if (nearest && bestDist <= 4) {
+        let bestMove = null;
+        let bestScore = bestDist;
+        for (const s of DIRS) {
+          const nx = ax + s.dx;
+          const ny = ay + s.dy;
+          if (!canStepAnimal(nx, ny)) continue;
+          const nd = Math.hypot(nx - nearest.x, ny - nearest.y);
+          if (nd > bestScore) {
+            bestScore = nd;
+            bestMove = { nx, ny };
+          }
+        }
+        if (bestMove) {
+          moveAnimalOneTile(aid, ax, ay, bestMove.nx, bestMove.ny, walkAnim);
+          continue;
+        }
+      }
+    } else {
+      // === BOAR (Lợn rừng, kind 0) & TIGER (Cọp, kind 1): chase & attack people within 4-5 tiles! ===
+      const aggroRange = kind === 1 ? 5 : 4;
+      if (nearest && bestDist <= aggroRange) {
+        if (bestDist <= 1) {
+          // Adjacent -> attack villager!
+          e[9491 + aid] = directionFromDelta(nearest.x - ax, nearest.y - ay);
+          e[9557 + aid] = walkAnim;
+          e[9579 + aid] = ((e[9579 + aid] & 0xff) + 1) % Math.max(1, d.byteSpriteTables[4][walkAnim] & 0xff);
+          if (state.animTick % 8 === 0) {
+            const dmg = kind === 1 ? 7 : 4;
+            applyUnitDamage(0, nearest.uid, dmg);
+            // Attacked adult villager automatically retaliates against the boar/tiger!
+            if ((e[1919 + nearest.uid] & 0xff) > 0 && nearest.age >= 12) {
+              const curT = state.tasks.get(nearest.uid);
+              if (!curT || (curT.kind !== 'hunt' && curT.kind !== 'attackUnit' && curT.kind !== 'armForBattle')) {
+                assignHuntTask(nearest.uid, 101 + aid);
+              }
+            }
+            changed = true;
+          }
+          continue;
+        } else {
+          // Chase closer toward the person
+          let bestMove = null;
+          let bestStepDist = Infinity;
+          for (const s of DIRS) {
+            const nx = ax + s.dx;
+            const ny = ay + s.dy;
+            if (!canStepAnimal(nx, ny)) continue;
+            const nd = Math.hypot(nx - nearest.x, ny - nearest.y);
+            if (nd < bestStepDist) {
+              bestStepDist = nd;
+              bestMove = { nx, ny };
+            }
+          }
+          if (bestMove) {
+            moveAnimalOneTile(aid, ax, ay, bestMove.nx, bestMove.ny, walkAnim);
+            // If an adult villager sees a boar/tiger charging right next to them (<= 2 tiles), fight back!
+            if (bestStepDist <= 2 && nearest.age >= 12) {
+              const curT = state.tasks.get(nearest.uid);
+              if (!curT || (curT.kind !== 'hunt' && curT.kind !== 'attackUnit' && curT.kind !== 'armForBattle')) {
+                assignHuntTask(nearest.uid, 101 + aid);
+              }
+            }
+            continue;
+          }
+        }
+      }
+    }
+
+    // Calm forest wandering every ~20 ticks (stays out of villages)
+    if ((state.animTick + aid * 7) % 20 === 0) {
+      const s = DIRS[(state.animTick + aid * 3) % DIRS.length];
+      const nx = ax + s.dx;
+      const ny = ay + s.dy;
+      if (canStepAnimal(nx, ny) && !nearAnyBld(nx, ny)) {
+        moveAnimalOneTile(aid, ax, ay, nx, ny, walkAnim);
+        continue;
+      }
+    }
+    e[9557 + aid] = idleAnim;
+    e[9579 + aid] = ((e[9579 + aid] & 0xff) + 1) % Math.max(1, d.byteSpriteTables[4][idleAnim] & 0xff);
+  }
+  return changed;
 }
 
 function stepVillagerNeeds() {

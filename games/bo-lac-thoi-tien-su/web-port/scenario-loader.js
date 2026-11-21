@@ -990,14 +990,14 @@ export function populateForestWildlife(data, targetCount = 10) {
     return false;
   };
 
-  // Collect forest-edge grass tiles
+  // Collect deep-forest grass tiles well away from town buildings (>= 12 tiles)
   const candidates = [];
   for (let y = 2; y < h - 2; y++) {
     for (let x = 2; x < w - 2; x++) {
       if (data.occupancy[y][x] !== 0) continue;
       if ((data.terrain[y][x] & 0xff) >= 175) continue;
       const bDist = distToNearestBld(x, y);
-      if (bDist < 6) continue;
+      if (bDist < 12) continue;
       if (isNearTree(x, y)) {
         candidates.push({ x, y, bDist });
       }
@@ -1005,7 +1005,7 @@ export function populateForestWildlife(data, targetCount = 10) {
   }
   if (candidates.length === 0) return 0;
 
-  // Deterministic spread across the map (Deer=2, Boar=0, Tiger=1)
+  // Deterministic spread across the forest (Deer=2, Boar=0, Tiger=1)
   const speciesOrder = [2, 0, 2, 1, 2, 0, 2, 1, 0, 2];
   let spawned = 0;
   const chosen = [];
@@ -1017,8 +1017,8 @@ export function populateForestWildlife(data, targetCount = 10) {
       const minSep = pass === 0 ? 7 : 3;
       if (chosen.some((p) => Math.hypot(p.x - c.x, p.y - c.y) < minSep)) continue;
       const kind = speciesOrder[(existing + spawned) % speciesOrder.length];
-      // Keep Tigers (kind 1) slightly deeper in the forest (>= 10 tiles from bases)
-      if (kind === 1 && c.bDist < 10 && pass === 0) continue;
+      // Keep Tigers (kind 1) even deeper in the forest (>= 15 tiles from bases)
+      if (kind === 1 && c.bDist < 15 && pass === 0) continue;
       const aid = spawnWildAnimal(data, kind, c.x, c.y, (existing + spawned) % 4);
       if (aid >= 0) {
         chosen.push(c);
