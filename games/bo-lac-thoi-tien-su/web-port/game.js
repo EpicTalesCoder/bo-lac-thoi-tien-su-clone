@@ -2165,18 +2165,24 @@ function assignTrainOrFetchWeapon(unitId, bld, owner = state.localTribe ?? 0, si
   const e = d.entityData;
   const curWeapon = e[6565 + unitId] & 0xff;
   const isThrowing = bld.targetType === 5;
-  // Already armed -> go directly into training building!
-  if (curWeapon !== 9) {
+  // Strongest -> weakest weapon IDs per combat style:
+  // Throwing: 5=Rìu nhỏ (+14), 2=Giáo (+9), 1=Đá ném (+6)
+  // Melee:    4=Chùy xương (+12), 3=Búa đá (+11), 0=Dùi cui (+5)
+  const matchingOrder = isThrowing ? [5, 2, 1] : [4, 3, 0];
+  const hasMatchingWeapon = matchingOrder.includes(curWeapon);
+  const holdingWrongType = curWeapon !== 9 && !hasMatchingWeapon;
+
+  // Already holding a matching weapon for this training hall -> go directly into training!
+  if (hasMatchingWeapon) {
     return assignWorkAtBuilding(unitId, bld);
   }
   const r = d.resources?.[owner];
   const storage = findNearestDropoff(e[unitId] & 0xff, e[101 + unitId] & 0xff, owner);
 
-  // First check if Storage already has a crafted weapon matching the training building type!
-  const craftedOrder = isThrowing ? [2, 5, 1] : [4, 3, 0];
+  // Check if Storage has any matching weapon (picking the STRONGEST available in stock!)
   let craftedWId = -1;
   if (r) {
-    for (const wid of craftedOrder) {
+    for (const wid of matchingOrder) {
       if ((r[5 + wid] || 0) > 0) {
         craftedWId = wid;
         break;
@@ -2185,6 +2191,9 @@ function assignTrainOrFetchWeapon(unitId, bld, owner = state.localTribe ?? 0, si
   }
   if (craftedWId >= 0) {
     if (!storage) {
+      if (holdingWrongType && curWeapon < 6) {
+        r[5 + curWeapon] = Math.min(35, (r[5 + curWeapon] || 0) + 1);
+      }
       r[5 + craftedWId] = Math.max(0, (r[5 + craftedWId] || 0) - 1);
       e[6565 + unitId] = craftedWId;
       return assignWorkAtBuilding(unitId, bld);
@@ -2201,6 +2210,7 @@ function assignTrainOrFetchWeapon(unitId, bld, owner = state.localTribe ?? 0, si
       trainBld: bld,
       weaponId: craftedWId,
       fromStock: true,
+      swapOldWeapon: holdingWrongType,
       owner,
       workTicks: 0,
     });
@@ -2208,9 +2218,25 @@ function assignTrainOrFetchWeapon(unitId, bld, owner = state.localTribe ?? 0, si
     if (!silent) {
       const info = getVillagerInfo(unitId);
       const wName = WEAPONS[craftedWId]?.name || 'Vũ khí';
-      state.message = `${info.role} đang vào kho lấy ${wName} trước khi vào ${bld.spec.name}!`;
+      state.message = holdingWrongType
+        ? `${info.role} đang vào kho đổi sang ${wName} mạnh nhất rồi vào ${bld.spec.name}!`
+        : `${info.role} đang vào kho lấy ${wName} trước khi vào ${bld.spec.name}!`;
     }
     return true;
+  }
+
+  // If currently holding a weapon of the WRONG combat style (e.g. holding throwing weapon when entering
+  // Phòng tập đánh) and Storage has NO matching weapon -> do NOTHING!
+  if (holdingWrongType) {
+    if (!silent) {
+      const info = getVillagerInfo(unitId);
+      showWarning(
+        isThrowing
+          ? `⚠ Kho chưa có vũ khí ném (Đá ném / Giáo / Rìu nhỏ) để đổi cho ${info.role}!`
+          : `⚠ Kho chưa có vũ khí đánh (Dùi cui / Búa đá / Chùy xương) để đổi cho ${info.role}!`
+      );
+    }
+    return false;
   }
 
   // Unarmed: if tribe disabled raw Stone/Wood weapons, enter training unarmed; otherwise take 1 Stone/Wood from Storage
@@ -2839,15 +2865,17 @@ function commandUnitTo(tx, ty, overrideIds = null, owner = state.localTribe ?? 0
         return;
       }
     } else if (bld && (bld.targetType === 1 || bld.targetType === 5)) {
-      // Phòng tập (1) / Khu tập ném (5): auto-grab 1 Wood / 1 Stone from Storage if unarmed, then train!
+      // Phòng tập (1) / Khu tập ném (5): check weapon compatibility, swap to strongest matching weapon in Storage, or do nothing if missing!
       let sent = 0;
+      let outsideTried = 0;
       for (const uid of adultIds) {
         if ((d.entityData[4444 + uid] & 0xff) === bld.bid) continue;
+        outsideTried++;
         if (assignTrainOrFetchWeapon(uid, bld, owner, Boolean(overrideIds))) sent++;
       }
       if (sent > 0 && !overrideIds) {
         render();
-      } else if (sent === 0 && !overrideIds) {
+      } else if (outsideTried === 0 && !overrideIds) {
         openCanvasBuildingMenu(bld);
       }
       return;
@@ -4561,20 +4589,45 @@ function stepSimulation() {
       }
       uiChanged = true;
     } else if (task.kind === 'fetchWeaponAndTrain') {
-      // Arrived at Storage: take crafted weapon (or 1 Wood / 1 Stone), equip weapon, and head to training building!
+      // Arrived at Storage: swap/take strongest matching weapon (or 1 Wood / 1 Stone if unarmed), then head to training!
       const owner = task.owner ?? (unitId > 50 ? 1 : 0);
       const r = d.resources?.[owner];
-      if (task.fromStock && r && (r[5 + task.weaponId] || 0) >= 1) {
-        r[5 + task.weaponId] = Math.max(0, (r[5 + task.weaponId] || 0) - 1);
-        e[6565 + unitId] = task.weaponId;
-        state.tasks.delete(unitId);
-        assignWorkAtBuilding(unitId, task.trainBld);
-        if (owner === (state.localTribe ?? 0)) {
-          const wName = WEAPONS[task.weaponId]?.name || 'Vũ khí';
-          state.message = `${getVillagerInfo(unitId).role} đã lấy ${wName} và đang tiến vào ${task.trainBld.spec.name}!`;
+      if (task.fromStock && r) {
+        const isThrowTrain = task.trainBld?.targetType === 5;
+        const matchOrder = isThrowTrain ? [5, 2, 1] : [4, 3, 0];
+        let pickedWId = (r[5 + task.weaponId] || 0) >= 1 ? task.weaponId : -1;
+        if (pickedWId < 0) {
+          for (const wid of matchOrder) {
+            if ((r[5 + wid] || 0) >= 1) {
+              pickedWId = wid;
+              break;
+            }
+          }
         }
-        uiChanged = true;
-        continue;
+        if (pickedWId >= 0) {
+          const oldW = e[6565 + unitId] & 0xff;
+          if (oldW < 6 && oldW !== pickedWId) {
+            r[5 + oldW] = Math.min(35, (r[5 + oldW] || 0) + 1);
+          }
+          r[5 + pickedWId] = Math.max(0, (r[5 + pickedWId] || 0) - 1);
+          e[6565 + unitId] = pickedWId;
+          state.tasks.delete(unitId);
+          assignWorkAtBuilding(unitId, task.trainBld);
+          if (owner === (state.localTribe ?? 0)) {
+            const wName = WEAPONS[pickedWId]?.name || 'Vũ khí';
+            state.message = task.swapOldWeapon
+              ? `${getVillagerInfo(unitId).role} đã đổi sang ${wName} và đang tiến vào ${task.trainBld.spec.name}!`
+              : `${getVillagerInfo(unitId).role} đã lấy ${wName} và đang tiến vào ${task.trainBld.spec.name}!`;
+          }
+          uiChanged = true;
+          continue;
+        }
+        if (task.swapOldWeapon) {
+          setUnitAnim(unitId, 8, 0);
+          state.tasks.delete(unitId);
+          uiChanged = true;
+          continue;
+        }
       }
       const isStone = task.resType === 'stone';
       const curAmt = owner === (state.localTribe ?? 0) ? (isStone ? state.stone : state.wood) : (r?.[isStone ? 2 : 1] || 0);
@@ -6328,7 +6381,10 @@ function openCanvasBuildingMenu(bld) {
       iconAnim: 13,
       action: () => {
         const uid = state.selectedUnit || findNearestVillager(bld.x, bld.y, true);
-        if (uid) assignWorkAtBuilding(uid, bld);
+        if (uid) {
+          if (isTrainingHall) assignTrainOrFetchWeapon(uid, bld);
+          else assignWorkAtBuilding(uid, bld);
+        }
         state.canvasMenu = null;
         render();
       },
