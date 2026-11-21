@@ -578,12 +578,44 @@ function applyBuildingDamage(attackerId, bid, dmg) {
 
   const bx = e[8383 + bid] & 0xff;
   const by = e[8444 + bid] & 0xff;
+  const rawType = e[8749 + bid] & 0xff;
+  const targetType = rawType >= 12 && rawType <= 19 ? (e[9237 + bid] & 0xff) : rawType;
+  const spec = getBuildingSpec(d, targetType);
+  const bcx = bx + Math.floor((spec.width || 2) / 2);
+  const bcy = by + Math.floor((spec.height || 2) / 2);
   addPopup(bx + 1, by, `-${dmg}`, '#ff944d');
   if (nextHp > 0 && nextHp * 2 < maxHp) {
     e[8627 + bid] = 2; // damaged burning state -> renders authentic fire flames d(110)!
   }
+  const bldOwner = bid > 30 ? 1 : 0;
   if (bid <= 30 && attackerId > 50) {
     alertCombat('Nhà của chúng ta đang bị tấn công!');
+  }
+
+  // Exact port of b.java:3624-3626: when a building is attacked, all adult villagers of that tribe
+  // inside the attacked building OR within 9 tiles around it immediately rush out to defend & counter-attack!
+  if (nextHp > 0 && attackerId >= 1 && attackerId <= 100 && (e[1919 + attackerId] & 0xff) > 0) {
+    for (const uid of getVillagerIds(bldOwner)) {
+      if ((e[1414 + uid] & 0xff) < 12) continue; // children don't fight
+      const curTask = state.tasks.get(uid);
+      if (
+        curTask &&
+        (curTask.kind === 'attackUnit' ||
+          curTask.kind === 'attackBuilding' ||
+          curTask.kind === 'armForBattle')
+      ) {
+        continue;
+      }
+      const insideThisBld = isUnitInsideBuilding(d, uid) && (e[4444 + uid] & 0xff) === bid;
+      const info = getVillagerInfo(uid);
+      const distToBld = Math.hypot(info.x - bcx, info.y - bcy);
+      const ax = e[attackerId] & 0xff;
+      const ay = e[101 + attackerId] & 0xff;
+      const distToAttacker = Math.hypot(info.x - ax, info.y - ay);
+      if (insideThisBld || distToBld <= 9 || distToAttacker <= 8) {
+        assignAttackTask(uid, 'unit', attackerId);
+      }
+    }
   }
 
   if (nextHp <= 0) {
@@ -4761,16 +4793,16 @@ function stepSimulation() {
     uiChanged = true;
   }
 
-  // Per-unit aggro scan radius: adult villagers seeing a nearby enemy immediately run to grab a weapon (default Stone) and fight back!
+  // Per-unit aggro scan radius: adult villagers seeing a nearby enemy (or enemy near a tribe building) immediately run to grab a weapon (default Stone) and fight back!
   if (state.animTick % 6 === 0) {
     const tribesToScan = state.mpMode || state.aiMode ? [0, 1] : [0];
     for (const owner of tribesToScan) {
       const allies = getVillagerIds(owner);
       const enemies = getEnemyIds(owner);
       if (enemies.length === 0) continue;
+      const ownBlds = getPlayerBuildings(owner);
       for (const uid of allies) {
         if ((e[1414 + uid] & 0xff) < 12) continue; // children don't fight
-        if (isUnitInsideBuilding(d, uid)) continue;
         const curTask = state.tasks.get(uid);
         // Never interrupt existing combat, weapon fetching, or courtship
         if (
@@ -4782,20 +4814,33 @@ function stepSimulation() {
         ) {
           continue;
         }
-        const ux = e[uid] & 0xff;
-        const uy = e[101 + uid] & 0xff;
+        const info = getVillagerInfo(uid);
+        const ux = info.x;
+        const uy = info.y;
+        const insideBuilding = isUnitInsideBuilding(d, uid);
         const hasWeapon = (e[6565 + uid] & 0xff) < 9;
-        // Idle/walking villagers scan 4..6 tiles; busy workers (gathering/returning/building) defend themselves when enemy closes within 4 tiles
+        // Idle/walking villagers scan 6 tiles; busy workers/builders defend when enemy is within 6 tiles (or 4 tiles if inside a building)
         const isBusyWorker = Boolean(curTask && curTask.kind !== 'move');
-        const scanRadius = isBusyWorker ? 4 : getUnitRange(uid) > 1 ? 6 : hasWeapon ? 5 : 5;
+        const scanRadius = insideBuilding ? 4 : isBusyWorker ? 6 : getUnitRange(uid) > 1 ? 7 : hasWeapon ? 6 : 6;
         let nearestEnemy = 0;
         let bestDist = scanRadius + 0.01;
         for (const eid of enemies) {
           if (isUnitInsideBuilding(d, eid)) continue;
-          const dist = Math.hypot((e[eid] & 0xff) - ux, (e[101 + eid] & 0xff) - uy);
+          const ex = e[eid] & 0xff;
+          const ey = e[101 + eid] & 0xff;
+          const dist = Math.hypot(ex - ux, ey - uy);
           if (dist <= bestDist) {
             bestDist = dist;
             nearestEnemy = eid;
+            continue;
+          }
+          // Also react if an enemy is attacking/threatening a nearby tribe building within 4 tiles of the enemy and 9 tiles of this villager!
+          if (!insideBuilding && dist <= 9) {
+            const threateningBase = ownBlds.some((b) => distanceToRect(ex, ey, b) <= 3);
+            if (threateningBase && dist < bestDist + 3) {
+              bestDist = dist;
+              nearestEnemy = eid;
+            }
           }
         }
         if (nearestEnemy > 0) {
