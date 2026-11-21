@@ -1519,30 +1519,30 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
     ctx.restore();
   }
 
-  // Pass 5: Authentic hand cursor (f.java c())
-  const curScreenX = (curWX - camX) * CELL_WIDTH;
-  const curScreenY = originY + (curWY - camY) * CELL_HEIGHT;
-  let cursorAnim = 32;
-  if (state.selectedUnit > 0 || state.selectedUnits?.size > 0) {
-    const targetOcc = hoverCellOcc;
-    const targetTile = curWY >= 0 && curWY < data.height && curWX >= 0 && curWX < data.width ? data.terrain[curWY][curWX] & 0xff : 0;
-    const isHostileOrGatherable =
-      isItemProp(targetOcc) ||
-      targetOcc === -124 ||
-      targetOcc === -125 ||
-      targetOcc === -127 ||
-      (targetTile >= 180 && targetTile <= 231) ||
-      buildingOwner(targetOcc) === 1 ||
-      (targetOcc >= 51 && targetOcc <= 100) ||
-      isWildAnimal(targetOcc);
-    cursorAnim = isHostileOrGatherable ? 34 : 33;
-  }
-  drawAnimation(ctx, data, cursorAnim, curScreenX, curScreenY, Math.floor(animTick / 2), imageCache);
-
   ctx.restore();
 
   // Pass 6: Authentic Top & Bottom HUD
   drawOriginalHud(ctx, data, state, imageCache);
+
+  // Pass 6b: On-canvas warning banner (e.g. child cannot build/work/fight)
+  if (state.warningBanner && state.warningBanner.text && performance.now() < state.warningBanner.until) {
+    ctx.save();
+    ctx.font = 'bold 8px monospace';
+    const txt = state.warningBanner.text;
+    const tw = Math.min(LOGICAL_WIDTH - 16, ctx.measureText(txt).width + 18);
+    const bx = Math.floor((LOGICAL_WIDTH - tw) / 2);
+    const by = (state.selectedUnit > 0 ? 74 : 26);
+    ctx.fillStyle = 'rgba(120, 22, 14, 0.92)';
+    ctx.fillRect(bx, by, tw, 18);
+    ctx.strokeStyle = '#ffd25a';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(bx + 0.5, by + 0.5, tw - 1, 17);
+    ctx.fillStyle = '#fff59c';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(txt, LOGICAL_WIDTH / 2, by + 9);
+    ctx.restore();
+  }
 
   // Pass 7: Authentic /0/d0 Story Dialogue Scroll or Victory/Defeat Result Banner
   if (state.storyDialog && state.storyDialog.pages?.length > 0) {
@@ -1642,6 +1642,29 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
     ctx.restore();
   } else if (state.showMinimap) {
     drawMinimapOverlay(ctx, data, state);
+  }
+
+  // Pass 8: Authentic in-game hand cursor synced 1:1 with the player's web mouse (replaces OS cursor!)
+  if (state.pointerPos?.visible) {
+    const myTribe = state.localTribe ?? 0;
+    let cursorAnim = 32;
+    if (!state.canvasMenu && !state.showMinimap && !state.missionResult && (state.selectedUnit > 0 || state.selectedUnits?.size > 0)) {
+      const targetOcc = hoverCellOcc;
+      const targetTile = curWY >= 0 && curWY < data.height && curWX >= 0 && curWX < data.width ? data.terrain[curWY][curWX] & 0xff : 0;
+      const isEnemyUnit = myTribe === 1 ? (targetOcc >= 1 && targetOcc <= 50) : (targetOcc >= 51 && targetOcc <= 100);
+      const isEnemyBld = buildingOwner(targetOcc) === (myTribe === 1 ? 0 : 1);
+      const isHostileOrGatherable =
+        isItemProp(targetOcc) ||
+        targetOcc === -124 ||
+        targetOcc === -125 ||
+        targetOcc === -127 ||
+        (targetTile >= 180 && targetTile <= 231) ||
+        isEnemyBld ||
+        isEnemyUnit ||
+        isWildAnimal(targetOcc);
+      cursorAnim = isHostileOrGatherable ? 34 : 33;
+    }
+    drawAnimation(ctx, data, cursorAnim, Math.round(state.pointerPos.x), Math.round(state.pointerPos.y), Math.floor(animTick / 2), imageCache);
   }
 }
 

@@ -191,6 +191,8 @@ const state = {
   mpMode: true,
   localTribe: 0, // 0 = Host (Blue Tribe 1..50), 1 = Guest (Red Tribe 51..100)
   mpWinner: null,
+  pointerPos: { x: 0, y: 0, visible: false },
+  warningBanner: null,
   food: 0,
   wood: 0,
   stone: 0,
@@ -214,6 +216,12 @@ function addPopup() {
 
 function addDust(x, y, w, h) {
   state.dustEffects.push({ x, y, w, h, frame: 0, maxFrames: 20 });
+}
+
+function showWarning(text) {
+  state.warningBanner = { text, until: performance.now() + 3400 };
+  state.message = text;
+  render();
 }
 
 function syncResourcesToData(owner = state.localTribe ?? 0) {
@@ -1151,11 +1159,17 @@ function confirmBuildAtCursor(owner = state.localTribe ?? 0, overridePayload = n
     return;
   }
 
-  // Dispatch selected or nearest villager of that tribe carrying wood to enter the scaffold and build
+  // Dispatch selected or nearest ADULT villager of that tribe carrying wood to enter the scaffold and build
+  const e = state.data.entityData;
+  const selBuilder = overridePayload?.unitIds?.[0] || (owner === (state.localTribe ?? 0) ? state.selectedUnit : 0);
+  const adultIds = getVillagerIds(owner).filter((id) => (e[1414 + id] & 0xff) >= 12);
+  if (!overridePayload && selBuilder > 0 && (e[1414 + selBuilder] & 0xff) < 12 && adultIds.length === 0) {
+    showWarning('⚠ Trẻ em (dưới 12 tuổi) chưa thể xây dựng công trình!');
+    cancelBuildPlacement();
+    return;
+  }
   const builderId =
-    overridePayload?.unitIds?.[0] ||
-    (owner === (state.localTribe ?? 0) ? state.selectedUnit : 0) ||
-    getVillagerIds(owner)[0];
+    (selBuilder > 0 && (e[1414 + selBuilder] & 0xff) >= 12 ? selBuilder : 0) || adultIds[0] || 0;
   const bldObj = { bid, x: bp.x, y: bp.y, w: bp.width, h: bp.height, spec };
   if (builderId && assignBuildTask(builderId, bldObj, true)) {
     if (!overridePayload) {
@@ -1163,7 +1177,7 @@ function confirmBuildAtCursor(owner = state.localTribe ?? 0, overridePayload = n
       state.message = `Đã dựng công trường ${spec.name}! ${info.role} đang vác gỗ vào công trường thi công.`;
     }
   } else if (!overridePayload) {
-    state.message = `Đã dựng công trường ${spec.name} tại (${bp.x}, ${bp.y}). Click dân rồi click công trường để xây.`;
+    state.message = `Đã dựng công trường ${spec.name} tại (${bp.x}, ${bp.y}). Click dân lớn rồi click công trường để xây.`;
   }
   if (!overridePayload) {
     cancelBuildPlacement();
@@ -1730,10 +1744,25 @@ function commandUnitTo(tx, ty, overrideIds = null, owner = state.localTribe ?? 0
   const isEnemyUnitOcc = owner === 1 ? occ >= 1 && occ <= 50 : occ >= 51 && occ <= 100;
   const isEnemyBldOcc = owner === 1 ? occ <= -1 && occ >= -30 : occ <= -31 && occ >= -60;
   const isOwnBldOcc = owner === 1 ? occ <= -31 && occ >= -60 : occ <= -1 && occ >= -30;
+  const adultIds = activeIds.filter((id) => (d.entityData[1414 + id] & 0xff) >= 12);
 
-  // Click an enemy warrior to attack with selected unit(s)
+  // Children (age < 12) cannot build, work, gather, hunt, or fight — warn the player clearly!
+  const isWorkOrCombatTarget =
+    isEnemyUnitOcc ||
+    isEnemyBldOcc ||
+    isOwnBldOcc ||
+    (occ >= 101 && occ <= 122) ||
+    Boolean(classifyGatherable(tx, ty));
+  if (isWorkOrCombatTarget && adultIds.length === 0) {
+    if (!overrideIds) {
+      showWarning('⚠ Trẻ em (dưới 12 tuổi) chưa thể xây nhà, lao động hay chiến đấu!');
+    }
+    return;
+  }
+
+  // Click an enemy warrior to attack with selected adult unit(s)
   if (isEnemyUnitOcc) {
-    const dispatched = issueGroupAttack(activeIds, 'unit', occ);
+    const dispatched = issueGroupAttack(adultIds, 'unit', occ);
     if (dispatched > 0) {
       if (!overrideIds) {
         state.message =
@@ -3154,14 +3183,20 @@ function stepSimulation() {
         e[3030 + unitId] = task.workTicks & 0xff;
         if (pair.maleInHut && pair.femaleInHut) {
           if (task.role === 'male') pair.hutTicks++;
-          if (pair.hutTicks >= 36 && !pair.born) {
+          if (pair.hutTicks >= 80 && !pair.born) {
             pair.born = true;
-            if (state.population < state.housingCap) {
-              const newId = spawnNewbornVillager(d, pair.hut.x + 1, pair.hut.y + pair.hut.h);
+            const pairOwner = pair.maleId > 50 ? 1 : 0;
+            const pairPop = getVillagerIds(pairOwner).length;
+            const pairHuts = getPlayerBuildings(pairOwner).filter((b) => !b.underConstruction && b.targetType === 2).length;
+            const pairCap = Math.max(6, 6 + pairHuts * 6);
+            if (pairPop < pairCap) {
+              const newId = spawnNewbornVillager(d, pair.hut.x + 1, pair.hut.y + pair.hut.h, pairOwner);
               if (newId > 0) {
-                state.population = getVillagerIds().length;
-                const babyName = getVillagerName(d, newId);
-                state.message = `🎉 Em bé sơ sinh ${babyName} đã chào đời tại Lều!`;
+                if (pairOwner === (state.localTribe ?? 0)) {
+                  state.population = getVillagerIds(pairOwner).length;
+                  const babyName = getVillagerName(d, newId);
+                  state.message = `🎉 Em bé sơ sinh ${babyName} đã chào đời tại Lều!`;
+                }
               }
             }
             for (const uid of [pair.maleId, pair.femaleId]) {
@@ -3291,7 +3326,7 @@ function stepVillagerNeeds() {
       e[2020 + id] = 100;
       e[505 + id] = 100;
       e[3333 + id] = -1;
-      if (state.animTick % 84 === 0) {
+      if (state.animTick % 140 === 0) {
         const nextAge = age + 1;
         e[1414 + id] = nextAge;
         if (nextAge >= 12) {
@@ -3350,13 +3385,12 @@ function stepVillagerNeeds() {
     }
   }
 
-  // Authentic automatic courtship & tribe reproduction (b.java:3357-3473):
-  // Periodically pairs an adult male + female to pick flowers, gift them in front of a Lều, and have a baby!
+  // Authentic automatic courtship & tribe reproduction (balanced RTS pace: first ~72s, then every ~90s):
   if (
     state.population < state.housingCap &&
     finishedHuts.length > 0 &&
-    state.animTick >= 112 &&
-    state.animTick % 168 === 0
+    state.animTick >= 600 &&
+    state.animTick % 750 === 0
   ) {
     if (startCourtshipPair(false)) changed = true;
   }
@@ -3890,36 +3924,10 @@ function openPauseMenu() {
   if (state.phase !== 'game') return;
   cancelBuildPlacement();
   state.showMinimap = false;
-  state.paused = true;
+  state.paused = !state.mpMode; // Never pause live 1v1 multiplayer simulation while viewing menu
   state.panelMode = 'pause';
-  const ui = getUiStrings(state.language);
-  const langName = LANGUAGES[state.language]?.label || 'TIẾNG VIỆT';
   const items = [
-    { label: 'TIẾP TỤC CHƠI', action: () => closePauseMenu() },
-    {
-      label: 'LƯU TRÒ CHƠI',
-      action: () => {
-        const ok = saveGameToStorage(state);
-        state.message = ok ? ui.savedOk : 'Không lưu được bản lưu.';
-        closePauseMenu();
-      },
-    },
-    {
-      label: 'TẢI BẢN LƯU',
-      action: () => {
-        const saved = loadGameFromStorage(state.baseData);
-        if (saved) {
-          applyLoadedSave(saved);
-          state.canvasMenu = null;
-          state.paused = false;
-          state.message = ui.loadedOk;
-          render();
-        } else {
-          state.message = ui.noSave;
-          closePauseMenu();
-        }
-      },
-    },
+    { label: 'TIẾP TỤC TRẬN ĐẤU', action: () => closePauseMenu() },
     {
       label: 'BẢN ĐỒ NHỎ (PHÍM 3)',
       action: () => {
@@ -3936,25 +3944,17 @@ function openPauseMenu() {
       },
     },
     {
-      label: `NGÔN NGỮ: ${langName}`,
-      action: () => {
-        switchLanguage((state.language + 1) % LANGUAGES.length).then(() => openPauseMenu());
-      },
-    },
-    {
-      label: `CHỌN MÀN (${state.scenarioIndex + 1}/10)`,
-      action: () => openCanvasScenariosMenu(),
-    },
-    {
-      label: 'THOÁT VỀ MENU CHÍNH',
+      label: 'QUAY VỀ PHÒNG CHỜ 1v1',
       action: () => {
         state.canvasMenu = null;
         state.paused = false;
-        setPhase('mainMenu');
+        mpClient?.returnToLobby();
+        showMpLobby(true);
+        render();
       },
     },
   ];
-  state.canvasMenu = { kind: 'pause', title: 'MENU TẠM DỪNG', items, selected: 0, scroll: 0 };
+  state.canvasMenu = { kind: 'pause', title: 'MENU TRẬN ĐẤU 1v1', items, selected: 0, scroll: 0 };
   render();
 }
 
@@ -5018,7 +5018,10 @@ function back() {
     }
     if (state.missionResult) {
       state.missionResult = null;
-      setPhase('mode');
+      state.mpWinner = null;
+      mpClient?.returnToLobby();
+      showMpLobby(true);
+      render();
       return;
     }
     if (state.showMinimap) {
@@ -5028,7 +5031,6 @@ function back() {
     }
     if (state.canvasMenu) {
       if (state.canvasMenu.kind === 'build' || state.canvasMenu.kind === 'villagers') openCanvasActionsMenu();
-      else if (state.canvasMenu.kind === 'scenarios') openPauseMenu();
       else closeCanvasMenu();
       return;
     }
@@ -5052,11 +5054,12 @@ function back() {
       state.selectedUnits.clear();
       state.activeGroupId = 0;
       state.activePath = [];
-      state.message = 'Đã bỏ chọn dân làng. Click dân khác hoặc nhấn Esc lần nữa để về menu.';
+      state.message = 'Đã bỏ chọn dân làng.';
       render();
       return;
     }
-    setPhase('mode');
+    // Never fall back to old campaign menus — open clean 1v1 Pause Menu instead!
+    openPauseMenu();
   } else if (state.phase === 'campaign') {
     setPhase('campaignMenu');
   } else if (state.phase === 'campaignMenu' || state.phase === 'customSetup') {
@@ -5128,7 +5131,7 @@ window.addEventListener('keydown', (event) => {
     else if (key === 'r') { event.preventDefault(); rallyAllVillagers(); }
     else if (key === 'f') { event.preventDefault(); attackNearestEnemy(); }
     else if (key === 'b') { event.preventDefault(); openCanvasBuildMenu(); }
-    else if (key === 'm') { event.preventDefault(); openCanvasScenariosMenu(); }
+    else if (key === 'm') { event.preventDefault(); toggleMinimap(); }
     else if (key === 'q') { event.preventDefault(); state.autoAI = !state.autoAI; if (state.autoAI) runTribeAutoAI(); state.message = state.autoAI ? 'Đã bật AI bộ lạc tự động.' : 'Đã tắt AI bộ lạc tự động.'; render(); }
     else if (key === 'g') { event.preventDefault(); gatherNearest(); }
     else if (key === 'c') { event.preventDefault(); if (state.selectedUnit) { centerOnUnit(state.selectedUnit); render(); } }
@@ -5171,6 +5174,7 @@ let dragStart = null;
 canvas.addEventListener('pointermove', (event) => {
   if (state.phase !== 'game' || !state.data) return;
   const { x, y } = canvasCoords(event);
+  state.pointerPos = { x, y, visible: true };
   if (dragStart && state.selectionBox) {
     const topUi = state.data.mapTopUi ?? 22;
     const bottomTop = LOGICAL_HEIGHT - (state.data.bottomUi ?? 22);
@@ -5181,13 +5185,19 @@ canvas.addEventListener('pointermove', (event) => {
     return;
   }
   const topHudHeight = state.selectedUnit > 0 && !state.storyDialog && !state.missionResult ? (state.data.mapTopUi ?? 22) + 48 : (state.data.mapTopUi ?? 22);
-  if (y < topHudHeight || y >= LOGICAL_HEIGHT - (state.data.bottomUi ?? 22)) return;
-  const cell = screenToMapCell(x, y);
-  if (cell.x !== state.cursor.x || cell.y !== state.cursor.y) {
-    state.cursor = cell;
-    if (state.buildType !== null) updateBuildPreview();
-    draw();
+  if (y >= topHudHeight && y < LOGICAL_HEIGHT - (state.data.bottomUi ?? 22)) {
+    const cell = screenToMapCell(x, y);
+    if (cell.x !== state.cursor.x || cell.y !== state.cursor.y) {
+      state.cursor = cell;
+      if (state.buildType !== null) updateBuildPreview();
+    }
   }
+  draw();
+});
+
+canvas.addEventListener('pointerleave', () => {
+  state.pointerPos.visible = false;
+  draw();
 });
 
 canvas.addEventListener('contextmenu', (event) => {
