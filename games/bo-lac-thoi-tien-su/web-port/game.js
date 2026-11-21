@@ -1236,8 +1236,10 @@ function syncUnitJobBadge(unitId) {
       else if (t === 'food') badge = cs === 1 ? 3 : cs === 6 ? 6 : 1;
     } else if (task.kind === 'build') {
       badge = 12; // authentic builder badge (mo[41][56] = 12)
-    } else if (task.kind === 'hunt' || task.kind === 'eat') {
-      badge = 3; // authentic meat/hunt/eat badge (mo[41][12] = 3)
+    } else if (task.kind === 'hunt') {
+      badge = 3; // authentic meat/hunt badge (mo[41][12] = 3)
+    } else if (task.kind === 'eat') {
+      badge = 0; // Diners at Nhà ăn / Lều Tù trưởng have NO hunting/meat overhead badge (mo[41][70/71] = 0)
     } else if (task.kind === 'attackUnit' || task.kind === 'attackBuilding') {
       badge = 0; // No overhead icon during combat!
     } else if (task.kind === 'buildFetch') {
