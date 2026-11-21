@@ -550,13 +550,13 @@ function applyUnitDamage(attackerId, targetId, dmg) {
     }
 
     const deadName = getVillagerName(d, targetId);
-    if (targetId > 50) {
+    const deadOwner = targetId > 50 ? 1 : 0;
+    const localTribe = state.localTribe ?? 0;
+    if (deadOwner !== localTribe) {
+      // Enemy died: award +1 bone & kill stat, but NEVER show the Panel 9 "... đã chết!" notification (exact b.java:3727)!
       state.tools += 1;
       state.missionStats.enemiesKilled++;
       syncResourcesToData();
-      addPopup(tx, ty, `${deadName} đã chết!`, '#ff5252');
-      showWarning(`💀 ${deadName} đã chết!`);
-      state.message = `💀 ${deadName} đã chết (+1 xương)!`;
     } else {
       state.population = getVillagerIds().length;
       syncResourcesToData();
@@ -564,10 +564,10 @@ function applyUnitDamage(attackerId, targetId, dmg) {
       showWarning(`💀 ${deadName} đã chết!`);
       state.message = `💀 ${deadName} đã chết!`;
       // Elect new Chief if Chief died!
-      if (d.resources?.[0]?.[17] === targetId) {
+      if (d.resources?.[localTribe]?.[17] === targetId) {
         const survivors = getVillagerIds();
         if (survivors.length > 0) {
-          d.resources[0][17] = survivors[0];
+          d.resources[localTribe][17] = survivors[0];
           const newChief = getVillagerName(d, survivors[0]);
           state.message = `💀 ${deadName} đã chết! ${newChief} trở thành Tộc trưởng mới!`;
         } else {
