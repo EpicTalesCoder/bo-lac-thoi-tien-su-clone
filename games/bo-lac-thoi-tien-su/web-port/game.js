@@ -3008,12 +3008,19 @@ function openCanvasBuildMenu() {
   state.showMinimap = false;
   const items = BUILDINGS.map((b) => {
     const spec = getBuildingSpec(state.data, b.bType);
+    const canAfford = state.wood >= spec.woodCost && state.stone >= spec.stoneCost && state.tools >= spec.toolsCost;
     return {
       label: spec.name.toUpperCase(),
       bType: b.bType,
       spec,
+      canAfford,
       desc: spec.desc,
       action: () => {
+        if (state.wood < spec.woodCost || state.stone < spec.stoneCost || state.tools < spec.toolsCost) {
+          state.message = `Cần ${spec.woodCost} gỗ, ${spec.stoneCost} đá${spec.toolsCost ? `, ${spec.toolsCost} xương` : ''} để xây ${spec.name}!`;
+          render();
+          return;
+        }
         state.canvasMenu = null;
         startBuildPlacement(b.bType);
       },
@@ -3280,7 +3287,7 @@ function moveCanvasMenuSelection(delta) {
   if (!m || !m.items?.length) return;
   const len = m.items.length;
   m.selected = (m.selected + delta + len) % len;
-  const pageSize = m.kind === 'pause' || m.kind === 'scenarios' ? 8 : m.kind === 'build' ? 1 : 5;
+  const pageSize = m.kind === 'pause' || m.kind === 'scenarios' ? 7 : m.kind === 'build' ? 1 : 5;
   if (m.selected < (m.scroll || 0)) m.scroll = m.selected;
   if (m.selected >= (m.scroll || 0) + pageSize) m.scroll = Math.max(0, m.selected - pageSize + 1);
   if (m.kind === 'villagers' && m.items[m.selected]?.unitId) {
@@ -3294,6 +3301,7 @@ function handleCanvasMenuClick(x, y) {
   if (!m) return false;
 
   // Bottom softkey bar (y >= 298): Left green ✓ (x <= 34) confirms, Right red ✕ (x >= 206) goes back/closes
+  // IMPORTANT: On Panel 2/5 (y=272..320), icons occupy x=39..201 and y=293..317, so ONLY handle left/right corner softkeys here!
   if (y >= LOGICAL_HEIGHT - 22) {
     if (x <= 34) {
       const item = m.items?.[m.selected];
@@ -3310,15 +3318,12 @@ function handleCanvasMenuClick(x, y) {
 
   if (m.kind === 'pause' || m.kind === 'scenarios') {
     const items = m.items || [];
-    const visibleCount = Math.min(8, items.length);
+    const visibleCount = Math.min(7, items.length);
     const scroll = m.scroll || 0;
     const rowH = 22;
-    const bh = 34 + visibleCount * rowH + 14;
-    const bw = 204;
-    const bx = Math.floor((LOGICAL_WIDTH - bw) / 2);
-    const by = Math.max(30, Math.floor((LOGICAL_HEIGHT - 22 - bh) / 2) + 8);
-    if (x >= bx && x <= bx + bw && y >= by + 26 && y <= by + 26 + visibleCount * rowH) {
-      const row = Math.floor((y - (by + 26)) / rowH);
+    const listTop = 64 + 38;
+    if (x >= 36 && x <= 204 && y >= listTop && y <= listTop + visibleCount * rowH) {
+      const row = Math.floor((y - listTop) / rowH);
       const idx = scroll + row;
       if (idx >= 0 && idx < items.length) {
         m.selected = idx;
@@ -3326,9 +3331,16 @@ function handleCanvasMenuClick(x, y) {
         return true;
       }
     }
-    // Click outside popup closes menu
-    if (x < bx || x > bx + bw || y < by || y > by + bh) {
-      closeCanvasMenu();
+    // Click scroll footer or above list to scroll
+    if (items.length > visibleCount) {
+      if (y < listTop && y >= 64) {
+        moveCanvasMenuSelection(-1);
+        return true;
+      }
+      if (y > listTop + visibleCount * rowH && y < LOGICAL_HEIGHT - 22) {
+        moveCanvasMenuSelection(1);
+        return true;
+      }
     }
     return true;
   }
@@ -3344,7 +3356,7 @@ function handleCanvasMenuClick(x, y) {
       moveCanvasMenuSelection(-1);
       return true;
     }
-    // Right arrow area (x 36..62, y >= panelY + 46)
+    // Right arrow area (x 36..64, y >= panelY + 46)
     if (x >= 36 && x <= 64 && y >= panelY + 46 && y < LOGICAL_HEIGHT - 22) {
       moveCanvasMenuSelection(1);
       return true;
@@ -3378,20 +3390,19 @@ function handleCanvasMenuClick(x, y) {
     moveCanvasMenuSelection(1);
     return true;
   }
+  // Clicking the top title bar (y < panelY + 19) executes the currently highlighted item
+  if (y < panelY + 19) {
+    items[m.selected]?.action?.();
+    return true;
+  }
   const slotIdx = Math.floor((x - startX) / slotStep);
   if (slotIdx >= 0 && slotIdx < visible) {
     const idx = scroll + slotIdx;
-    if (m.selected === idx) {
-      // Clicking the already-highlighted icon executes it immediately!
-      items[idx]?.action?.();
-    } else {
-      m.selected = idx;
-      if (m.kind === 'villagers' && items[idx]?.unitId) {
-        state.selectedUnit = items[idx].unitId;
-      }
-      // On Panel 5/2, single click executes immediately if clicking directly on icon for crisp desktop/touch UX
-      items[idx]?.action?.();
+    m.selected = idx;
+    if (m.kind === 'villagers' && items[idx]?.unitId) {
+      state.selectedUnit = items[idx].unitId;
     }
+    items[idx]?.action?.();
     return true;
   }
   return true;
@@ -4510,16 +4521,10 @@ canvas.addEventListener('pointerdown', (event) => {
         // Map/Compass icon on bottom bar -> toggle Minimap (key 3)
         toggleMinimap();
       } else if (x >= LOGICAL_WIDTH - 34) {
-        // Authentic Right Red Softkey (f.java:3538): Cancel build/selection if active, otherwise open On-Canvas Pause Menu!
+        // Authentic Right Red Softkey (f.java:3538): Cancel build placement if active, otherwise ALWAYS open On-Canvas Pause Menu!
         if (state.buildType !== null) {
           cancelBuildPlacement();
           state.message = 'Đã hủy đặt công trình.';
-          render();
-        } else if (state.selectedUnit > 0 || state.selectedUnits?.size > 0) {
-          state.selectedUnit = 0;
-          state.selectedUnits.clear();
-          state.activeGroupId = 0;
-          state.activePath = [];
           render();
         } else {
           openPauseMenu();

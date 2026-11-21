@@ -793,9 +793,9 @@ export function drawOriginalHud(ctx, data, state, imageCache) {
       ctx.fillRect(128, LOGICAL_HEIGHT - 3, 14, 2);
     }
     // Authentic Panel 17 softkey icons: Left green = 530 (Action/Build/Tribe menu) or 529 (Confirm ✓ when placing building),
-    // Right red = 535 (Pause Menu) or 534 (Cancel/Back ✕ when unit selected or placing building)
+    // Right red = 535 (Pause Menu) or 534 (Cancel ✕ when placing building)
     const leftSoftkey = state.buildType !== null ? 529 : 530;
-    const rightSoftkey = state.buildType !== null || state.selectedUnit > 0 || state.selectedUnits?.size > 0 ? 534 : 535;
+    const rightSoftkey = state.buildType !== null ? 534 : 535;
     drawComposite(ctx, data, leftSoftkey, 0, LOGICAL_HEIGHT - 18, imageCache);
     drawComposite(ctx, data, rightSoftkey, 220, LOGICAL_HEIGHT - 18, imageCache);
     drawComposite(ctx, data, 528, 0, bottomTop, imageCache);
@@ -817,72 +817,76 @@ function drawAuthenticBottomMenu(ctx, data, state, imageCache) {
 
   if (menu.kind === 'pause' || menu.kind === 'scenarios') {
     ctx.save();
-    ctx.fillStyle = 'rgba(12, 10, 6, 0.58)';
-    ctx.fillRect(0, 22, LOGICAL_WIDTH, LOGICAL_HEIGHT - 22);
+    // Authentic Prehistoric Tribes Full-Screen Menu Backdrop (f.java G(): sky + clouds + logo 1665 + parchment board 1656)
+    ctx.fillStyle = '#8fc7ff';
+    ctx.fillRect(0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+    ctx.fillStyle = '#0e5b27';
+    ctx.fillRect(0, LOGICAL_HEIGHT - 64, LOGICAL_WIDTH, 64);
+
+    // Drifting clouds (composites 1667..1670)
+    const cloudShift = (animTick * 2) % 300;
+    drawComposite(ctx, data, 1667, ((cloudShift + 10) % 300) - 60, 12, imageCache);
+    drawComposite(ctx, data, 1668, ((cloudShift * 1.3 + 120) % 300) - 60, 32, imageCache);
+    drawComposite(ctx, data, 1669, ((cloudShift * 0.8 + 210) % 300) - 60, 20, imageCache);
+
+    // Original Game Logo banner at top center (composite 1665)
+    drawComposite(ctx, data, 1665, 120, 0, imageCache);
+
+    // Authentic Panel 10 wooden/stone menu board (composite 1656 at x=25+5=30, y=64+2=66)
+    const boardX = 25;
+    const boardY = 64;
+    drawComposite(ctx, data, 1656, boardX + 5, boardY + 2, imageCache);
+
     const items = menu.items || [];
-    const visibleCount = Math.min(8, items.length);
+    const visibleCount = Math.min(7, items.length);
     const scroll = menu.scroll || 0;
     const rowH = 22;
-    const bh = 34 + visibleCount * rowH + 14;
-    const bw = 204;
-    const bx = Math.floor((LOGICAL_WIDTH - bw) / 2);
-    const by = Math.max(30, Math.floor((LOGICAL_HEIGHT - 22 - bh) / 2) + 8);
 
-    // Parchment / wooden frame matching Panel 10
-    ctx.fillStyle = '#473010';
-    ctx.fillRect(bx - 2, by - 2, bw + 4, bh + 4);
-    ctx.fillStyle = '#e5d58e';
-    ctx.fillRect(bx, by, bw, bh);
-    ctx.strokeStyle = '#8b6629';
-    ctx.lineWidth = 1.5;
-    ctx.strokeRect(bx + 2.5, by + 2.5, bw - 5, bh - 5);
-
-    ctx.fillStyle = '#5a2d0c';
+    // Header title inside Panel 10 board
+    ctx.fillStyle = '#4f2808';
     ctx.font = 'bold 10px monospace';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
-    ctx.fillText(menu.title || 'MENU TẠM DỪNG', LOGICAL_WIDTH / 2, by + 8);
+    ctx.fillText(menu.title || 'MENU TẠM DỪNG', LOGICAL_WIDTH / 2, boardY + 18);
 
+    const listTop = boardY + 38;
     for (let i = 0; i < visibleCount; i++) {
       const idx = scroll + i;
       const item = items[idx];
       if (!item) continue;
-      const ry = by + 26 + i * rowH;
+      const ry = listTop + i * rowH;
       const isSel = idx === menu.selected;
       if (isSel) {
-        ctx.fillStyle = '#b9993c';
-        ctx.fillRect(bx + 10, ry, bw - 20, rowH - 3);
-        ctx.strokeStyle = '#5a3a0e';
-        ctx.lineWidth = 1;
-        ctx.strokeRect(bx + 10.5, ry + 0.5, bw - 21, rowH - 4);
-        drawAnimation(ctx, data, 2, bx + 12, ry + 6, Math.floor(animTick / 2), imageCache);
-        drawAnimation(ctx, data, 1, bx + bw - 20, ry + 6, Math.floor(animTick / 2), imageCache);
-      } else {
-        ctx.fillStyle = 'rgba(139, 102, 41, 0.16)';
-        ctx.fillRect(bx + 10, ry, bw - 20, rowH - 3);
+        ctx.fillStyle = 'rgba(139, 90, 20, 0.28)';
+        ctx.fillRect(48, ry, 144, rowH - 3);
+        // Authentic animated side arrows (f.java:2552-2553 d(2) and d(1))
+        drawAnimation(ctx, data, 2, 46, ry + 5, Math.floor(animTick / 2), imageCache);
+        drawAnimation(ctx, data, 1, 186, ry + 5, Math.floor(animTick / 2), imageCache);
       }
-      ctx.fillStyle = isSel ? '#fff9cc' : '#2f1e08';
-      ctx.font = isSel ? 'bold 9px monospace' : '9px monospace';
+      ctx.font = isSel ? 'bold 10px monospace' : 'bold 9px monospace';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
+      if (isSel) {
+        ctx.strokeStyle = '#3d2105';
+        ctx.lineWidth = 2;
+        ctx.strokeText(item.label, LOGICAL_WIDTH / 2, ry + (rowH - 3) / 2);
+        ctx.fillStyle = '#fff582';
+      } else {
+        ctx.fillStyle = '#331d06';
+      }
       ctx.fillText(item.label, LOGICAL_WIDTH / 2, ry + (rowH - 3) / 2);
     }
 
     if (items.length > visibleCount) {
-      ctx.fillStyle = '#6c4916';
+      ctx.fillStyle = '#5a2d0c';
       ctx.font = 'bold 7px monospace';
       ctx.textAlign = 'center';
-      ctx.fillText(`▲ ▼ CUỘN (${menu.selected + 1}/${items.length})`, LOGICAL_WIDTH / 2, by + bh - 10);
+      ctx.fillText(`▲ ▼ CUỘN (${menu.selected + 1}/${items.length})`, LOGICAL_WIDTH / 2, listTop + visibleCount * rowH + 4);
     }
 
-    // Bottom softkey bar: Left green ✓ (529), Right red ✕ (534)
-    const bottomTop = LOGICAL_HEIGHT - 22;
-    ctx.fillStyle = '#c5b85a';
-    ctx.fillRect(0, bottomTop, LOGICAL_WIDTH, 22);
-    drawComposite(ctx, data, 525, 0, bottomTop, imageCache);
+    // Bottom Panel 17 softkeys: Left green ✓ (529), Right red ✕ (534)
     drawComposite(ctx, data, 529, 0, LOGICAL_HEIGHT - 18, imageCache);
     drawComposite(ctx, data, 534, 220, LOGICAL_HEIGHT - 18, imageCache);
-    drawComposite(ctx, data, 528, 0, bottomTop, imageCache);
     ctx.restore();
     return;
   }
