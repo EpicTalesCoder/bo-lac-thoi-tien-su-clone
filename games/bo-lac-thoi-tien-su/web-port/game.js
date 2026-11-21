@@ -346,11 +346,87 @@ function alertCombat(msg, color = '#ff7b6b') {
   addPopup(state.cameraX + 5, state.cameraY + 4, msg, color);
 }
 
+function convertChildToTribe(childId, newOwner) {
+  const d = state.data;
+  if (!d) return 0;
+  const e = d.entityData;
+  const fo = d.entityFieldOffsets;
+  if ((e[1919 + childId] & 0xff) <= 0 || (e[1414 + childId] & 0xff) >= 12) return 0;
+  const oldOwner = childId > 50 ? 1 : 0;
+  if (oldOwner === newOwner) return childId;
+
+  // Exact port of b.java:2838-2876 void_c(byte by): find free slot in newOwner's tribe (1..50 or 51..100)
+  const startId = newOwner === 0 ? 1 : 51;
+  const endId = newOwner === 0 ? 50 : 100;
+  let newId = 0;
+  for (let id = startId; id <= endId; id++) {
+    if ((e[1919 + id] & 0xff) <= 0) {
+      newId = id;
+      break;
+    }
+  }
+  if (!newId) return 0;
+
+  const cx = e[childId] & 0xff;
+  const cy = e[101 + childId] & 0xff;
+  const childName = getVillagerName(d, childId);
+
+  if (fo) {
+    for (let s = 0; s < Math.min(83, fo.length); s++) {
+      e[fo[s] + newId] = e[fo[s] + childId];
+    }
+  } else {
+    for (let base = 0; base <= 7979; base += 101) {
+      e[base + newId] = e[base + childId];
+    }
+  }
+  e[202 + newId] = 0;
+  e[303 + newId] = 0;
+  e[3838 + newId] = newId;
+  e[4747 + newId] = newId;
+  e[4444 + newId] = 0;
+  e[4545 + newId] = 0;
+  e[4646 + newId] = -1;
+  e[1313 + newId] = 0;
+
+  // Clear old child slot
+  e[1919 + childId] = 0;
+  state.tasks.delete(childId);
+  state.savedJobs.delete(childId);
+  state.enemyTasks.delete(childId);
+  state.selectedUnits.delete(childId);
+  state.groups[7].delete(childId);
+  state.groups[9].delete(childId);
+  if (state.selectedUnit === childId) {
+    state.selectedUnit = getVillagerIds()[0] || 0;
+    state.activePath = [];
+  }
+
+  if (d.occupancy[cy]?.[cx] === childId || d.occupancy[cy]?.[cx] === 0) {
+    d.occupancy[cy][cx] = newId;
+  }
+  setUnitAnim(newId, 14, 0);
+  state.population = getVillagerIds().length;
+  syncResourcesToData(0);
+  syncResourcesToData(1);
+
+  const localWon = newOwner === (state.localTribe ?? 0);
+  const msg = localWon
+    ? `${childName} đã bị dụ dỗ gia nhập bộ lạc của ta!`
+    : `${childName} đã bị đối phương dụ dỗ sang phe địch!`;
+  addPopup(cx, cy, localWon ? 'Dụ dỗ thành công!' : 'Bị dụ dỗ!', localWon ? '#9cff7b' : '#ffd84d');
+  showWarning(msg);
+  state.message = msg;
+  return newId;
+}
+
 function applyUnitDamage(attackerId, targetId, dmg) {
   const d = state.data;
   const e = d.entityData;
   const curHp = e[1919 + targetId] & 0xff;
   if (curHp <= 0) return true;
+  // In the original game (b.java:827), children (age < 12) are NEVER attacked or damaged — only lured (job 107, anim 159)!
+  if ((e[1414 + targetId] & 0xff) < 12) return false;
   const nextHp = Math.max(0, curHp - dmg);
   e[1919 + targetId] = nextHp;
 
@@ -551,13 +627,12 @@ function findBestStorageWeaponForUnit(unitId, owner) {
       return { weaponId: wid, fromStock: true };
     }
   }
-  // If unarmed and no crafted weapon in stock, ONLY grab 1 Stone/Wood if this tribe's "Use Stone/Wood weapon" option is enabled!
+  // If unarmed and no crafted weapon in stock, automatically take 1 Stone as Đá ném (wId=1) first, then Wood if no Stone!
   if (curW === 9 && state.tribeUseRawWeapon[owner] !== false) {
     const stoneAmt = owner === (state.localTribe ?? 0) ? state.stone : (r[2] || 0);
     const woodAmt = owner === (state.localTribe ?? 0) ? state.wood : (r[1] || 0);
-    if (preferThrowing && stoneAmt >= 1) return { weaponId: 1, fromStock: false, resType: 'stone' };
-    if (woodAmt >= 1) return { weaponId: 0, fromStock: false, resType: 'wood' };
     if (stoneAmt >= 1) return { weaponId: 1, fromStock: false, resType: 'stone' };
+    if (woodAmt >= 1) return { weaponId: 0, fromStock: false, resType: 'wood' };
   }
   return null;
 }
@@ -716,7 +791,7 @@ function distanceToRect(x, y, rect) {
   return Math.max(dx, dy);
 }
 
-function assignAttackTask(unitId, targetType, targetId) {
+function assignAttackTask(unitId, targetType, targetId, skipArmFetch = false) {
   const d = state.data;
   if (!d) return false;
   const e = d.entityData;
@@ -724,7 +799,53 @@ function assignAttackTask(unitId, targetType, targetId) {
   ensureUnitOutside(unitId);
   setUnitCarry(unitId, 0, 0);
   const info = getVillagerInfo(unitId);
-  const range = getUnitRange(unitId);
+  const owner = unitId > 50 ? 1 : 0;
+  const isChildTarget = targetType === 'unit' && (e[1414 + targetId] & 0xff) < 12;
+
+  // Authentic original behavior (b.java:2340-2370): if unarmed (wId===9) and not luring a child,
+  // automatically run to Kho chứa to grab a weapon (or 1 Stone as Đá ném) before attacking!
+  if (!isChildTarget && !skipArmFetch && (e[6565 + unitId] & 0xff) === 9 && (e[1414 + unitId] & 0xff) >= 12) {
+    let tx = info.x;
+    let ty = info.y;
+    let distToEnemy = 99;
+    if (targetType === 'unit') {
+      tx = e[targetId] & 0xff;
+      ty = e[101 + targetId] & 0xff;
+      distToEnemy = Math.max(Math.abs(tx - info.x), Math.abs(ty - info.y));
+    } else if (targetType === 'building') {
+      const bld = getEnemyBuildings(owner).find((b) => b.bid === targetId);
+      if (bld) {
+        tx = bld.x;
+        ty = bld.y;
+        distToEnemy = distanceToRect(info.x, info.y, bld);
+      }
+    }
+    if (distToEnemy > 1) {
+      const pick = findBestStorageWeaponForUnit(unitId, owner);
+      const storage = pick ? findNearestDropoff(info.x, info.y, owner) : null;
+      if (pick && storage) {
+        const toStorage = planUnitPath(unitId, storage.x, storage.y, false, storage);
+        if (toStorage !== null) {
+          state.tasks.set(unitId, {
+            kind: 'armForBattle',
+            path: toStorage.path,
+            stepProgress: toStorage.stepProgress,
+            target: storage,
+            attackTargetType: targetType,
+            attackTargetId: targetId,
+            battleX: tx,
+            battleY: ty,
+            owner,
+            workTicks: 0,
+          });
+          if (state.selectedUnit === unitId) state.activePath = toStorage.path;
+          return true;
+        }
+      }
+    }
+  }
+
+  const range = isChildTarget ? 1 : getUnitRange(unitId);
 
   if (targetType === 'unit') {
     if ((e[1919 + targetId] & 0xff) <= 0) return false;
@@ -747,7 +868,7 @@ function assignAttackTask(unitId, targetType, targetId) {
   }
 
   if (targetType === 'building') {
-    const bld = getEnemyBuildings().find((b) => b.bid === targetId);
+    const bld = getEnemyBuildings(owner).find((b) => b.bid === targetId);
     if (!bld || bld.hp <= 0) return false;
     const dist = distanceToRect(info.x, info.y, bld);
     const planned = dist <= range ? { path: [], stepProgress: 0 } : planUnitPath(unitId, bld.x, bld.y, false, bld);
@@ -2866,7 +2987,8 @@ function stepEnemyAI() {
         }
         const tx = e[tid] & 0xff;
         const ty = e[101 + tid] & 0xff;
-        const range = getUnitRange(eid);
+        const isChildTarget = (e[1414 + tid] & 0xff) < 12;
+        const range = isChildTarget ? 1 : getUnitRange(eid);
         const dist = Math.max(Math.abs(tx - ex), Math.abs(ty - ey));
         if (dist > range) {
           if (task.path.length === 0 || (task.stepProgress === 0 && task.workTicks % 5 === 0)) {
@@ -2882,12 +3004,27 @@ function stepEnemyAI() {
           if (task.path.length > 0) stepUnitMovement(eid, task, true);
           continue;
         }
-        // In range: attack player villager
+        // In range: if target is a child (< 12), play authentic Child Luring animation (job 107 -> anim 159, 2f) and convert!
         e[202 + eid] = 0;
         e[303 + eid] = 0;
         task.path = [];
         task.stepProgress = 0;
         e[606 + eid] = directionFromDelta(tx - ex, ty - ey);
+        if (isChildTarget) {
+          e[202 + tid] = 0;
+          e[303 + tid] = 0;
+          e[606 + tid] = (e[606 + eid] + 4) & 7;
+          setUnitAnim(eid, 159, Math.floor((task.workTicks || 0) / 3) % 2);
+          setUnitAnim(tid, 45, Math.floor((task.workTicks || 0) / 2) % 5);
+          task.workTicks = (task.workTicks || 0) + 1;
+          if (task.workTicks >= 18) {
+            convertChildToTribe(tid, 1);
+            state.enemyTasks.delete(eid);
+            setUnitAnim(eid, 8, 0);
+            changed = true;
+          }
+          continue;
+        }
         const dmg = getUnitDamage(eid);
         const wId = e[6565 + eid] & 0xff;
         const swingIdx = Math.floor((task.workTicks || 0) / 6);
@@ -3083,7 +3220,19 @@ function stepUnitMovement(unitId, task, isEnemy = false) {
   const uy = e[101 + unitId] & 0xff;
   const next = task.path[0];
 
-  if (task.stepProgress === 0 && !isWalkable(next.x, next.y, unitId)) {
+  // Allow villagers to walk past other units on intermediate path tiles without stalling or replanning;
+  // only replan if blocked by impassable terrain or a newly placed building/resource (occ < 0)!
+  const canPassThroughIntermediateUnit =
+    task.path.length > 1 &&
+    next.x >= 0 &&
+    next.y >= 0 &&
+    next.x < d.width &&
+    next.y < d.height &&
+    (d.terrain[next.y][next.x] & 0xff) < 175 &&
+    ((d.shortSpriteTables[9][d.terrain[next.y][next.x] & 0xff] >>> 13) & 1) === 0 &&
+    d.occupancy[next.y][next.x] >= 0;
+
+  if (task.stepProgress === 0 && !canPassThroughIntermediateUnit && !isWalkable(next.x, next.y, unitId)) {
     const dest = task.path[task.path.length - 1];
     const replanned = findPath(
       ux,
@@ -3114,7 +3263,6 @@ function stepUnitMovement(unitId, task, isEnemy = false) {
   const dy = target.y - uy;
   e[606 + unitId] = directionFromDelta(dx, dy);
 
-  task.stepProgress++;
   // Authentic original pace from mo[15] + e[1010+uid]: 8 ticks/tile cardinal, 11 ticks/tile diagonal at 120ms/tick
   const stepsPerTile = getUnitStepTicks(unitId, dx, dy);
   const isChild = !isEnemy && (e[1414 + unitId] & 0xff) < 12;
@@ -3122,8 +3270,9 @@ function stepUnitMovement(unitId, task, isEnemy = false) {
   const sprinting = !isEnemy && isUnitSprinting(unitId);
   // Exact port of b.java:3529-3546: child=6, carrying=1, sprinting=7 (4f run), normal walk=0
   const walkAnim = isChild ? 6 : isCarrying ? 1 : sprinting ? 7 : 0;
-  const walkFrame = Math.floor((task.stepProgress * 4) / stepsPerTile) % 4;
+  const walkFrame = Math.floor(((task.stepProgress + 1) * 4) / stepsPerTile) % 4;
   setUnitAnim(unitId, walkAnim, walkFrame);
+  task.stepProgress++;
 
   if (task.stepProgress >= stepsPerTile) {
     // If this is the final tile in the path and another unit is already standing on it, try an empty adjacent tile
@@ -3272,7 +3421,8 @@ function stepSimulation() {
       }
       const tx = e[tid] & 0xff;
       const ty = e[101 + tid] & 0xff;
-      const range = getUnitRange(unitId);
+      const isChildTarget = (e[1414 + tid] & 0xff) < 12;
+      const range = isChildTarget ? 1 : getUnitRange(unitId);
       const dist = Math.max(Math.abs(tx - ux), Math.abs(ty - uy));
       if (dist > range) {
         if (task.path.length === 0 || (task.stepProgress === 0 && task.workTicks % 4 === 0)) {
@@ -3297,6 +3447,22 @@ function stepSimulation() {
       task.stepProgress = 0;
       if (state.selectedUnit === unitId) state.activePath = [];
       e[606 + unitId] = directionFromDelta(tx - ux, ty - uy);
+      // If target is an enemy child (age < 12), play authentic Child Luring animation (job 107 -> anim 159, 2f) and convert to our tribe!
+      if (isChildTarget) {
+        e[202 + tid] = 0;
+        e[303 + tid] = 0;
+        e[606 + tid] = (e[606 + unitId] + 4) & 7;
+        setUnitAnim(unitId, 159, Math.floor((task.workTicks || 0) / 3) % 2);
+        setUnitAnim(tid, 45, Math.floor((task.workTicks || 0) / 2) % 5);
+        task.workTicks = (task.workTicks || 0) + 1;
+        if (task.workTicks >= 18) {
+          convertChildToTribe(tid, unitOwner);
+          state.tasks.delete(unitId);
+          setUnitAnim(unitId, 8, 0);
+          uiChanged = true;
+        }
+        continue;
+      }
       const dmg = getUnitDamage(unitId);
       const wId = e[6565 + unitId] & 0xff;
       const swingIdx = Math.floor((task.workTicks || 0) / 6);
@@ -3805,7 +3971,13 @@ function stepSimulation() {
       }
       e[7777 + unitId] = 0;
       state.tasks.delete(unitId);
-      dispatchUnitToBattleFlag(unitId, task.battleX ?? task.flagX, task.battleY ?? task.flagY, owner);
+      if (task.attackTargetType && task.attackTargetId) {
+        if (!assignAttackTask(unitId, task.attackTargetType, task.attackTargetId, true)) {
+          dispatchUnitToBattleFlag(unitId, task.battleX ?? task.flagX, task.battleY ?? task.flagY, owner);
+        }
+      } else {
+        dispatchUnitToBattleFlag(unitId, task.battleX ?? task.flagX, task.battleY ?? task.flagY, owner);
+      }
       uiChanged = true;
     } else if (task.kind === 'fetchWeaponAndTrain') {
       // Arrived at Storage: take crafted weapon (or 1 Wood / 1 Stone), equip weapon, and head to training building!
@@ -7009,18 +7181,18 @@ Promise.all([
           changed = true;
         }
 
-        // 2. Smooth 60 FPS Sub-Tick Unit Movement Interpolation
+        // 2. Smooth 60 FPS Sub-Tick Unit Movement Interpolation (no pause at stepProgress===0!)
         if (!state.paused && !state.storyDialog && !state.missionResult) {
           const e = state.data.entityData;
           const interpUnit = (uid, task) => {
-            if (!task?.path || task.path.length === 0 || task.stepProgress <= 0) return;
+            if (!task?.path || task.path.length === 0) return;
             const ux = e[uid] & 0xff;
             const uy = e[101 + uid] & 0xff;
             const target = task.path[0];
             const dx = target.x - ux;
             const dy = target.y - uy;
             const stepsPerTile = getUnitStepTicks(uid, dx, dy);
-            const smoothStep = Math.min(stepsPerTile, task.stepProgress - 1 + subTick);
+            const smoothStep = Math.min(stepsPerTile, (task.stepProgress || 0) + subTick);
             const frac = smoothStep / stepsPerTile;
             e[202 + uid] = Math.round(dx * CELL_WIDTH * frac);
             e[303 + uid] = Math.round(dy * CELL_HEIGHT * frac);

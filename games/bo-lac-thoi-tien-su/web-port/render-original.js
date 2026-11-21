@@ -1649,23 +1649,23 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
     drawAnimation(ctx, data, 30, LOGICAL_WIDTH - 22, 34, animTick, imageCache);
   }
 
-  // Pass 6b: On-canvas warning banner (e.g. child cannot build/work/fight)
+  // Pass 6b: Authentic Original In-Game Notification Frame (Panel 9 from f.java:2170 & 5888: comp 526 + comp 679 + comp 524)
   if (state.warningBanner && state.warningBanner.text && performance.now() < state.warningBanner.until) {
     ctx.save();
-    ctx.font = 'bold 8px monospace';
-    const txt = state.warningBanner.text;
-    const tw = Math.min(LOGICAL_WIDTH - 16, ctx.measureText(txt).width + 18);
-    const bx = Math.floor((LOGICAL_WIDTH - tw) / 2);
-    const by = (state.selectedUnit > 0 ? 74 : 26);
-    ctx.fillStyle = 'rgba(120, 22, 14, 0.92)';
-    ctx.fillRect(bx, by, tw, 18);
-    ctx.strokeStyle = '#ffd25a';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(bx + 0.5, by + 0.5, tw - 1, 17);
-    ctx.fillStyle = '#fff59c';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(txt, LOGICAL_WIDTH / 2, by + 9);
+    const txt = String(state.warningBanner.text).replace(/^[💀👶🎉⚠🔨🎂\s]+/u, '');
+    const frameW = 240;
+    const frameH = 22;
+    const bx = Math.floor((LOGICAL_WIDTH - frameW) / 2);
+    const by = state.selectedUnit > 0 ? 72 : 24;
+    // Authentic parchment fill + original top/bottom vine-stone border composites (526, 523, 524, 528) & alert badge (679)
+    ctx.fillStyle = '#c5b85a';
+    ctx.fillRect(bx, by, frameW, frameH);
+    drawComposite(ctx, data, 526, bx, by, imageCache);
+    drawComposite(ctx, data, 528, bx, by, imageCache);
+    drawComposite(ctx, data, 523, bx, by + 6, imageCache);
+    drawComposite(ctx, data, 524, bx, by + frameH, imageCache);
+    drawComposite(ctx, data, 679, bx + 3, by + 4, imageCache);
+    drawPanel4Text(ctx, txt, bx + 22, by + 7, 'left', 8, '#fff8d4');
     ctx.restore();
   }
 
