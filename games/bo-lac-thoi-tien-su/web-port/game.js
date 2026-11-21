@@ -3452,19 +3452,27 @@ function stepSimulation() {
     const ux = e[unitId] & 0xff;
     const uy = e[101 + unitId] & 0xff;
 
-    // Authentic Hat-Putting (anim 147 / -109, 14 frames) and Hat-Removing (anim 148 / -108, 7 frames) from b.java:1455-1460
+    // Authentic Hat-Putting (anim 147 / -109, 14 frames) and Hat-Removing (anim 148 / -108, 7 frames) from b.java:1455-1460:
+    // Builders keep their hard hat (38) while fetching materials (buildFetch), Chefs keep their hat (54) while fetching meat (chefFetch),
+    // and villagers taking a short break to eat/rest keep their current job hat until they are assigned a different primary task!
     const taskHatJob =
-      task.kind === 'build'
+      task.kind === 'build' || task.kind === 'buildFetch'
         ? 38
-        : task.kind === 'workBuilding'
-          ? task.target?.targetType === 4
-            ? 54
-            : task.target?.targetType === 7
-              ? 86
-              : task.target?.targetType === 8
-                ? 57
-                : 69
-          : 69;
+        : task.kind === 'chefFetch'
+          ? 54
+          : task.kind === 'eat' || task.kind === 'rest'
+            ? (e[6464 + unitId] & 0xff) || 69
+            : task.kind === 'workBuilding'
+              ? task.hatJob !== undefined
+                ? task.hatJob
+                : task.target?.targetType === 4
+                  ? 54
+                  : task.target?.targetType === 7
+                    ? 86
+                    : task.target?.targetType === 8
+                      ? 57
+                      : 69
+              : 69;
 
     if (taskHatJob === 69 && (isWearingJobHat(unitId) || (task.hatRemoveFrame !== undefined && task.hatRemoveFrame < 7))) {
       if (task.hatRemoveFrame === undefined) task.hatRemoveFrame = 0;
@@ -3964,7 +3972,7 @@ function stepSimulation() {
               }
             }
             if (!chained) {
-              state.tasks.set(wid, { kind: 'removeHat', path: [], stepProgress: 0, hatRemoveFrame: 0, workTicks: 0 });
+              setUnitAnim(wid, 8, 0);
               if (state.selectedUnit === wid) state.activePath = [];
             }
           }
