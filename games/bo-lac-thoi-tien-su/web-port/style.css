@@ -182,8 +182,7 @@ h2, p { margin-top: 0; }
   display: grid;
   place-items: center;
   padding: 18px;
-  background: radial-gradient(ellipse at 50% 20%, rgba(36, 62, 34, 0.88), rgba(10, 16, 11, 0.94));
-  backdrop-filter: blur(8px);
+  background: radial-gradient(ellipse at 50% 18%, #223821 0%, #121c13 55%, #0a100b 100%);
 }
 
 .mp-lobby-overlay.hidden,

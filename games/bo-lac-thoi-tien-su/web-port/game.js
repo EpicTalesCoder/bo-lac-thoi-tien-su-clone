@@ -4228,6 +4228,12 @@ function drawFrameToCtx(targetCtx) {
   const prevCtx = ctx;
   ctx = targetCtx;
   ctx.clearRect(0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+  if (state.phase === 'lobby') {
+    ctx.fillStyle = '#0d140f';
+    ctx.fillRect(0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+    ctx = prevCtx;
+    return;
+  }
   if (state.phase === 'game') {
     if (state.compareOriginal && state.scenarioIndex === 0) {
       const refImg = getCaptureImage(CAPTURED_FLOW.gameplay);
@@ -5109,6 +5115,12 @@ function toSignedByteLocal(v) {
 }
 
 window.addEventListener('keydown', (event) => {
+  // Never steal keystrokes while typing in lobby inputs or while Multiplayer Lobby is open!
+  const tag = event.target?.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  const lobbyEl = document.getElementById('mp-lobby');
+  if (lobbyEl && !lobbyEl.classList.contains('hidden')) return;
+
   const key = event.key.toLowerCase();
   if (state.phase === 'game') {
     if (state.canvasMenu) {
@@ -5900,8 +5912,16 @@ Promise.all([
       const url = `${window.location.origin}${window.location.pathname}?room=${mpClient.roomCode}&autojoin=1`;
       window.open(url, '_blank');
     });
+    mpCodeInput?.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') {
+        ev.preventDefault();
+        mpJoinBtn?.click();
+      }
+    });
     mpLeaveBtn?.addEventListener('click', () => {
       mpClient.leaveRoom();
+      state.phase = 'lobby';
+      state.paused = true;
       updateLobbyUI({ ...mpClient.lobby, role: null, connected: false });
     });
     openLobbyToolbarBtn?.addEventListener('click', () => {
@@ -5909,15 +5929,10 @@ Promise.all([
       showMpLobby(el?.classList.contains('hidden'));
     });
 
-    // Render live background map behind the Multiplayer Lobby
-    state.data = prepareMultiplayerMatch(baseData, maBytes, 1, 0);
-    state.phase = 'game';
+    // Stay cleanly in 'lobby' phase (no game/HUD/shortcuts active) until both players are Ready!
+    state.phase = 'lobby';
     state.paused = true;
-    state.cameraX = state.data.cameraX;
-    state.cameraY = state.data.cameraY;
-    state.smoothCamX = state.cameraX;
-    state.smoothCamY = state.cameraY;
-    draw();
+    state.data = null;
 
     const roomParam = params.get('room');
     if (roomParam) {
