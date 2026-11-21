@@ -300,6 +300,34 @@ function getUnitDamage(unitId) {
   return base;
 }
 
+function getWeaponAttackAnim(wId, swingIdx = 0) {
+  // Exact per-weapon combat animations from /a (mo[77]/mo[158]):
+  // 1=Đá ném -> anim 35 (6f stone throw)
+  // 2=Giáo   -> anim 36 (5f spear throw)
+  // 0=Dùi cui, 3=Búa đá, 4=Chùy xương, 5=Rìu nhỏ, 9=Tay không -> authentic melee combos
+  if (wId === 1) return { animId: 35, frames: 6, hitFrame: 3 };
+  if (wId === 2) return { animId: 36, frames: 5, hitFrame: 2 };
+  if (wId === 3) {
+    const a = swingIdx % 2 === 0 ? 29 : 31;
+    return { animId: a, frames: a === 31 ? 9 : 6, hitFrame: 3 };
+  }
+  if (wId === 4) {
+    const a = swingIdx % 2 === 0 ? 27 : 33;
+    return { animId: a, frames: a === 27 ? 4 : 6, hitFrame: 2 };
+  }
+  if (wId === 5) {
+    const a = swingIdx % 2 === 0 ? 31 : 33;
+    return { animId: a, frames: a === 31 ? 9 : 6, hitFrame: 3 };
+  }
+  if (wId === 0) {
+    const a = swingIdx % 2 === 0 ? 25 : 29;
+    return { animId: a, frames: 6, hitFrame: 3 };
+  }
+  // Unarmed (9): fast punches
+  const a = swingIdx % 2 === 0 ? 24 : 25;
+  return { animId: a, frames: a === 24 ? 4 : 6, hitFrame: 2 };
+}
+
 function getUnitRange(unitId) {
   const wId = state.data.entityData[6565 + unitId] & 0xff;
   if (wId === 2) return 4; // Giáo (spear throw)
@@ -2844,26 +2872,19 @@ function stepSimulation() {
       e[606 + unitId] = directionFromDelta(tx - ux, ty - uy);
       const dmg = getUnitDamage(unitId);
       const wId = e[6565 + unitId] & 0xff;
-      if (range > 1) {
-        // Fast 1-frame-per-tick ranged throw (anim 35, 6 frames)
-        setUnitAnim(unitId, 35, task.cooldown % 6);
-        if (task.cooldown === 3) {
+      const swingIdx = Math.floor((task.workTicks || 0) / 6);
+      const atkAnim = getWeaponAttackAnim(wId, swingIdx);
+      setUnitAnim(unitId, atkAnim.animId, task.cooldown % atkAnim.frames);
+      if (task.cooldown === atkAnim.hitFrame) {
+        if (range > 1) {
           launchProjectile(unitId, 'unit', tid, ux, uy, tx, ty, wId, dmg);
-          uiChanged = true;
-        }
-        task.cooldown = (task.cooldown + 1) % 7;
-      } else {
-        // Fast, dramatic 1-frame-per-tick melee combo (anim 25, 29, 33 — punch/club/slash)
-        const meleeAnims = [25, 29, 33];
-        const comboIdx = Math.floor((task.workTicks || 0) / 6) % meleeAnims.length;
-        setUnitAnim(unitId, meleeAnims[comboIdx], task.cooldown % 6);
-        if (task.cooldown === 3) {
+        } else {
           applyUnitDamage(unitId, tid, dmg);
-          uiChanged = true;
         }
-        task.workTicks = (task.workTicks || 0) + 1;
-        task.cooldown = (task.cooldown + 1) % 6;
+        uiChanged = true;
       }
+      task.workTicks = (task.workTicks || 0) + 1;
+      task.cooldown = (task.cooldown + 1) % (atkAnim.frames + (range > 1 ? 1 : 0));
       continue;
     }
 
@@ -2905,24 +2926,19 @@ function stepSimulation() {
       e[606 + unitId] = directionFromDelta(cx - ux, cy - uy);
       const dmg = getUnitDamage(unitId);
       const wId = e[6565 + unitId] & 0xff;
-      if (range > 1) {
-        setUnitAnim(unitId, 35, task.cooldown % 6);
-        if (task.cooldown === 3) {
+      const swingIdx = Math.floor((task.workTicks || 0) / 6);
+      const atkAnim = getWeaponAttackAnim(wId, swingIdx);
+      setUnitAnim(unitId, atkAnim.animId, task.cooldown % atkAnim.frames);
+      if (task.cooldown === atkAnim.hitFrame) {
+        if (range > 1) {
           launchProjectile(unitId, 'building', bld.bid, ux, uy, cx, cy, wId, dmg);
-          uiChanged = true;
-        }
-        task.cooldown = (task.cooldown + 1) % 7;
-      } else {
-        const meleeAnims = [25, 29, 33];
-        const comboIdx = Math.floor((task.workTicks || 0) / 6) % meleeAnims.length;
-        setUnitAnim(unitId, meleeAnims[comboIdx], task.cooldown % 6);
-        if (task.cooldown === 3) {
+        } else {
           applyBuildingDamage(unitId, bld.bid, dmg);
-          uiChanged = true;
         }
-        task.workTicks = (task.workTicks || 0) + 1;
-        task.cooldown = (task.cooldown + 1) % 6;
+        uiChanged = true;
       }
+      task.workTicks = (task.workTicks || 0) + 1;
+      task.cooldown = (task.cooldown + 1) % (atkAnim.frames + (range > 1 ? 1 : 0));
       continue;
     }
 
