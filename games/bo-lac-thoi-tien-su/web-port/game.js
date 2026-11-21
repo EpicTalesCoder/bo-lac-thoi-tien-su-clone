@@ -4975,9 +4975,15 @@ function stepSimulation() {
         continue;
       }
 
-      // Authentic Khu thánh địa (bType 8): Shaman lies down and naps (anim 39, 8f) when NO spell ritual is ordered!
-      // Only wakes up to beat the drum & dance (slotAnims) while actively casting a spell from state.shrineRituals!
+      // Authentic Khu thánh địa (bType 8):
+      // - Slot 0 (Shaman): lies down & naps (anim 39, 8f) when NO spell ritual is ordered; only beats drum (anim 140) while casting!
+      // - Slot 1+ (Patient): stands calmly (anim 8, frame 0) — NEVER alternates 8/9 or wobbles!
       if (bType === 8) {
+        if (slotIdx > 0) {
+          setUnitCarry(unitId, 0, 0);
+          setUnitAnim(unitId, 8, 0);
+          continue;
+        }
         const ritual = state.shrineRituals.get(bld.bid);
         if (!ritual) {
           setUnitCarry(unitId, 0, 0);

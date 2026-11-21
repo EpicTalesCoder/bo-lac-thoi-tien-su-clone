@@ -442,6 +442,12 @@ export function getBuildingSlotAnims(data, bType, slotIdx, weaponId = 9) {
     anims.push({ animId: aId, frames });
     return { jobId, slotCount, anims };
   }
+  // Khu thánh địa (bType 8) slot 1 (Patient, job 51): b.java:1749 uses anim 8 (standing calmly empty-handed),
+  // NOT alternating 8/9 (anim 9 is the carrying pose and alternating 8/9 every tick causes wobbling!)
+  if (bType === 8 && clampedSlot > 0) {
+    anims.push({ animId: 8, frames: 1 });
+    return { jobId, slotCount, anims };
+  }
   for (let i = aStart; i < aEnd; i++) {
     const animId = mb[mo[164] + i] & 0xff;
     if (animId === 0) continue;
