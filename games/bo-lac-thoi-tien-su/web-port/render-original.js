@@ -518,18 +518,22 @@ function drawEntitySprite(ctx, data, entityId, screenX, screenY, dir, fieldOffse
     let skip = false;
 
     if (fieldOffsetIdx === 29) {
-      if (partKind === 10 && dir > -1) {
-        if (isSelected) {
-          drawComposite(
-            ctx,
-            data,
-            599,
-            drawX + toSignedByte(bytes[12][az]),
-            drawY + toSignedByte(bytes[13][az]),
-            imageCache
-          );
-        } else if (isHovered) {
-          spriteOffset = entityId >= 51 ? 3 : 1;
+      if (partKind === 10) {
+        if (uiState.menuPreview) {
+          skip = true;
+        } else if (dir > -1) {
+          if (isSelected) {
+            drawComposite(
+              ctx,
+              data,
+              599,
+              drawX + toSignedByte(bytes[12][az]),
+              drawY + toSignedByte(bytes[13][az]),
+              imageCache
+            );
+          } else if (isHovered) {
+            spriteOffset = entityId >= 51 ? 3 : 1;
+          }
         }
       }
 
@@ -629,7 +633,7 @@ function drawEntitySprite(ctx, data, entityId, screenX, screenY, dir, fieldOffse
   }
 
   // Health bar, thought bubble (d(77+thought)), and job badge (a(577+job)) above villager (f.java:1376-1402)
-  if (fieldOffsetIdx === 29 && entityId <= 100 && headPartIdx >= 0 && bodyPartIdx >= 0) {
+  if (!uiState.menuPreview && fieldOffsetIdx === 29 && entityId <= 100 && headPartIdx >= 0 && bodyPartIdx >= 0) {
     const hx = drawX + toSignedByte(bytes[12][headPartIdx]);
     const hy = drawY + toSignedByte(bytes[13][headPartIdx]);
 
@@ -922,6 +926,32 @@ export function drawOriginalHud(ctx, data, state, imageCache) {
  * - Panel 5b ('villagers'): Scrollable Villager Picker showing portrait/avatar + live Panel 4 stats
  * - Panel 10 ('pause'):  Authentic In-Game Pause Menu (Tiếp tục, Lưu, Tải, Bản đồ nhỏ, Nhạc, Ngôn ngữ, Màn chơi, Thoát)
  */
+function drawMenuVillagerFullBody(ctx, data, uid, sx, sy, imageCache) {
+  const e = data?.entityData;
+  if (!e || !uid) return;
+  const isChild = (e[1414 + uid] & 0xff) < 12;
+  const savedAnim = e[2929 + uid];
+  const savedFrame = e[3030 + uid];
+  const savedCarry = e[3535 + uid];
+  e[2929 + uid] = isChild ? 14 : 8; // Authentic standing full-body pose (adult=8, child=14)
+  e[3030 + uid] = 0;
+  e[3535 + uid] = 0;
+  ctx.save();
+  if (isChild) {
+    ctx.translate(sx + 12, sy + 13);
+    ctx.scale(0.78, 0.78);
+    drawEntitySprite(ctx, data, uid, -14, -9, 4, 29, imageCache, { menuPreview: true });
+  } else {
+    ctx.translate(sx + 12, sy + 12);
+    ctx.scale(0.62, 0.62);
+    drawEntitySprite(ctx, data, uid, -12, 1, 4, 29, imageCache, { menuPreview: true });
+  }
+  ctx.restore();
+  e[2929 + uid] = savedAnim;
+  e[3030 + uid] = savedFrame;
+  e[3535 + uid] = savedCarry;
+}
+
 function drawAuthenticBottomMenu(ctx, data, state, imageCache) {
   const menu = state.canvasMenu;
   if (!menu) return;
@@ -1216,8 +1246,7 @@ function drawAuthenticBottomMenu(ctx, data, state, imageCache) {
         }
       }
     } else if (item.unitId !== undefined) {
-      const av = data.entityData[2727 + item.unitId] & 0xff;
-      drawComposite(ctx, data, 720 + av, sx + 1, sy - 2, imageCache);
+      drawMenuVillagerFullBody(ctx, data, item.unitId, sx, sy, imageCache);
       if (item.rankBadge !== undefined) {
         drawPanel4Text(ctx, `^${item.rankBadge}`, sx + 22, sy + 14, 'center', 8, '#fff55a');
       }
