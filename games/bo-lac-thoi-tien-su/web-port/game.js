@@ -54,12 +54,13 @@ import {
   parseOriginalA,
   PrehistoricMidiSynth,
 } from './audio-binary.js';
+import { mountPhaserRuntime } from './phaser-engine.js';
 
 const midiSynth = new PrehistoricMidiSynth();
 
 const canvas = document.querySelector('#game');
-const ctx = canvas.getContext('2d');
-ctx.imageSmoothingEnabled = false;
+let ctx = null;
+let phaserRuntime = null;
 
 const panelTitle = document.querySelector('#screen-title');
 const panelCopy = document.querySelector('#screen-copy');
@@ -157,6 +158,8 @@ const state = {
   data: null,
   cameraX: 0,
   cameraY: 0,
+  smoothCamX: 0,
+  smoothCamY: 0,
   cursor: { x: 5, y: 9 },
   selectedUnit: 0,
   selectedUnits: new Set(),
@@ -2979,6 +2982,8 @@ function loadScenario(index, opts = {}) {
   });
   state.cameraX = state.data.cameraX ?? 0;
   state.cameraY = state.data.cameraY ?? 0;
+  state.smoothCamX = state.cameraX;
+  state.smoothCamY = state.cameraY;
   state.cursor = { x: state.data.cursorX ?? 5, y: state.data.cursorY ?? 9 };
   state.selectedUnit = state.data.hoverUnit || getVillagerIds()[0] || 0;
   state.selectedUnits = new Set(state.selectedUnit ? [state.selectedUnit] : []);
@@ -3072,13 +3077,17 @@ function drawCampaignWalkthrough() {
   }
 }
 
-function draw() {
+function drawFrameToCtx(targetCtx) {
+  if (!targetCtx) return;
+  const prevCtx = ctx;
+  ctx = targetCtx;
   ctx.clearRect(0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
   if (state.phase === 'game') {
     if (state.compareOriginal && state.scenarioIndex === 0) {
       const refImg = getCaptureImage(CAPTURED_FLOW.gameplay);
       if (refImg.complete && refImg.naturalWidth) {
         ctx.drawImage(refImg, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+        ctx = prevCtx;
         return;
       }
     }
@@ -3093,10 +3102,12 @@ function draw() {
       ctx.textAlign = 'center';
       ctx.fillText('Đang tải bản đồ gốc...', 120, 160);
     }
+    ctx = prevCtx;
     return;
   }
   if (state.phase === 'campaign') {
     drawCampaignWalkthrough();
+    ctx = prevCtx;
     return;
   }
   if (state.phase === 'customSetup') {
@@ -3123,9 +3134,19 @@ function draw() {
     ctx.font = 'bold 9px monospace';
     ctx.fillText('CHỌN BẮT ĐẦU Ở BẢNG BÊN PHẢI', 120, 212);
     ctx.restore();
+    ctx = prevCtx;
     return;
   }
   drawOpeningScreen();
+  ctx = prevCtx;
+}
+
+function draw() {
+  if (phaserRuntime) {
+    phaserRuntime.requestRedraw();
+  } else if (ctx) {
+    drawFrameToCtx(ctx);
+  }
 }
 
 function addChoiceButton(label, index, selected, onClick, metaText = '', disabled = false) {
@@ -3891,11 +3912,13 @@ function canvasCoords(event) {
 function screenToMapCell(sx, sy) {
   const d = state.data;
   const originY = (d.mapTopUi ?? 22) - (d.verticalOffset ?? 6);
-  const col = Math.floor(sx / CELL_WIDTH);
-  const row = Math.floor((sy - originY) / CELL_HEIGHT);
+  const camXFull = state.smoothCamX ?? state.cameraX ?? 0;
+  const camYFull = state.smoothCamY ?? state.cameraY ?? 0;
+  const col = Math.floor(sx / CELL_WIDTH + camXFull);
+  const row = Math.floor((sy - originY) / CELL_HEIGHT + camYFull);
   return {
-    x: Math.max(0, Math.min(d.width - 1, state.cameraX + col)),
-    y: Math.max(0, Math.min(d.height - 1, state.cameraY + row)),
+    x: Math.max(0, Math.min(d.width - 1, col)),
+    y: Math.max(0, Math.min(d.height - 1, row)),
   };
 }
 
@@ -4170,6 +4193,60 @@ Promise.all([
     const startScenario = Number.isFinite(scenarioParam) ? Math.max(0, Math.min(9, scenarioParam)) : 0;
     const wantStory = params.get('story') === '1';
 
+    phaserRuntime = mountPhaserRuntime({
+      canvas,
+      width: LOGICAL_WIDTH,
+      height: LOGICAL_HEIGHT,
+      tickMs: 120,
+      onStepSimulation() {
+        stepSimulation();
+      },
+      onFrameInterpolate(subTick, dt) {
+        if (state.phase !== 'game' || !state.data) return false;
+        let changed = false;
+
+        // 1. Smooth 60 FPS Camera Interpolation (smoothCamX / smoothCamY)
+        const targetCamX = state.cameraX ?? 0;
+        const targetCamY = state.cameraY ?? 0;
+        if (state.smoothCamX === undefined) state.smoothCamX = targetCamX;
+        if (state.smoothCamY === undefined) state.smoothCamY = targetCamY;
+        const camLerp = Math.min(1, (dt || 16.6) * 0.018);
+        const dxCam = targetCamX - state.smoothCamX;
+        const dyCam = targetCamY - state.smoothCamY;
+        if (Math.abs(dxCam) > 0.002 || Math.abs(dyCam) > 0.002) {
+          state.smoothCamX = Math.abs(dxCam) < 0.01 ? targetCamX : state.smoothCamX + dxCam * camLerp;
+          state.smoothCamY = Math.abs(dyCam) < 0.01 ? targetCamY : state.smoothCamY + dyCam * camLerp;
+          changed = true;
+        }
+
+        // 2. Smooth 60 FPS Sub-Tick Unit Movement Interpolation
+        if (!state.paused && !state.storyDialog && !state.missionResult) {
+          const e = state.data.entityData;
+          const interpUnit = (uid, task) => {
+            if (!task?.path || task.path.length === 0 || task.stepProgress <= 0) return;
+            const ux = e[uid] & 0xff;
+            const uy = e[101 + uid] & 0xff;
+            const target = task.path[0];
+            const dx = target.x - ux;
+            const dy = target.y - uy;
+            const stepsPerTile = getUnitStepTicks(uid, dx, dy);
+            const smoothStep = Math.min(stepsPerTile, task.stepProgress - 1 + subTick);
+            const frac = smoothStep / stepsPerTile;
+            e[202 + uid] = Math.round(dx * CELL_WIDTH * frac);
+            e[303 + uid] = Math.round(dy * CELL_HEIGHT * frac);
+            changed = true;
+          };
+          for (const [uid, task] of state.tasks.entries()) interpUnit(uid, task);
+          for (const [eid, task] of state.enemyTasks.entries()) interpUnit(eid, task);
+        }
+        return changed;
+      },
+      onRenderFrame(targetCtx) {
+        drawFrameToCtx(targetCtx);
+      },
+    });
+    ctx = phaserRuntime.ctx;
+
     if (requested === 'game' || requested === 'strategy') {
       loadScenario(startScenario, { showStory: wantStory });
     } else if (requested === 'custom') {
@@ -4179,42 +4256,6 @@ Promise.all([
       state.data = loadScenarioFromMa(baseData, maBytes, 0);
       setPhase('language');
     }
-    setInterval(stepSimulation, 120);
-
-    // 60 FPS smooth sub-tick visual interpolation for walking units (preserves exact 120ms/tick original speed)
-    function animateSmooth60Fps(now) {
-      if (
-        state.phase === 'game' &&
-        state.data &&
-        !state.paused &&
-        !state.storyDialog &&
-        !state.missionResult &&
-        state.lastSimTime
-      ) {
-        const subTick = Math.max(0, Math.min(0.98, (now - state.lastSimTime) / 120));
-        const e = state.data.entityData;
-        let anyMoving = false;
-        const interpUnit = (uid, task) => {
-          if (!task?.path || task.path.length === 0 || task.stepProgress <= 0) return;
-          const ux = e[uid] & 0xff;
-          const uy = e[101 + uid] & 0xff;
-          const target = task.path[0];
-          const dx = target.x - ux;
-          const dy = target.y - uy;
-          const stepsPerTile = getUnitStepTicks(uid, dx, dy);
-          const smoothStep = Math.min(stepsPerTile, task.stepProgress - 1 + subTick);
-          const frac = smoothStep / stepsPerTile;
-          e[202 + uid] = Math.round(dx * CELL_WIDTH * frac);
-          e[303 + uid] = Math.round(dy * CELL_HEIGHT * frac);
-          anyMoving = true;
-        };
-        for (const [uid, task] of state.tasks.entries()) interpUnit(uid, task);
-        for (const [eid, task] of state.enemyTasks.entries()) interpUnit(eid, task);
-        if (anyMoving) draw();
-      }
-      window.requestAnimationFrame(animateSmooth60Fps);
-    }
-    window.requestAnimationFrame(animateSmooth60Fps);
   })
   .catch((err) => {
     panelCopy.textContent = `Không tải được dữ liệu bản đồ: ${err.message}`;

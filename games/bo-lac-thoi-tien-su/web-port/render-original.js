@@ -794,10 +794,14 @@ export function drawOriginalHud(ctx, data, state, imageCache) {
 }
 
 export function renderOriginalMap(ctx, data, state, imageCache) {
-  const camX = state.cameraX ?? data.cameraX ?? 0;
-  const camY = state.cameraY ?? data.cameraY ?? 0;
-  const cols = data.viewportColumns || 11;
-  const rows = data.viewportRows || 18;
+  const camXFull = state.smoothCamX ?? state.cameraX ?? data.cameraX ?? 0;
+  const camYFull = state.smoothCamY ?? state.cameraY ?? data.cameraY ?? 0;
+  const camX = Math.floor(camXFull);
+  const camY = Math.floor(camYFull);
+  const fracX = Math.round((camXFull - camX) * CELL_WIDTH);
+  const fracY = Math.round((camYFull - camY) * CELL_HEIGHT);
+  const cols = (data.viewportColumns || 11) + (fracX > 0 ? 1 : 0);
+  const rows = (data.viewportRows || 18) + (fracY > 0 ? 1 : 0);
   const originY = (data.mapTopUi ?? 22) - (data.verticalOffset ?? 6);
   const animTick = state.animTick || 0;
 
@@ -808,6 +812,7 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
   ctx.beginPath();
   ctx.rect(0, data.mapTopUi ?? 22, LOGICAL_WIDTH, LOGICAL_HEIGHT - (data.mapTopUi ?? 22) - (data.bottomUi ?? 22));
   ctx.clip();
+  ctx.translate(-fracX, -fracY);
 
   // Pass 1: Ground terrain & base footprints (f.java o())
   for (let sy = 0; sy < rows; sy++) {
@@ -1052,8 +1057,8 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
   // Pass 4c2: Box-selection rectangle (exact port of f.java:1906-1909 w() -> color 1105252)
   if (state.selectionBox) {
     const sb = state.selectionBox;
-    const x1 = Math.min(sb.x0, sb.x1);
-    const y1 = Math.min(sb.y0, sb.y1);
+    const x1 = Math.min(sb.x0, sb.x1) + fracX;
+    const y1 = Math.min(sb.y0, sb.y1) + fracY;
     const w = Math.abs(sb.x1 - sb.x0);
     const h = Math.abs(sb.y1 - sb.y0);
     if (w > 4 && h > 4) {

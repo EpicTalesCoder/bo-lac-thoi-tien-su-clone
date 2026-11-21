@@ -12,9 +12,9 @@
     "coverImage": "./games/bo-lac-thoi-tien-su/web-port/assets/campaign-captures/frame-03.png",
     "status": "playable",
     "features": [
+      "Phaser 3 WebGL · 60 FPS Camera & Movement",
       "10 màn Chiến dịch + Trận tùy chỉnh",
-      "5 ngôn ngữ gốc (/0../4)",
-      "60 FPS Canvas & Web Audio MIDI (/sa)"
+      "5 ngôn ngữ gốc (/0../4) & Web Audio MIDI (/sa)"
     ]
   }
 ]
