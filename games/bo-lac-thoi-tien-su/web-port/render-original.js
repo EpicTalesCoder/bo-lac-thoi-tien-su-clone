@@ -1654,22 +1654,23 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
     drawAnimation(ctx, data, 30, LOGICAL_WIDTH - 22, 34, animTick, imageCache);
   }
 
-  // Pass 6b: Authentic Original In-Game Notification Frame (Panel 9 from f.java:2170 & 5888: comp 526 + comp 679 + comp 524)
+  // Pass 6b: Authentic Original In-Game Notification Frame (Panel 9 from f.java:2170 & 5888: comp 526 + comp 675..679 + comp 524)
   if (state.warningBanner && state.warningBanner.text && performance.now() < state.warningBanner.until) {
     ctx.save();
     const txt = String(state.warningBanner.text).replace(/^[💀👶🎉⚠🔨🎂\s]+/u, '');
+    const iconComp = state.warningBanner.iconComp || 679;
     const frameW = 240;
     const frameH = 22;
     const bx = Math.floor((LOGICAL_WIDTH - frameW) / 2);
     const by = state.selectedUnit > 0 ? 72 : 24;
-    // Authentic parchment fill + original top/bottom vine-stone border composites (526, 523, 524, 528) & alert badge (679)
+    // Authentic parchment fill + original top/bottom vine-stone border composites (526, 523, 524, 528) & event face badge (675=sad/bad news, 676=warning, 679=happy/good news)
     ctx.fillStyle = '#c5b85a';
     ctx.fillRect(bx, by, frameW, frameH);
     drawComposite(ctx, data, 526, bx, by, imageCache);
     drawComposite(ctx, data, 528, bx, by, imageCache);
     drawComposite(ctx, data, 523, bx, by + 6, imageCache);
     drawComposite(ctx, data, 524, bx, by + frameH, imageCache);
-    drawComposite(ctx, data, 679, bx + 3, by + 4, imageCache);
+    drawComposite(ctx, data, iconComp, bx + 3, by + 4, imageCache);
     drawPanel4Text(ctx, txt, bx + 22, by + 7, 'left', 8, '#fff8d4');
     ctx.restore();
   }

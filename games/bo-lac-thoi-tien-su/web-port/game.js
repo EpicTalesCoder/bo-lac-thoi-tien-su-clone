@@ -228,8 +228,21 @@ function addDust(x, y, w, h) {
   state.dustEffects.push({ x, y, w, h, frame: 0, maxFrames: 20 });
 }
 
-function showWarning(text) {
-  state.warningBanner = { text, until: performance.now() + 3400 };
+function showWarning(text, iconComp = null) {
+  // Exact port of f.java:2396 & mo[304]:
+  // 675 = sad/dead/bad news (mo[304] offset -4), 676 = warning/alert (offset -3), 679 = happy/birth/good news (offset 0)
+  let resolvedIcon = iconComp;
+  if (!resolvedIcon) {
+    const s = String(text || '');
+    if (s.includes('đã chết') || s.includes('sang phe địch') || s.includes('bị phá hủy')) {
+      resolvedIcon = 675;
+    } else if (s.includes('⚠') || s.includes('Cần') || s.includes('Chưa có') || s.includes('thiếu')) {
+      resolvedIcon = 676;
+    } else {
+      resolvedIcon = 679;
+    }
+  }
+  state.warningBanner = { text, iconComp: resolvedIcon, until: performance.now() + 3400 };
   state.message = text;
   render();
 }
