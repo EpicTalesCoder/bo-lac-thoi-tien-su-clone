@@ -779,6 +779,48 @@ export function placeBuilding(data, bType, x, y, owner = 0, stage = 1) {
   return bid;
 }
 
+export function spawnBonePile(data, x, y, amount = 15) {
+  if (!data?.entityData || !data.occupancy) return -1;
+  let bx = Math.max(1, Math.min(data.width - 2, x));
+  let by = Math.max(1, Math.min(data.height - 2, y));
+  // Never overwrite a building, another resource prop, or a living unit; find nearest empty grass tile if needed
+  if (data.occupancy[by]?.[bx] !== 0 || (data.terrain[by]?.[bx] & 0xff) >= 175) {
+    let found = false;
+    for (let r = 1; r <= 2 && !found; r++) {
+      for (let dy = -r; dy <= r && !found; dy++) {
+        for (let dx = -r; dx <= r && !found; dx++) {
+          const nx = bx + dx;
+          const ny = by + dy;
+          if (nx >= 1 && ny >= 1 && nx < data.width - 1 && ny < data.height - 1) {
+            if (data.occupancy[ny][nx] === 0 && (data.terrain[ny][nx] & 0xff) < 175) {
+              bx = nx;
+              by = ny;
+              found = true;
+            }
+          }
+        }
+      }
+    }
+    if (!found) return -1;
+  }
+  const e = data.entityData;
+  let slot = -1;
+  for (let i = 0; i < 50; i++) {
+    if (e[9833 + i] === 0) {
+      slot = i;
+      break;
+    }
+  }
+  if (slot === -1) return -1;
+  e[9833 + slot] = 7; // kind 7 = skeleton bones (b.java:4709)
+  e[9733 + slot] = bx;
+  e[9783 + slot] = by;
+  e[9883 + slot] = amount;
+  e[9933 + slot] = 3;
+  data.occupancy[by][bx] = -61 - slot;
+  return slot;
+}
+
 function spawnItemProp(data, kind, x, y, amount) {
   const e = data.entityData;
   let slot = -1;

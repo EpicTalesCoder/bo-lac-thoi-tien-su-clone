@@ -1535,9 +1535,6 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
       e[fo[29] + fx.uid] = fx.animId;
       e[fo[30] + fx.uid] = Math.min(fx.maxFrames - 1, fx.frame);
       ctx.save();
-      if (fx.frame > fx.maxFrames - 5) {
-        ctx.globalAlpha = Math.max(0.15, (fx.maxFrames - fx.frame) / 5);
-      }
       drawEntitySprite(ctx, data, fx.uid, sx, sy, fx.dir, 29, imageCache, { selectedUnit: 0, hoverUnit: 0, animTick });
       ctx.restore();
       e[fo[29] + fx.uid] = prevAnim;

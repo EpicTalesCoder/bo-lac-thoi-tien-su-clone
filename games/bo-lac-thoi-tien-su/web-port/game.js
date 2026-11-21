@@ -31,6 +31,7 @@ import {
   upgradeBuilding,
   demolishBuilding,
   syncUnitAvatar,
+  spawnBonePile,
   spawnNewbornVillager,
   captureTribeCarryover,
   loadScenarioFromMa,
@@ -3575,8 +3576,14 @@ function stepSimulation() {
     if (state.dustEffects[i].frame >= state.dustEffects[i].maxFrames) state.dustEffects.splice(i, 1);
   }
   for (let i = state.deathEffects.length - 1; i >= 0; i--) {
-    state.deathEffects[i].frame++;
-    if (state.deathEffects[i].frame >= state.deathEffects[i].maxFrames) state.deathEffects.splice(i, 1);
+    const fx = state.deathEffects[i];
+    fx.frame++;
+    if (fx.frame >= fx.maxFrames) {
+      // When the falling villager lands at the end of anim 108, turn into gatherable skeleton bones (kind 7)!
+      spawnBonePile(d, fx.x, fx.y, 15);
+      state.deathEffects.splice(i, 1);
+      uiChanged = true;
+    }
   }
   for (let i = state.popups.length - 1; i >= 0; i--) {
     state.popups[i].age++;
