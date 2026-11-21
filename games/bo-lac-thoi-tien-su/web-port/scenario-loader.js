@@ -340,26 +340,40 @@ export function exitBuildingSlot(data, unitId) {
     }
   }
 
-  // Place villager on nearest free adjacent tile around building
+  // Place villager neatly at the front door of the building first (bottom-center edge), then fallback nearby
   const bx = e[8383 + bid] & 0xff;
   const by = e[8444 + bid] & 0xff;
   const bType = e[8749 + bid] >= 12 && e[8749 + bid] <= 19 ? e[9237 + bid] : e[8749 + bid];
   const spec = getBuildingSpec(data, bType);
+  const doorMidX = bx + Math.floor(spec.width / 2);
+  const doorY = by + spec.height;
+  const tryPlaceAt = (nx, ny) => {
+    if (nx < 1 || ny < 1 || nx >= data.width - 1 || ny >= data.height - 1) return false;
+    if (data.occupancy[ny][nx] === 0 && (data.terrain[ny][nx] & 0xff) < 175) {
+      e[unitId] = nx;
+      e[101 + unitId] = ny;
+      e[202 + unitId] = 0;
+      e[303 + unitId] = 0;
+      data.occupancy[ny][nx] = unitId;
+      return true;
+    }
+    return false;
+  };
   let placed = false;
+  // 1. Try front door row (center outward)
+  const frontOffsets = [0, 1, -1, 2, -2];
+  for (const off of frontOffsets) {
+    if (tryPlaceAt(doorMidX + off, doorY)) { placed = true; break; }
+  }
+  if (!placed) {
+    for (const off of frontOffsets) {
+      if (tryPlaceAt(doorMidX + off, doorY + 1)) { placed = true; break; }
+    }
+  }
   for (let r = 1; r <= 4 && !placed; r++) {
-    for (let dy = -r; dy <= spec.height - 1 + r && !placed; dy++) {
+    for (let dy = spec.height - 1 + r; dy >= -r && !placed; dy--) {
       for (let dx = -r; dx <= spec.width - 1 + r && !placed; dx++) {
-        const nx = bx + dx;
-        const ny = by + dy;
-        if (nx < 1 || ny < 1 || nx >= data.width - 1 || ny >= data.height - 1) continue;
-        if (data.occupancy[ny][nx] === 0 && (data.terrain[ny][nx] & 0xff) < 175) {
-          e[unitId] = nx;
-          e[101 + unitId] = ny;
-          e[202 + unitId] = 0;
-          e[303 + unitId] = 0;
-          data.occupancy[ny][nx] = unitId;
-          placed = true;
-        }
+        if (tryPlaceAt(bx + dx, by + dy)) placed = true;
       }
     }
   }

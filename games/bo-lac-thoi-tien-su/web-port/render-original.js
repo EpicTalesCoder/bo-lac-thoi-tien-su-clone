@@ -1132,6 +1132,25 @@ function drawAuthenticBottomMenu(ctx, data, state, imageCache) {
       drawAnimation(ctx, data, item.iconAnim, sx, sy, isSel ? Math.floor(animTick / 2) : 0, imageCache);
     } else if (item.weaponId !== undefined) {
       drawComposite(ctx, data, 659 + item.weaponId, sx, sy, imageCache);
+      if (item.queueCount !== undefined) {
+        // Draw crisp order count badge (starts at 0; ▲/▼ or ↑/↓ to adjust!)
+        ctx.fillStyle = item.queueCount > 0 ? '#1b4714' : '#2a1d0b';
+        ctx.fillRect(sx + 13, sy + 14, 13, 10);
+        ctx.strokeStyle = item.queueCount > 0 ? '#9aff78' : '#a88c48';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(sx + 13.5, sy + 14.5, 12, 9);
+        ctx.fillStyle = item.queueCount > 0 ? '#b7ff8f' : '#efe3a8';
+        ctx.font = 'bold 8px monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(String(item.queueCount), sx + 19.5, sy + 19.5);
+        if (isSel) {
+          ctx.fillStyle = '#fff582';
+          ctx.font = 'bold 7px monospace';
+          ctx.fillText('▲', sx + 22, sy + 4);
+          ctx.fillText('▼', sx + 6, sy + 20);
+        }
+      }
     } else if (item.unitId !== undefined) {
       const av = (data.entityData[2727 + item.unitId] & 0xff) % 10;
       drawComposite(ctx, data, 720 + av, sx + 1, sy - 2, imageCache);

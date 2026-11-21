@@ -206,6 +206,8 @@ const state = {
   // Active tasks per villager: { kind: 'move'|'gather'|'return'|'build'|'hunt'|'rest'|'eat'|'workBuilding'|'attackUnit'|'attackBuilding', ... }
   tasks: new Map(),
   enemyTasks: new Map(),
+  weaponQueues: new Map(), // bid -> [q0..q5] weapon forge orders (starts at 0)
+  siteMaterials: new Map(), // bid -> { wood, stone, tools, owner } pending material deliveries from Storage
   treeWood: new Map(), // remaining wood per tree cell "x,y" (12 wood/tree; clears to grass when depleted)
   activePath: [],
   dustEffects: [],
@@ -1004,6 +1006,12 @@ function syncUnitJobBadge(unitId) {
       badge = 3; // authentic meat/hunt/eat badge (mo[41][12] = 3)
     } else if (task.kind === 'attackUnit' || task.kind === 'attackBuilding') {
       badge = 0; // No overhead icon during combat!
+    } else if (task.kind === 'buildFetch') {
+      badge = 12; // Builder fetching materials from Storage
+    } else if (task.kind === 'blacksmithFetch' || task.kind === 'blacksmithDeliver') {
+      badge = 8; // Blacksmith fetching materials or delivering forged weapon
+    } else if (task.kind === 'chefFetch') {
+      badge = 9; // Chef fetching fuel from Storage
     } else if (task.kind === 'workBuilding') {
       const bt = task.target?.targetType;
       const slotIdx = task.insideSlot?.slotIdx ?? (Array.isArray(task.preferredSlots) && !task.preferredSlots.includes(0) ? 1 : 0);
@@ -1152,11 +1160,64 @@ function findPath(sx, sy, tx, ty, movingUnitId, allowAdjacent = false, targetRec
  * finish that current step seamlessly and route from `inFlight` to the new destination so the
  * villager never snaps backward or stutters when the player clicks rapidly across the map!
  */
+function getBuildingDoorTile(rect) {
+  const d = state.data;
+  if (!d || !rect) return null;
+  const bw = rect.w ?? rect.width ?? 2;
+  const bh = rect.h ?? rect.height ?? 2;
+  const doorMidX = rect.x + Math.floor(bw / 2);
+  const doorY = rect.y + bh;
+  for (const off of [0, 1, -1, 2, -2]) {
+    const nx = doorMidX + off;
+    if (nx >= 1 && doorY >= 1 && nx < d.width - 1 && doorY < d.height - 1) {
+      const occ = d.occupancy[doorY]?.[nx] ?? 0;
+      const terr = d.terrain[doorY]?.[nx] & 0xff;
+      if (terr < 175 && (occ === 0 || (occ >= 1 && occ <= 100))) {
+        return { x: nx, y: doorY };
+      }
+    }
+  }
+  return null;
+}
+
+function getWeaponQueue(bid) {
+  if (!state.weaponQueues.has(bid)) {
+    state.weaponQueues.set(bid, [0, 0, 0, 0, 0, 0]);
+  }
+  return state.weaponQueues.get(bid);
+}
+
+function adjustWeaponQueue(bid, weaponId, delta, fromRemote = false) {
+  const q = getWeaponQueue(bid);
+  q[weaponId] = Math.max(0, Math.min(20, (q[weaponId] || 0) + delta));
+  if (state.mpMode && state.localTribe === 1 && !fromRemote) {
+    mpClient?.sendCommand({ kind: 'setWeaponQueue', bid, weaponId, delta });
+  }
+  if (!fromRemote && state.canvasMenu?.kind === 'building' && state.selectedBuildingBid === bid) {
+    const bld = getPlayerBuildings().find((b) => b.bid === bid);
+    const prevSel = state.canvasMenu.selected;
+    const prevScroll = state.canvasMenu.scroll;
+    if (bld) {
+      openCanvasBuildingMenu(bld);
+      if (state.canvasMenu) {
+        state.canvasMenu.selected = Math.min(prevSel, state.canvasMenu.items.length - 1);
+        state.canvasMenu.scroll = prevScroll;
+        render();
+      }
+    }
+  }
+}
+
 function planUnitPath(unitId, tx, ty, allowAdjacent = false, targetRect = null) {
+  // Always route into a building through its front door tile (bottom-center edge) so villagers never clip through walls!
+  const door = targetRect ? getBuildingDoorTile(targetRect) : null;
   const curTask = state.tasks.get(unitId);
   if (curTask && curTask.path?.length > 0 && curTask.stepProgress > 0) {
     const inFlight = curTask.path[0];
-    const tail = findPath(inFlight.x, inFlight.y, tx, ty, unitId, allowAdjacent, targetRect);
+    const tail = door
+      ? findPath(inFlight.x, inFlight.y, door.x, door.y, unitId, false, null) ??
+        findPath(inFlight.x, inFlight.y, tx, ty, unitId, allowAdjacent, targetRect)
+      : findPath(inFlight.x, inFlight.y, tx, ty, unitId, allowAdjacent, targetRect);
     if (tail !== null) {
       return {
         path: [inFlight, ...tail],
@@ -1168,7 +1229,10 @@ function planUnitPath(unitId, tx, ty, allowAdjacent = false, targetRect = null) 
   e[202 + unitId] = 0;
   e[303 + unitId] = 0;
   const info = getVillagerInfo(unitId);
-  const path = findPath(info.x, info.y, tx, ty, unitId, allowAdjacent, targetRect);
+  const path = door
+    ? findPath(info.x, info.y, door.x, door.y, unitId, false, null) ??
+      findPath(info.x, info.y, tx, ty, unitId, allowAdjacent, targetRect)
+    : findPath(info.x, info.y, tx, ty, unitId, allowAdjacent, targetRect);
   if (path === null) return null;
   return { path, stepProgress: 0 };
 }
@@ -1291,9 +1355,33 @@ function isWearingJobHat(unitId) {
 
 function assignBuildTask(unitId, bld, carryWood = false) {
   ensureUnitOutside(unitId);
+  const e = state.data.entityData;
+  const owner = unitId > 50 ? 1 : 0;
+  // If this construction site still needs materials delivered from Storage, send builder to Storage FIRST!
+  const need = state.siteMaterials.get(bld.bid);
+  if (need && (need.wood > 0 || need.stone > 0 || need.tools > 0)) {
+    const storage = findNearestDropoff(e[unitId] & 0xff, e[101 + unitId] & 0xff, owner);
+    if (storage) {
+      const toStorage = planUnitPath(unitId, storage.x, storage.y, false, storage);
+      if (toStorage !== null) {
+        setUnitCarry(unitId, 0, 0);
+        state.tasks.set(unitId, {
+          kind: 'buildFetch',
+          path: toStorage.path,
+          stepProgress: toStorage.stepProgress,
+          target: storage,
+          buildBld: bld,
+          owner,
+          workTicks: 0,
+        });
+        if (state.selectedUnit === unitId) state.activePath = toStorage.path;
+        return true;
+      }
+    }
+  }
+
   const planned = planUnitPath(unitId, bld.x, bld.y, false, bld);
   if (planned === null) return false;
-  const e = state.data.entityData;
   const needHatAnim = (e[6464 + unitId] & 0xff) !== 38;
   // During the 14-frame hat-putting animation (anim 147 / -109), hands are free; wood log is hoisted right after
   if (!needHatAnim && carryWood) setUnitCarry(unitId, 2, 1);
@@ -1364,17 +1452,8 @@ function confirmBuildAtCursor(owner = state.localTribe ?? 0, overridePayload = n
     return;
   }
 
-  if (owner === (state.localTribe ?? 0)) {
-    state.wood -= spec.woodCost;
-    state.stone -= spec.stoneCost;
-    state.tools -= spec.toolsCost;
-    syncResourcesToData(owner);
-  } else if (r) {
-    r[1] = Math.max(0, (r[1] || 0) - spec.woodCost);
-    r[2] = Math.max(0, (r[2] || 0) - spec.stoneCost);
-    r[3] = Math.max(0, (r[3] || 0) - spec.toolsCost);
-  }
-
+  // Do NOT deduct resources immediately from the top bar!
+  // Record required materials on the construction site so builders physically fetch them from Storage!
   const bid = placeConstructionSite(state.data, bp.bType, bp.x, bp.y, owner);
   if (bid < 0) {
     if (!overridePayload) {
@@ -1384,6 +1463,12 @@ function confirmBuildAtCursor(owner = state.localTribe ?? 0, overridePayload = n
     }
     return;
   }
+  state.siteMaterials.set(bid, {
+    wood: spec.woodCost || 0,
+    stone: spec.stoneCost || 0,
+    tools: spec.toolsCost || 0,
+    owner,
+  });
 
   // Dispatch selected or nearest ADULT villager of that tribe carrying wood to enter the scaffold and build
   const e = state.data.entityData;
@@ -3367,6 +3452,165 @@ function stepSimulation() {
         state.tasks.delete(unitId);
         uiChanged = true;
       }
+    } else if (task.kind === 'buildFetch') {
+      // Builder arrived at Storage: physically deduct & pick up required materials, then carry them to the construction site!
+      const owner = task.owner ?? (unitId > 50 ? 1 : 0);
+      const r = d.resources?.[owner];
+      const need = state.siteMaterials.get(task.buildBld.bid);
+      let carrySprite = 2;
+      if (need) {
+        const curWood = owner === (state.localTribe ?? 0) ? state.wood : (r?.[1] || 0);
+        const curStone = owner === (state.localTribe ?? 0) ? state.stone : (r?.[2] || 0);
+        const curTools = owner === (state.localTribe ?? 0) ? state.tools : (r?.[3] || 0);
+        const takeW = Math.min(need.wood, curWood);
+        const takeS = Math.min(need.stone, curStone);
+        const takeT = Math.min(need.tools, curTools);
+        if (takeW > 0 || takeS > 0 || takeT > 0) {
+          if (owner === (state.localTribe ?? 0)) {
+            state.wood -= takeW;
+            state.stone -= takeS;
+            state.tools -= takeT;
+            syncResourcesToData(owner);
+          } else if (r) {
+            r[1] = Math.max(0, (r[1] || 0) - takeW);
+            r[2] = Math.max(0, (r[2] || 0) - takeS);
+            r[3] = Math.max(0, (r[3] || 0) - takeT);
+          }
+          need.wood -= takeW;
+          need.stone -= takeS;
+          need.tools -= takeT;
+          carrySprite = takeW > 0 ? 2 : takeS > 0 ? 3 : 4;
+        }
+        if (need.wood <= 0 && need.stone <= 0 && need.tools <= 0) {
+          state.siteMaterials.delete(task.buildBld.bid);
+        }
+      }
+      state.tasks.delete(unitId);
+      const planned = planUnitPath(unitId, task.buildBld.x, task.buildBld.y, false, task.buildBld);
+      if (planned !== null) {
+        setUnitCarry(unitId, carrySprite, 1);
+        state.tasks.set(unitId, {
+          kind: 'build',
+          path: planned.path,
+          stepProgress: planned.stepProgress,
+          target: task.buildBld,
+          insideSlot: null,
+          workTicks: 0,
+          hatJob: 38,
+          hatPutFrame: 14,
+          carryWoodAfterHat: true,
+        });
+        if (state.selectedUnit === unitId) state.activePath = planned.path;
+      }
+      uiChanged = true;
+    } else if (task.kind === 'blacksmithFetch') {
+      // Blacksmith arrived at Storage: deduct weapon materials & carry them back to Kho vũ khí!
+      const owner = task.owner ?? (unitId > 50 ? 1 : 0);
+      const r = d.resources?.[owner];
+      const w = WEAPONS[task.weaponId];
+      const curWood = owner === (state.localTribe ?? 0) ? state.wood : (r?.[1] || 0);
+      const curStone = owner === (state.localTribe ?? 0) ? state.stone : (r?.[2] || 0);
+      const curTools = owner === (state.localTribe ?? 0) ? state.tools : (r?.[3] || 0);
+      if (w && curWood >= w.wood && curStone >= w.stone && curTools >= w.bones) {
+        if (owner === (state.localTribe ?? 0)) {
+          state.wood -= w.wood;
+          state.stone -= w.stone;
+          state.tools -= w.bones;
+          syncResourcesToData(owner);
+        } else if (r) {
+          r[1] = Math.max(0, (r[1] || 0) - w.wood);
+          r[2] = Math.max(0, (r[2] || 0) - w.stone);
+          r[3] = Math.max(0, (r[3] || 0) - w.bones);
+        }
+        const planned = planUnitPath(unitId, task.workshop.x, task.workshop.y, false, task.workshop);
+        if (planned !== null) {
+          setUnitCarry(unitId, w.wood > 0 ? 2 : 3, 1);
+          state.tasks.set(unitId, {
+            kind: 'workBuilding',
+            path: planned.path,
+            stepProgress: planned.stepProgress,
+            target: task.workshop,
+            insideSlot: null,
+            preferredSlots: [0],
+            workTicks: 0,
+            hasMaterials: true,
+            forgingWeaponId: w.id,
+            forgeTicks: 0,
+            hatJob: 69,
+            hatPutFrame: 14,
+            hatRemoveFrame: 7,
+          });
+          if (state.selectedUnit === unitId) state.activePath = planned.path;
+          uiChanged = true;
+          continue;
+        }
+      }
+      // If not enough materials anymore, return to workshop and nap
+      state.tasks.delete(unitId);
+      assignWorkAtBuilding(unitId, task.workshop, [0]);
+      uiChanged = true;
+    } else if (task.kind === 'blacksmithDeliver') {
+      // Blacksmith arrived at Storage with newly forged weapon: drop off (anim 22) into Storage rack!
+      const owner = task.owner ?? (unitId > 50 ? 1 : 0);
+      const frame = task.workTicks;
+      if (frame < 14) {
+        setUnitAnim(unitId, 22, frame);
+        if (frame === 10) {
+          setUnitCarry(unitId, 0, 0);
+          if (d.resources?.[owner]) {
+            const slot = 5 + (task.weaponId % 6);
+            d.resources[owner][slot] = Math.min(35, (d.resources[owner][slot] || 0) + 1);
+          }
+          const q = getWeaponQueue(task.workshop.bid);
+          if (q[task.weaponId] > 0) q[task.weaponId]--;
+          if (owner === (state.localTribe ?? 0)) {
+            const wName = WEAPONS[task.weaponId]?.name || 'Vũ khí';
+            state.message = `🔨 Thợ rèn đã giao ${wName} vào Kho chứa!`;
+          }
+          uiChanged = true;
+        }
+        task.workTicks++;
+      } else {
+        state.tasks.delete(unitId);
+        assignWorkAtBuilding(unitId, task.workshop, [0]);
+        uiChanged = true;
+      }
+    } else if (task.kind === 'chefFetch') {
+      // Chef arrived at Storage to fetch 1 Wood for cooking fire, then carries it back to Bếp!
+      const owner = task.owner ?? (unitId > 50 ? 1 : 0);
+      const r = d.resources?.[owner];
+      const curWood = owner === (state.localTribe ?? 0) ? state.wood : (r?.[1] || 0);
+      if (curWood >= 1) {
+        if (owner === (state.localTribe ?? 0)) {
+          state.wood -= 1;
+          syncResourcesToData(owner);
+        } else if (r) {
+          r[1] = Math.max(0, (r[1] || 0) - 1);
+        }
+        const planned = planUnitPath(unitId, task.kitchen.x, task.kitchen.y, false, task.kitchen);
+        if (planned !== null) {
+          setUnitCarry(unitId, 2, 1);
+          state.tasks.set(unitId, {
+            kind: 'workBuilding',
+            path: planned.path,
+            stepProgress: planned.stepProgress,
+            target: task.kitchen,
+            insideSlot: null,
+            preferredSlots: [0],
+            workTicks: 0,
+            chefFuel: true,
+            hatJob: 54,
+            hatPutFrame: 14,
+            hatRemoveFrame: 7,
+          });
+          if (state.selectedUnit === unitId) state.activePath = planned.path;
+          uiChanged = true;
+          continue;
+        }
+      }
+      state.tasks.delete(unitId);
+      assignWorkAtBuilding(unitId, task.kitchen, [0]);
+      uiChanged = true;
     } else if (task.kind === 'workBuilding') {
       const bld = task.target;
       if (!task.insideSlot) {
@@ -3399,12 +3643,95 @@ function stepSimulation() {
         }
       }
       task.workTicks++;
-      // Play authentic per-building, per-slot animation decoded from /a (mo[174]/mo[57]/mo[166]/mo[164]):
-      // e.g. Bếp slot 0 = anim 105 (16f cooking), slots 1..6 = anim 83/84 (12f eating);
-      // Sàn disco slot 0 = anim 117 (30f DJ), slots 1..6 = anim 126..136/137/138/125 (dancing/party);
-      // Phòng tập = anim 23..33/72/74; Khu tập ném = anim 91..93; Kho vũ khí / Thánh địa = anim 105 (16f);
-      // Trung tâm PIA = anim 151..153; Chòi canh = anim 109/110.
-      const slotAnims = task.insideSlot.anims || [{ animId: 105, frames: 16 }];
+      const bType = bld.targetType;
+      const slotIdx = task.insideSlot.slotIdx;
+      const unitOwner = unitId > 50 ? 1 : 0;
+
+      // === Authentic Blacksmith (Kho vũ khí, bType 0): nap (anim 85) if queue empty; fetch -> hammer (anim 53) -> deliver weapon to Storage! ===
+      if (bType === 0) {
+        const q = getWeaponQueue(bld.bid);
+        if (task.hasMaterials && task.forgingWeaponId !== undefined) {
+          // Forging with hammer (anim 53, 3f)!
+          task.forgeTicks = (task.forgeTicks || 0) + 1;
+          setUnitAnim(unitId, 53, Math.floor(task.forgeTicks / 2) % 3);
+          e[3030 + unitId] = task.forgeTicks & 0xff;
+          if (task.forgeTicks >= 36) {
+            const wId = task.forgingWeaponId;
+            exitBuildingSlot(d, unitId);
+            const storage = findNearestDropoff(e[unitId] & 0xff, e[101 + unitId] & 0xff, unitOwner);
+            if (storage) {
+              const toStorage = planUnitPath(unitId, storage.x, storage.y, false, storage);
+              if (toStorage !== null) {
+                setUnitCarry(unitId, 2, 1); // carrying freshly forged weapon to Storage
+                state.tasks.set(unitId, {
+                  kind: 'blacksmithDeliver',
+                  path: toStorage.path,
+                  stepProgress: toStorage.stepProgress,
+                  target: storage,
+                  workshop: bld,
+                  weaponId: wId,
+                  owner: unitOwner,
+                  workTicks: 0,
+                });
+                if (state.selectedUnit === unitId) state.activePath = toStorage.path;
+                uiChanged = true;
+                continue;
+              }
+            }
+            // Fallback direct deposit if no storage
+            if (d.resources?.[unitOwner]) {
+              d.resources[unitOwner][5 + (wId % 6)] = Math.min(35, (d.resources[unitOwner][5 + (wId % 6)] || 0) + 1);
+            }
+            if (q[wId] > 0) q[wId]--;
+            task.hasMaterials = false;
+            task.forgingWeaponId = undefined;
+            task.forgeTicks = 0;
+            uiChanged = true;
+          }
+          continue;
+        }
+        // Check if any weapon is queued AND tribe has materials in Storage
+        const r = d.resources?.[unitOwner];
+        const curWood = unitOwner === (state.localTribe ?? 0) ? state.wood : (r?.[1] || 0);
+        const curStone = unitOwner === (state.localTribe ?? 0) ? state.stone : (r?.[2] || 0);
+        const curTools = unitOwner === (state.localTribe ?? 0) ? state.tools : (r?.[3] || 0);
+        let nextWId = -1;
+        for (let wid = 0; wid < WEAPONS.length; wid++) {
+          const w = WEAPONS[wid];
+          if ((q[wid] || 0) > 0 && curWood >= w.wood && curStone >= w.stone && curTools >= w.bones) {
+            nextWId = wid;
+            break;
+          }
+        }
+        if (nextWId >= 0) {
+          exitBuildingSlot(d, unitId);
+          const storage = findNearestDropoff(e[unitId] & 0xff, e[101 + unitId] & 0xff, unitOwner);
+          if (storage) {
+            const toStorage = planUnitPath(unitId, storage.x, storage.y, false, storage);
+            if (toStorage !== null) {
+              state.tasks.set(unitId, {
+                kind: 'blacksmithFetch',
+                path: toStorage.path,
+                stepProgress: toStorage.stepProgress,
+                target: storage,
+                workshop: bld,
+                weaponId: nextWId,
+                owner: unitOwner,
+                workTicks: 0,
+              });
+              if (state.selectedUnit === unitId) state.activePath = toStorage.path;
+              uiChanged = true;
+              continue;
+            }
+          }
+        }
+        // No weapons to forge (or waiting for materials): Blacksmith naps (anim 85, 19f) instead of hammering!
+        setUnitAnim(unitId, 85, Math.floor(task.workTicks / 2) % 19);
+        continue;
+      }
+
+      // Play authentic per-building, per-slot animation decoded from /a (mo[174]/mo[58]/mo[166]/mo[164]):
+      const slotAnims = task.insideSlot.anims || [{ animId: 81, frames: 6 }];
       let totalFrames = 0;
       for (let ai = 0; ai < slotAnims.length; ai++) totalFrames += slotAnims[ai].frames;
       let cursor = totalFrames > 0 ? task.workTicks % totalFrames : 0;
@@ -3421,13 +3748,38 @@ function stepSimulation() {
       e[3030 + unitId] = task.workTicks & 0xff;
 
       // Authentic per-building production & training effects!
-      const bType = bld.targetType;
-      const slotIdx = task.insideSlot.slotIdx;
       if (bType === 4) {
         if (slotIdx === 0 && task.workTicks % 60 === 0) {
-          // Bếp slot 0: Chef cooks meals (+2 food)
-          state.food += 2;
-          syncResourcesToData();
+          // Bếp slot 0: Chef cooks meals (+3 food), then goes to Storage to fetch 1 Wood for the next batch!
+          if (unitOwner === (state.localTribe ?? 0)) {
+            state.food += 3;
+            syncResourcesToData(unitOwner);
+          } else if (d.resources?.[unitOwner]) {
+            d.resources[unitOwner][0] = (d.resources[unitOwner][0] || 0) + 3;
+          }
+          const r = d.resources?.[unitOwner];
+          const curWood = unitOwner === (state.localTribe ?? 0) ? state.wood : (r?.[1] || 0);
+          if (curWood >= 1) {
+            exitBuildingSlot(d, unitId);
+            const storage = findNearestDropoff(e[unitId] & 0xff, e[101 + unitId] & 0xff, unitOwner);
+            if (storage) {
+              const toStorage = planUnitPath(unitId, storage.x, storage.y, false, storage);
+              if (toStorage !== null) {
+                state.tasks.set(unitId, {
+                  kind: 'chefFetch',
+                  path: toStorage.path,
+                  stepProgress: toStorage.stepProgress,
+                  target: storage,
+                  kitchen: bld,
+                  owner: unitOwner,
+                  workTicks: 0,
+                });
+                if (state.selectedUnit === unitId) state.activePath = toStorage.path;
+                uiChanged = true;
+                continue;
+              }
+            }
+          }
           uiChanged = true;
         } else if (slotIdx > 0 && task.workTicks >= 24) {
           // Bếp slots 1..6: Diner finishes meal & exits
@@ -4168,29 +4520,26 @@ function openCanvasBuildingMenu(bld) {
   const items = [];
 
   if (bld.targetType === 0) {
-    // Ổ vũ khí: 6 weapons with authentic 659+id icons + weaponsmith slot
+    // Kho vũ khí: Authentic weapon production queue (starts at 0; ↑/Click = +1, ↓/Right-click = -1)!
+    const q = getWeaponQueue(bld.bid);
     for (const w of WEAPONS) {
-      const afford = state.wood >= w.wood && state.stone >= w.stone && state.tools >= w.bones;
       const parts = [];
       if (w.wood) parts.push(`Gỗ:${w.wood}`);
       if (w.stone) parts.push(`Đá:${w.stone}`);
       if (w.bones) parts.push(`Xương:${w.bones}`);
       items.push({
-        label: `CHẾ ${w.name.toUpperCase()} (+${w.atk})`,
+        label: `RÈN ${w.name.toUpperCase()} (ĐẶT: ${q[w.id]})`,
         weaponId: w.id,
-        costText: parts.join(' · '),
-        canAfford: afford,
-        action: () => {
-          if (!state.selectedUnit) {
-            const ids = getVillagerIds();
-            if (ids.length) state.selectedUnit = ids[0];
-          }
-          craftAndEquipWeapon(w);
-        },
+        queueCount: q[w.id],
+        bid: bld.bid,
+        costText: `↑/Click: +1 · ↓/Chuột phải: -1 · ${parts.join(' ')}`,
+        canAfford: state.wood >= w.wood && state.stone >= w.stone && state.tools >= w.bones,
+        action: () => adjustWeaponQueue(bld.bid, w.id, +1),
+        decreaseAction: () => adjustWeaponQueue(bld.bid, w.id, -1),
       });
     }
     items.push({
-      label: 'CỬ THỢ RÈN VŨ KHÍ',
+      label: 'CỬ THỢ RÈN VÀO XƯỞNG',
       iconAnim: 13,
       action: () => {
         const uid = state.selectedUnit || findNearestVillager(bld.x, bld.y, true);
@@ -5642,6 +5991,14 @@ window.addEventListener('keydown', (event) => {
       const vertical = state.canvasMenu.kind === 'pause' || state.canvasMenu.kind === 'scenarios';
       if (vertical && (event.key === 'ArrowUp' || key === 'w')) { event.preventDefault(); moveCanvasMenuSelection(-1); return; }
       if (vertical && (event.key === 'ArrowDown' || key === 's')) { event.preventDefault(); moveCanvasMenuSelection(1); return; }
+      if (!vertical && (event.key === 'ArrowUp' || key === 'w')) {
+        const curItem = state.canvasMenu.items?.[state.canvasMenu.selected];
+        if (curItem?.queueCount !== undefined) { event.preventDefault(); curItem.action?.(); return; }
+      }
+      if (!vertical && (event.key === 'ArrowDown' || key === 's')) {
+        const curItem = state.canvasMenu.items?.[state.canvasMenu.selected];
+        if (curItem?.decreaseAction) { event.preventDefault(); curItem.decreaseAction(); return; }
+      }
       if (!vertical && (event.key === 'ArrowLeft' || key === 'a')) { event.preventDefault(); moveCanvasMenuSelection(-1); return; }
       if (!vertical && (event.key === 'ArrowRight' || key === 'd')) { event.preventDefault(); moveCanvasMenuSelection(1); return; }
       if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); confirm(); return; }
@@ -5743,6 +6100,11 @@ canvas.addEventListener('contextmenu', (event) => {
     return;
   }
   if (state.canvasMenu) {
+    const curItem = state.canvasMenu.items?.[state.canvasMenu.selected];
+    if (curItem?.decreaseAction) {
+      curItem.decreaseAction();
+      return;
+    }
     closeCanvasMenu();
     return;
   }
@@ -6289,6 +6651,8 @@ Promise.all([
         confirmFlagAtCursor(1, cmd);
       } else if (cmd.kind === 'setUseRawWeapon') {
         state.tribeUseRawWeapon[1] = Boolean(cmd.value);
+      } else if (cmd.kind === 'setWeaponQueue') {
+        adjustWeaponQueue(cmd.bid, cmd.weaponId, cmd.delta, true);
       }
     };
 
