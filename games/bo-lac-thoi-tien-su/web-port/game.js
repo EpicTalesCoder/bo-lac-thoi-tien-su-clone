@@ -2149,9 +2149,25 @@ function runTribeAutoAI() {
   }
 }
 
+function isUnitSprinting(unitId) {
+  const d = state.data;
+  if (!d || unitId <= 0 || unitId > 50) return false;
+  const e = d.entityData;
+  return (
+    (e[7777 + unitId] & 0xff) > 0 &&
+    (e[1414 + unitId] & 0xff) >= 12 &&
+    (e[3535 + unitId] & 0xff) === 0 &&
+    (e[2020 + unitId] & 0xff) > 10
+  );
+}
+
 function getUnitStepTicks(unitId, dx, dy) {
   const d = state.data;
-  const speedIdx = Math.max(2, Math.min(8, (d.entityData[1010 + unitId] & 0xff) || 8));
+  let speedIdx = Math.max(2, Math.min(8, (d.entityData[1010 + unitId] & 0xff) || 8));
+  if (isUnitSprinting(unitId)) {
+    // Authentic J2ME sprint speed (b.java:2092 / mo[15]): ~2x faster (4 ticks/tile cardinal, 6 diagonal)
+    speedIdx = Math.max(4, speedIdx - 4);
+  }
   const isDiagonal = dx !== 0 && dy !== 0;
   const tableVal = d.mapTableData[d.mapTableOffsets[15] + (isDiagonal ? 9 : 0) + speedIdx] & 0xff;
   return tableVal || (isDiagonal ? 11 : 8);
@@ -2204,7 +2220,10 @@ function stepUnitMovement(unitId, task, isEnemy = false) {
   // Authentic original pace from mo[15] + e[1010+uid]: 8 ticks/tile cardinal, 11 ticks/tile diagonal at 120ms/tick
   const stepsPerTile = getUnitStepTicks(unitId, dx, dy);
   const isChild = !isEnemy && (e[1414 + unitId] & 0xff) < 12;
-  const walkAnim = isChild ? 6 : !isEnemy && e[3535 + unitId] > 0 && e[3636 + unitId] > 0 ? 1 : 0;
+  const isCarrying = !isEnemy && e[3535 + unitId] > 0 && e[3636 + unitId] > 0;
+  const sprinting = !isEnemy && isUnitSprinting(unitId);
+  // Exact port of b.java:3529-3546: child=6, carrying=1, sprinting=7 (4f run), normal walk=0
+  const walkAnim = isChild ? 6 : isCarrying ? 1 : sprinting ? 7 : 0;
   const walkFrame = Math.floor((task.stepProgress * 4) / stepsPerTile) % 4;
   setUnitAnim(unitId, walkAnim, walkFrame);
 
@@ -2232,6 +2251,17 @@ function stepUnitMovement(unitId, task, isEnemy = false) {
     if (!isEnemy) revealFog(d, destX, destY, 4);
     task.path.shift();
     task.stepProgress = 0;
+    if (!isEnemy && isUnitSprinting(unitId)) {
+      // Gentle energy drain while sprinting, and stop sprinting upon arrival or exhaustion
+      if (task.path.length % 2 === 0) {
+        e[2020 + unitId] = Math.max(0, (e[2020 + unitId] & 0xff) - 1);
+      }
+      if (task.path.length === 0 || (e[2020 + unitId] & 0xff) <= 10) {
+        e[7777 + unitId] = 0;
+      }
+    } else if (!isEnemy && task.path.length === 0) {
+      e[7777 + unitId] = 0;
+    }
     if (!isEnemy && state.selectedUnit === unitId) state.activePath = task.path;
     return true;
   } else {
@@ -5002,7 +5032,38 @@ canvas.addEventListener('pointermove', (event) => {
   }
 });
 
+canvas.addEventListener('contextmenu', (event) => {
+  event.preventDefault();
+  if (state.phase !== 'game' || !state.data) return;
+  if (state.buildType !== null) {
+    cancelBuildPlacement();
+    state.message = 'Đã hủy đặt công trình.';
+    render();
+    return;
+  }
+  if (state.canvasMenu) {
+    closeCanvasMenu();
+    return;
+  }
+  if (state.showMinimap) {
+    state.showMinimap = false;
+    render();
+    return;
+  }
+  if (state.selectedUnit > 0 || state.selectedUnits.size > 0) {
+    state.selectedUnit = 0;
+    state.selectedUnits.clear();
+    state.activeGroupId = 0;
+    state.activePath = [];
+    state.message = 'Đã bỏ chọn dân làng.';
+    render();
+  }
+});
+
+let lastMapClick = { time: 0, x: -99, y: -99 };
+
 canvas.addEventListener('pointerdown', (event) => {
+  if (event.button === 2) return; // Right-click handled by contextmenu (deselect / cancel)
   const { x, y } = canvasCoords(event);
   if (state.phase === 'game' && state.data) {
     if (state.storyDialog) {
@@ -5018,6 +5079,8 @@ canvas.addEventListener('pointerdown', (event) => {
       return;
     }
     const bottomTop = LOGICAL_HEIGHT - (state.data.bottomUi ?? 22);
+    const ox = Math.floor((LOGICAL_WIDTH - 240) / 2);
+    const lx = x - ox;
     if (y >= bottomTop) {
       if (x <= 34) {
         // Authentic Left Green Softkey (f.java:3531): Confirm build placement if placing, otherwise open Panel 5 Tribe Actions Menu!
@@ -5026,13 +5089,13 @@ canvas.addEventListener('pointerdown', (event) => {
         } else {
           openCanvasActionsMenu();
         }
-      } else if (x >= 92 && x <= 118) {
+      } else if (lx >= 92 && lx <= 118) {
         if (event.shiftKey) assignGroup(7);
         else recallGroup(7);
-      } else if (x >= 122 && x <= 148) {
+      } else if (lx >= 122 && lx <= 148) {
         if (event.shiftKey) assignGroup(9);
         else recallGroup(9);
-      } else if (x >= 165 && x <= 205) {
+      } else if (lx >= 165 && lx <= 205) {
         // Map/Compass icon on bottom bar -> toggle Minimap (key 3)
         toggleMinimap();
       } else if (x >= LOGICAL_WIDTH - 34) {
@@ -5056,7 +5119,7 @@ canvas.addEventListener('pointerdown', (event) => {
     if (y < topBase) return;
     if (panel4Open && y < topBase + 48) {
       // Clicking Panel 4 avatar centers on the villager; clicking Panel 4 does not click map underneath
-      if (x <= 38) {
+      if (lx >= 0 && lx <= 38) {
         centerOnUnit(state.selectedUnit);
         render();
       }
@@ -5139,7 +5202,55 @@ function finishCanvasPointerDrag(event, cancelled = false) {
     }
     return;
   }
-  state.cursor = screenToMapCell(x, y);
+  const cell = screenToMapCell(x, y);
+  const now = performance.now();
+  const hasSelection = state.selectedUnit > 0 || state.selectedUnits.size > 0;
+  const isDoubleClick =
+    hasSelection &&
+    now - lastMapClick.time <= 400 &&
+    Math.abs(cell.x - lastMapClick.x) <= 1 &&
+    Math.abs(cell.y - lastMapClick.y) <= 1;
+
+  state.cursor = cell;
+  const e = state.data.entityData;
+  const activeIds =
+    state.selectedUnits.size > 0
+      ? [...state.selectedUnits].filter((id) => (e[1919 + id] & 0xff) > 0)
+      : state.selectedUnit > 0
+        ? [state.selectedUnit]
+        : [];
+
+  if (isDoubleClick && activeIds.length > 0) {
+    // Double left-click with villager(s) already selected -> SPRINT (e[7777]=1, authentic anim 7, ~2x speed)!
+    // Ensure a movement task exists if not already moving
+    const anyMoving = activeIds.some((id) => state.tasks.get(id)?.path?.length > 0);
+    if (!anyMoving) {
+      confirm();
+    }
+    let sprinters = 0;
+    for (const id of activeIds) {
+      const t = state.tasks.get(id);
+      if (t?.path?.length > 0 && (e[1414 + id] & 0xff) >= 12 && (e[3535 + id] & 0xff) === 0) {
+        e[7777 + id] = 1;
+        sprinters++;
+      }
+    }
+    if (sprinters > 0) {
+      state.message =
+        sprinters > 1
+          ? `🏃 ${sprinters} dân làng đang chạy nhanh!`
+          : `🏃 ${getVillagerInfo(activeIds[0]).role} đang chạy nhanh!`;
+      render();
+    }
+    lastMapClick = { time: 0, x: -99, y: -99 };
+    return;
+  }
+
+  // Single left-click: reset sprint flag so single click = normal walk (anim 0)
+  for (const id of activeIds) {
+    e[7777 + id] = 0;
+  }
+  lastMapClick = { time: now, x: cell.x, y: cell.y };
   confirm();
 }
 
