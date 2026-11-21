@@ -1485,6 +1485,10 @@ function craftAndEquipWeapon(weapon) {
   state.wood -= weapon.wood;
   state.stone -= weapon.stone;
   state.tools -= weapon.bones;
+  if (state.data?.resources?.[0]) {
+    const slot = 5 + (weapon.id % 6);
+    state.data.resources[0][slot] = Math.min(35, (state.data.resources[0][slot] || 0) + 1);
+  }
   state.data.entityData[6565 + state.selectedUnit] = weapon.id;
   syncResourcesToData();
   const info = getVillagerInfo(state.selectedUnit);

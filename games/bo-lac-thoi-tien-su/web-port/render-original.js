@@ -338,13 +338,27 @@ function drawMapObject(ctx, data, n, layer, ah, ai, camX, camY, originY, animTic
 
     if (kind === 1 && stageReq <= n7) {
       if (n8 === 6 && resCounter < 5) {
-        // Exact port of f.java:1063-1072: Storage (Kho chứa) displays 5 live resource piles (levels 0..4)!
-        // mo[142] = [25(food/meat), 2(stone), 1(wood), 3(bones/tools), 4(extra)]
+        // Exact port of f.java:1063-1072 using mo[142] = [25(weapons), 2(stone), 1(wood), 3(bones), 4(special)]:
+        // Only draw each pile when that exact resource > 0, scaling strictly from lvl 0 (small) to lvl 4 (full)!
         const resArr = data.resources?.[0] || [];
-        const resSlotMap = [resArr[0] || 0, resArr[2] || 0, resArr[1] || 0, resArr[3] || 0, Math.floor((resArr[0] || 0) / 2)];
+        const weaponsAmt =
+          (resArr[5] || 0) +
+          (resArr[6] || 0) +
+          (resArr[7] || 0) +
+          (resArr[8] || 0) +
+          (resArr[9] || 0) +
+          (resArr[10] || 0);
+        const resSlotMap = [
+          weaponsAmt,       // U=0 (comp 1248..1252): Crafted weapons (res[5..10])
+          resArr[2] || 0,   // U=1 (comp 1253..1257): Stone (res[2])
+          resArr[1] || 0,   // U=2 (comp 1258..1262): Wood (res[1])
+          resArr[3] || 0,   // U=3 (comp 1263..1267): Bones/Tools (res[3])
+          resArr[4] || 0,   // U=4 (comp 1268..1272): Special/Extra (res[4])
+        ];
         const amt = resSlotMap[resCounter] || 0;
         if (amt > 0 || n9 >= 31) {
-          const lvl = n9 >= 31 ? 4 : Math.min(4, Math.floor(amt / 7));
+          const step = resCounter === 0 ? 3 : 10;
+          const lvl = n9 >= 31 ? 4 : Math.min(4, Math.floor((amt - 1) / step));
           drawComposite(ctx, data, (shorts[1][idx] & 0xfff) + lvl, px, py, imageCache);
         }
         resCounter++;
