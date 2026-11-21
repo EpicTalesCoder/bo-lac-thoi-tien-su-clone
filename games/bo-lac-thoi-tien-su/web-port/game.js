@@ -2504,9 +2504,9 @@ function stepAiCommander() {
   const e = d.entityData;
   const redUnits = getVillagerIds(1);
   if (redUnits.length === 0) return false;
-  const redBlds = getTribeBuildings(1);
+  const redBlds = getPlayerBuildings(1);
   const blueUnits = getVillagerIds(0);
-  const blueBlds = getTribeBuildings(0);
+  const blueBlds = getPlayerBuildings(0);
   if (blueUnits.length === 0 && blueBlds.length === 0) return false;
 
   const diff = state.aiDifficulty || 'normal';
@@ -2546,7 +2546,7 @@ function stepAiCommander() {
       }
       if (!t || t.kind === 'gather' || t.kind === 'return') {
         if (defenders < 4) {
-          if (assignAttackUnitTask(id, intruder)) {
+          if (assignAttackTask(id, 'unit', intruder)) {
             defenders++;
             changed = true;
           }
@@ -2584,7 +2584,7 @@ function stepAiCommander() {
                   placedBid = placeConstructionSite(d, desiredType, bx, by, 1);
                   if (placedBid > 0) {
                     state.siteMaterials.set(placedBid, { wood: spec.wood, stone: spec.stone, tools: spec.bones });
-                    const newBld = getTribeBuildings(1).find((b) => b.bid === placedBid);
+                    const newBld = getPlayerBuildings(1).find((b) => b.bid === placedBid);
                     if (newBld) assignBuildTask(idle, newBld);
                     changed = true;
                   }
@@ -2618,25 +2618,10 @@ function stepAiCommander() {
   for (const id of idleAdults) {
     const ux = e[id] & 0xff;
     const uy = e[101 + id] & 0xff;
-    const needFood = (r1?.[0] || 0) < 15;
-    const needWood = (r1?.[1] || 0) <= (r1?.[2] || 0);
-    let bestNode = null;
-    let bestDist = Infinity;
-    for (let ry = Math.max(1, uy - 14); ry < Math.min(d.height - 1, uy + 15); ry++) {
-      for (let rx = Math.max(1, ux - 14); rx < Math.min(d.width - 1, ux + 15); rx++) {
-        const node = inspectResourceTile(rx, ry, 1);
-        if (!node) continue;
-        const priority =
-          (needFood && node.type === 'food') || (needWood && node.type === 'wood') || (!needWood && node.type === 'stone')
-            ? 0
-            : 6;
-        const dist = Math.hypot(rx - ux, ry - uy) + priority;
-        if (dist < bestDist) {
-          bestDist = dist;
-          bestNode = node;
-        }
-      }
-    }
+    const preferType = (r1?.[0] || 0) < 15 ? 'food' : (r1?.[1] || 0) <= (r1?.[2] || 0) ? 'wood' : 'stone';
+    const bestNode =
+      findNearestGatherable(ux, uy, 14, preferType, true) ||
+      findNearestGatherable(ux, uy, 14, null, true);
     if (bestNode && assignGatherTask(id, bestNode)) {
       changed = true;
     }
@@ -2682,8 +2667,8 @@ function stepAiCommander() {
             continue;
           }
         }
-        if (targetUnit && assignAttackUnitTask(id, targetUnit)) changed = true;
-        else if (targetBld && assignAttackBuildingTask(id, targetBld)) changed = true;
+        if (targetUnit && assignAttackTask(id, 'unit', targetUnit)) changed = true;
+        else if (targetBld && assignAttackTask(id, 'building', targetBld.bid)) changed = true;
       }
     }
   }
@@ -4349,7 +4334,7 @@ function stepVillagerNeeds() {
 
   for (const tribe of tribes) {
     const ids = getVillagerIds(tribe);
-    const tribeBlds = getTribeBuildings(tribe);
+    const tribeBlds = getPlayerBuildings(tribe);
     const finishedHuts = tribeBlds.filter((b) => !b.underConstruction && b.targetType === 2);
     const finishedKitchens = tribeBlds.filter((b) => !b.underConstruction && b.targetType === 4);
     const finishedDiscos = tribeBlds.filter((b) => !b.underConstruction && b.targetType === 7);
@@ -6701,7 +6686,11 @@ Promise.all([
       height: LOGICAL_HEIGHT,
       tickMs: 120,
       onStepSimulation() {
-        stepSimulation();
+        try {
+          stepSimulation();
+        } catch (err) {
+          console.error('[sim]', err);
+        }
       },
       onFrameInterpolate(subTick, dt) {
         if (state.phase !== 'game' || !state.data) return false;
