@@ -524,6 +524,9 @@ function drawEntitySprite(ctx, data, entityId, screenX, screenY, dir, fieldOffse
           } else {
             skip = true;
           }
+        } else if ((e[6565 + entityId] & 0xff) === 9 && (partKind === 5 || partKind === 6 || partKind === 8)) {
+          // Unarmed villager (weaponId === 9) must NEVER render any weapon attachment sprite!
+          skip = true;
         } else if (aw === 0 && partKind >= 5 && partKind <= 8) {
           const job = e[6565 + entityId];
           if (dir < 0 && job === 1) skip = true;
@@ -990,10 +993,51 @@ function drawAuthenticBottomMenu(ctx, data, state, imageCache) {
     ctx.save();
     ctx.translate(ox, 0);
 
-    // Building portrait frame (composite 617) + building icon (680 + bType)
+    // Building portrait frame (composite 617) + complete auto-scaled building miniature centered inside frame
     drawComposite(ctx, data, 617, 8, panelY + 13, imageCache);
-    if (item && item.bType !== undefined) {
-      drawComposite(ctx, data, 680 + item.bType, 9, panelY + 14, imageCache);
+    if (item && item.bType !== undefined && item.bType >= 0 && item.bType <= 11) {
+      const shorts = data.shortSpriteTables;
+      const bytes = data.byteSpriteTables;
+      const startIdx = shorts[0][item.bType + 1];
+      const partCount = bytes[0][item.bType + 1] & 0xff;
+      const bwTiles = item.spec?.width || 3;
+      const bhTiles = item.spec?.height || 3;
+      const fullW = bwTiles * CELL_WIDTH;
+      const fullH = bhTiles * CELL_HEIGHT + 22;
+      const thumbScale = Math.min(42 / Math.max(24, fullW), 40 / Math.max(24, fullH), 0.72);
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(10, panelY + 15, 44, 42);
+      ctx.clip();
+      const tx0 = 32 - (fullW * thumbScale) / 2;
+      const ty0 = panelY + 38 - (bhTiles * CELL_HEIGHT * thumbScale) / 2 + 4;
+      ctx.translate(tx0, ty0);
+      ctx.scale(thumbScale, thumbScale);
+      let resSkip = 0;
+      let groundCellIdx = -1;
+      for (let i = 0, idx = startIdx; i < partCount && idx < shorts[1].length; i++, idx++) {
+        const kind = bytes[3][idx] & 7;
+        const stageReq = (bytes[3][idx] & 0xff) >>> 6;
+        const xHi = ((shorts[1][idx] & 0xc000) >>> 14) << 7;
+        if (kind === 0) {
+          if (stageReq === 0) groundCellIdx++;
+          if (stageReq <= 1 && groundCellIdx >= 0) {
+            const gx = groundCellIdx % bwTiles;
+            const gy = Math.floor(groundCellIdx / bwTiles);
+            drawComposite(ctx, data, shorts[1][idx] & 0xfff, gx * CELL_WIDTH + toSignedByte(bytes[1][idx]) + xHi, gy * CELL_HEIGHT + toSignedByte(bytes[2][idx]), imageCache);
+          }
+          continue;
+        }
+        if (stageReq > 1) continue;
+        if (kind === 1) {
+          if (item.bType === 6 && resSkip < 5) { resSkip++; continue; }
+          if (item.bType === 4 && resSkip < 1) { resSkip++; continue; }
+          drawComposite(ctx, data, shorts[1][idx] & 0xfff, toSignedByte(bytes[1][idx]) + xHi, toSignedByte(bytes[2][idx]), imageCache);
+        } else if (kind === 2 || kind === 6) {
+          drawAnimation(ctx, data, shorts[1][idx] & 0xfff, toSignedByte(bytes[1][idx]) + xHi, toSignedByte(bytes[2][idx]), animTick, imageCache);
+        }
+      }
+      ctx.restore();
     }
 
     // Left / Right selector arrows below building icon (matching Panel 6 idx 1093 & 1095)
@@ -1365,16 +1409,6 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
           drawAnimation(ctx, data, 74, sx, sy, (k * 2 + j) * 2 + fx.frame, imageCache);
         }
       }
-    }
-  }
-
-  // Pass 4b: Path destination preview (subtle golden dots when unit is walking)
-  if (state.activePath && state.activePath.length > 0) {
-    ctx.fillStyle = 'rgba(255, 243, 123, 0.72)';
-    for (const step of state.activePath) {
-      const sx = (step.x - camX) * CELL_WIDTH + 9;
-      const sy = originY + (step.y - camY) * CELL_HEIGHT + 6;
-      ctx.fillRect(sx, sy, 4, 4);
     }
   }
 

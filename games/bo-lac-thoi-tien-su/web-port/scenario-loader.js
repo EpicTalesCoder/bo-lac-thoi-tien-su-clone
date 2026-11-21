@@ -402,6 +402,11 @@ export function getBuildingSlotAnims(data, bType, slotIdx) {
   const aStart = mb[mo[166] + jobId] & 0xff;
   const aEnd = mb[mo[166] + jobId + 1] & 0xff;
   const anims = [];
+  if (bType === 7 && clampedSlot === 0) {
+    // Sàn disco slot 0 (DJ): clean 12-frame turntable music loop (frames 0..11 of anim 117, without the dive/puddle sequence)
+    anims.push({ animId: 117, frames: 12 });
+    return { jobId, slotCount, anims };
+  }
   for (let i = aStart; i < aEnd; i++) {
     const animId = mb[mo[164] + i] & 0xff;
     if (animId === 0) continue;
@@ -1259,6 +1264,7 @@ export function prepareMultiplayerMatch(baseData, maBytes, scenarioIndex = 1, lo
         e[2020 + uid] = 100;
         e[2121 + uid] = 100;
         e[505 + uid] = 95;
+        e[6565 + uid] = 9; // Both Tribe 0 and Tribe 1 start 100% unarmed (no phantom weapons!)
         if (!firstUid) firstUid = uid;
         count++;
       }

@@ -5597,7 +5597,7 @@ Promise.all([
         ) {
           const winW = window.innerWidth || 1;
           const winH = window.innerHeight || 1;
-          const EDGE_PX = 28;
+          const EDGE_PX = 38;
           const px = pointerScreen.x;
           const py = pointerScreen.y;
           let vx = 0;
@@ -5615,7 +5615,7 @@ Promise.all([
             const d = state.data;
             const maxCamX = Math.max(0, d.width - getViewportCols());
             const maxCamY = Math.max(0, d.height - getViewportRows());
-            const step = ((dt || 16.6) / 1000) * 14; // 14 tiles/sec silky RTS pan
+            const step = ((dt || 16.6) / 1000) * 28; // 28 tiles/sec crisp, fast PC RTS pan
             const curX = state.smoothCamX ?? state.cameraX ?? 0;
             const curY = state.smoothCamY ?? state.cameraY ?? 0;
             const nextX = Math.max(0, Math.min(maxCamX, curX + vx * step));
