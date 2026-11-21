@@ -529,15 +529,20 @@ function applyUnitDamage(attackerId, targetId, dmg) {
   }
 
   if (nextHp <= 0) {
-    // Spawn authentic villager death animation (anim 108, 18 frames — b.java:1484)
+    // Authentic 2-stage villager death (b.java:1484 & 3753):
+    // Stage 1: anim 108 (18f — knocked flying up and slamming down),
+    // Stage 2: anim 43 (adult, 9f) / anim 44 (child, 10f) — transforms into the authentic human skeleton on the ground!
     state.deathEffects.push({
       uid: targetId,
       x: tx,
       y: ty,
       dir: e[606 + targetId] & 7,
+      isChild: (e[1414 + targetId] & 0xff) < 12,
+      phase: 'fall',
       animId: 108,
       frame: 0,
       maxFrames: 18,
+      holdTicks: 0,
     });
     exitBuildingSlot(d, targetId);
     clearUnitFromOccupancy(d, targetId);
@@ -1535,10 +1540,10 @@ function setUnitAnim(unitId, animId, frame = 0) {
   const isChild = (e[1414 + unitId] & 0xff) < 12;
   let resolvedAnim = animId;
   if (isChild) {
-    // Children (age < 12) ONLY use child animations (6=walk, 14=idle, 46=play, 100/101=kindergarten, 108=death)
+    // Children (age < 12) ONLY use child animations (6=walk, 14=idle, 44=death skeleton, 46=play, 100/101=kindergarten, 108=knockback fall)
     // so they can NEVER flash as an adult sprite!
     if (animId === 0 || animId === 1 || animId === 7) resolvedAnim = 6;
-    else if (animId !== 6 && animId !== 14 && animId !== 46 && animId !== 100 && animId !== 101 && animId !== 108) {
+    else if (animId !== 6 && animId !== 14 && animId !== 44 && animId !== 46 && animId !== 100 && animId !== 101 && animId !== 108) {
       resolvedAnim = 14;
     }
   } else if ((e[3535 + unitId] & 0xff) !== 0 || (e[6565 + unitId] & 0xff) === 1) {
@@ -3586,11 +3591,19 @@ function stepSimulation() {
   for (let i = state.deathEffects.length - 1; i >= 0; i--) {
     const fx = state.deathEffects[i];
     fx.frame++;
-    if (fx.frame >= fx.maxFrames) {
-      // When the falling villager lands at the end of anim 108, turn into gatherable skeleton bones (kind 7)!
-      spawnBonePile(d, fx.x, fx.y, 15);
+    if (fx.phase === 'fall' && fx.frame >= fx.maxFrames) {
+      // Exact b.java:3753: upon landing, play authentic human skeleton transformation (anim 43 adult / anim 44 child)!
+      fx.phase = 'skeleton';
+      fx.animId = fx.isChild ? 44 : 43;
+      fx.frame = 0;
+      fx.maxFrames = fx.isChild ? 10 : 9;
+      fx.holdTicks = 24;
+      uiChanged = true;
+    } else if (fx.phase === 'skeleton' && fx.frame >= fx.maxFrames + (fx.holdTicks || 0)) {
       state.deathEffects.splice(i, 1);
       uiChanged = true;
+    } else if (!fx.phase && fx.frame >= fx.maxFrames) {
+      state.deathEffects.splice(i, 1);
     }
   }
   for (let i = state.popups.length - 1; i >= 0; i--) {

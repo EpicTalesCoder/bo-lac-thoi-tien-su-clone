@@ -475,7 +475,7 @@ function drawEntitySprite(ctx, data, entityId, screenX, screenY, dir, fieldOffse
   let animId = e[fo[fieldOffsetIdx] + entityId] & 0xff;
   if (fieldOffsetIdx === 29 && entityId <= 100 && (e[1414 + entityId] & 0xff) < 12) {
     if (animId === 0 || animId === 1 || animId === 7) animId = 6;
-    else if (animId !== 6 && animId !== 14 && animId !== 46 && animId !== 100 && animId !== 101 && animId !== 108) {
+    else if (animId !== 6 && animId !== 14 && animId !== 44 && animId !== 46 && animId !== 100 && animId !== 101 && animId !== 108) {
       animId = 14;
     }
   }
@@ -1538,6 +1538,12 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
       e[fo[29] + fx.uid] = fx.animId;
       e[fo[30] + fx.uid] = Math.min(fx.maxFrames - 1, fx.frame);
       ctx.save();
+      if (fx.phase === 'skeleton' && fx.holdTicks) {
+        const total = fx.maxFrames + fx.holdTicks;
+        if (fx.frame > total - 6) {
+          ctx.globalAlpha = Math.max(0.15, (total - fx.frame) / 6);
+        }
+      }
       drawEntitySprite(ctx, data, fx.uid, sx, sy, fx.dir, 29, imageCache, { selectedUnit: 0, hoverUnit: 0, animTick });
       ctx.restore();
       e[fo[29] + fx.uid] = prevAnim;
