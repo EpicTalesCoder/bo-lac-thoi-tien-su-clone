@@ -3625,14 +3625,17 @@ function stepSimulation() {
                       : 69
               : 69;
 
-    if (taskHatJob === 69 && (isWearingJobHat(unitId) || (task.hatRemoveFrame !== undefined && task.hatRemoveFrame < 7))) {
+    // Only play hat-putting / hat-removing when aligned on a tile center (stepProgress === 0)
+    // so the villager never snaps/wobbles mid-step!
+    const alignedForHat = !(task.path?.length > 0 && task.stepProgress > 0);
+    if (alignedForHat && taskHatJob === 69 && (isWearingJobHat(unitId) || (task.hatRemoveFrame !== undefined && task.hatRemoveFrame < 7))) {
       if (task.hatRemoveFrame === undefined) task.hatRemoveFrame = 0;
       if (task.hatRemoveFrame < 7) {
         e[202 + unitId] = 0;
         e[303 + unitId] = 0;
         setUnitAnim(unitId, 148, task.hatRemoveFrame);
         if (task.hatRemoveFrame === 6) {
-          e[6464 + unitId] = 69; // b.java:1455 removes job hat at frame 6
+          e[6464 + unitId] = 69; // b.java:1458 removes job hat at frame 6
         }
         task.hatRemoveFrame++;
         if (task.hatRemoveFrame >= 7 && task.kind === 'removeHat') {
@@ -3642,7 +3645,7 @@ function stepSimulation() {
         }
         continue;
       }
-    } else if (taskHatJob !== 69) {
+    } else if (alignedForHat && taskHatJob !== 69) {
       if ((e[6464 + unitId] & 0xff) !== taskHatJob && task.hatPutFrame === undefined) {
         task.hatPutFrame = 0;
       }
