@@ -186,6 +186,8 @@ const state = {
   selectedBuildingBid: 0,
   buildType: null,
   buildPreview: null,
+  flagMode: null, // null | 'rally' | 'attack'
+  activeFlag: null, // { kind, x, y, until }
   animTick: 0,
   lastAlertTick: -999,
   mpMode: true,
@@ -470,6 +472,97 @@ function recallGroup(groupNum) {
   centerOnUnit(members[0]);
   state.message = `Đã gọi Nhóm ${groupNum} (${members.length} chiến binh). Click ô đất để hành quân hoặc click địch để tấn công!`;
   render();
+}
+
+function startFlagPlacement(kind) {
+  cancelBuildPlacement();
+  state.showMinimap = false;
+  state.canvasMenu = null;
+  state.flagMode = kind;
+  state.message =
+    kind === 'attack'
+      ? '⚔ Di chuyển chuột và click để CẮM CỜ TẤN CÔNG (chuột phải / Esc để hủy).'
+      : '⚑ Di chuyển chuột và click để CẮM CỜ TẬP HỢP quân (chuột phải / Esc để hủy).';
+  render();
+}
+
+function cancelFlagPlacement() {
+  state.flagMode = null;
+}
+
+function confirmFlagAtCursor(owner = state.localTribe ?? 0, overridePos = null) {
+  const kind = overridePos?.flagKind || state.flagMode;
+  if (!kind || !state.data) return;
+  const fx = overridePos ? overridePos.x : state.cursor.x;
+  const fy = overridePos ? overridePos.y : state.cursor.y;
+
+  if (!overridePos) {
+    state.activeFlag = { kind, x: fx, y: fy, until: performance.now() + 6000 };
+    state.flagMode = null;
+  }
+
+  // If Guest in 1v1 Multiplayer, forward flag command to Host
+  if (state.mpMode && state.localTribe === 1 && !overridePos) {
+    mpClient?.sendCommand({ kind: 'flagCommand', flagKind: kind, x: fx, y: fy });
+    state.message = kind === 'attack' ? `⚔ Đã cắm cờ tấn công tại (${fx}, ${fy})!` : `⚑ Đã cắm cờ tập hợp tại (${fx}, ${fy})!`;
+    render();
+    return;
+  }
+
+  const e = state.data.entityData;
+  const adults = getVillagerIds(owner).filter((id) => (e[1414 + id] & 0xff) >= 12);
+  if (adults.length === 0) {
+    if (!overridePos) render();
+    return;
+  }
+
+  if (kind === 'rally') {
+    if (!overridePos) {
+      state.selectedUnits = new Set(adults);
+      state.selectedUnit = adults[0];
+    }
+    issueGroupMove(adults, fx, fy);
+    if (!overridePos) {
+      state.message = `⚑ Đã cắm cờ tập hợp ${adults.length} dân làng tại (${fx}, ${fy})!`;
+      render();
+    }
+  } else if (kind === 'attack') {
+    if (!overridePos) {
+      state.selectedUnits = new Set(adults);
+      state.selectedUnit = adults[0];
+    }
+    // Attack nearest enemy unit or building near the planted flag, or march to the flag!
+    const enemies = getEnemyIds(owner);
+    let bestEnemy = 0;
+    let bestDist = 12;
+    for (const eid of enemies) {
+      const dist = Math.hypot((e[eid] & 0xff) - fx, (e[101 + eid] & 0xff) - fy);
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestEnemy = eid;
+      }
+    }
+    if (bestEnemy > 0) {
+      issueGroupAttack(adults, 'unit', bestEnemy);
+    } else {
+      const eblds = getEnemyBuildings(owner);
+      let bestBld = null;
+      let bestBDist = 12;
+      for (const b of eblds) {
+        const dist = Math.hypot(b.x - fx, b.y - fy);
+        if (dist < bestBDist) {
+          bestBDist = dist;
+          bestBld = b;
+        }
+      }
+      if (bestBld) issueGroupAttack(adults, 'building', bestBld.bid);
+      else issueGroupMove(adults, fx, fy);
+    }
+    if (!overridePos) {
+      state.message = `⚔ Đã cắm cờ tấn công! ${adults.length} chiến binh đang xung phong tới (${fx}, ${fy})!`;
+      render();
+    }
+  }
 }
 
 function rallyAllVillagers() {
@@ -3796,18 +3889,12 @@ function openCanvasActionsMenu() {
     {
       label: 'TẬP HỢP BỘ LẠC!',
       iconAnim: 11,
-      action: () => {
-        state.canvasMenu = null;
-        rallyAllVillagers();
-      },
+      action: () => startFlagPlacement('rally'),
     },
     {
       label: 'LỆNH CHIẾN ĐẤU!',
       iconAnim: 12,
-      action: () => {
-        state.canvasMenu = null;
-        attackNearestEnemy();
-      },
+      action: () => startFlagPlacement('attack'),
     },
     {
       label: 'DANH SÁCH DÂN LÀNG',
@@ -5193,6 +5280,10 @@ function confirm() {
       if (item?.action) item.action();
       return;
     }
+    if (state.flagMode) {
+      confirmFlagAtCursor();
+      return;
+    }
     if (state.buildType !== null) {
       confirmBuildAtCursor();
       return;
@@ -5276,6 +5367,12 @@ function back() {
     }
     if (state.panelMode === 'pause') {
       closePauseMenu();
+      return;
+    }
+    if (state.flagMode) {
+      cancelFlagPlacement();
+      state.message = 'Đã hủy cắm cờ.';
+      render();
       return;
     }
     if (state.buildType !== null) {
@@ -5449,6 +5546,12 @@ canvas.addEventListener('pointerleave', () => {
 canvas.addEventListener('contextmenu', (event) => {
   event.preventDefault();
   if (state.phase !== 'game' || !state.data) return;
+  if (state.flagMode) {
+    cancelFlagPlacement();
+    state.message = 'Đã hủy cắm cờ.';
+    render();
+    return;
+  }
   if (state.buildType !== null) {
     cancelBuildPlacement();
     state.message = 'Đã hủy đặt công trình.';
@@ -5537,6 +5640,11 @@ canvas.addEventListener('pointerdown', (event) => {
         centerOnUnit(state.selectedUnit);
         render();
       }
+      return;
+    }
+    if (state.flagMode) {
+      state.cursor = screenToMapCell(x, y);
+      confirmFlagAtCursor();
       return;
     }
     if (state.buildType !== null) {
@@ -5989,6 +6097,8 @@ Promise.all([
         }
       } else if (cmd.kind === 'placeBuild') {
         confirmBuildAtCursor(1, cmd);
+      } else if (cmd.kind === 'flagCommand') {
+        confirmFlagAtCursor(1, cmd);
       }
     };
 

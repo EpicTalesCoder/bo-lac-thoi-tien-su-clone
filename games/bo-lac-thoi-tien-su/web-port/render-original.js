@@ -591,14 +591,15 @@ function drawEntitySprite(ctx, data, entityId, screenX, screenY, dir, fieldOffse
     const hx = drawX + toSignedByte(bytes[12][headPartIdx]);
     const hy = drawY + toSignedByte(bytes[13][headPartIdx]);
 
-    if (entityId <= 50) {
+    const isOwnTribe = (entityId > 50 ? 1 : 0) === (uiState.localTribe ?? 0);
+    if (isOwnTribe) {
       const thought = toSignedByte(e[3333 + entityId]);
       if (thought > -1 && thought <= 13) {
         drawAnimation(ctx, data, 77 + thought, hx, hy, (uiState.animTick || 0) + (entityId & 7), imageCache);
       }
 
       const jobBadge = e[2222 + entityId] & 0xff;
-      if (jobBadge > 0 && (isSelected || isHovered)) {
+      if (jobBadge > 0) {
         drawComposite(ctx, data, 577 + Math.min(16, jobBadge), hx, hy, imageCache);
       }
     }
@@ -1222,6 +1223,7 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
     selectedUnit: state.selectedUnit || 0,
     selectedUnits: state.selectedUnits || null,
     hoverUnit: hoverCellOcc >= 1 && hoverCellOcc <= 100 ? hoverCellOcc : 0,
+    localTribe: state.localTribe ?? 0,
     animTick,
   };
 
@@ -1507,6 +1509,59 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
       drawAnimation(ctx, data, 9, bx + bw, by + bh, animTick, imageCache);
     }
     ctx.restore();
+  }
+
+  // Pass 4c1: Rally / Attack Flag Placement Preview & Planted Flag Marker
+  const drawFlagMarker = (fx, fy, kind, isPreview) => {
+    const px = (fx - camX) * CELL_WIDTH + 11;
+    const py = originY + (fy - camY) * CELL_HEIGHT + 12;
+    const isAttack = kind === 'attack';
+    const wave = Math.round(Math.sin(animTick * 0.6) * 2);
+    ctx.save();
+    ctx.globalAlpha = isPreview ? 0.88 : 0.96;
+    // Pulsing ground target ring
+    const pulse = 8 + Math.round(Math.sin(animTick * 0.45) * 2);
+    ctx.strokeStyle = isAttack ? '#ff4d3d' : '#7bff63';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.ellipse(px, py, pulse, Math.round(pulse * 0.6), 0, 0, Math.PI * 2);
+    ctx.stroke();
+    // Wooden flagpole
+    ctx.fillStyle = '#3b2108';
+    ctx.fillRect(px - 1, py - 24, 3, 25);
+    ctx.fillStyle = '#d9b574';
+    ctx.fillRect(px, py - 23, 1, 23);
+    // Waving pennant flag
+    ctx.fillStyle = isAttack ? '#d9261c' : '#2fb82e';
+    ctx.beginPath();
+    ctx.moveTo(px + 2, py - 23);
+    ctx.lineTo(px + 18, py - 19 + wave);
+    ctx.lineTo(px + 2, py - 13);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = isAttack ? '#ffd26b' : '#e6ff99';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    // Label above preview flag
+    if (isPreview) {
+      ctx.font = 'bold 7px monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'bottom';
+      ctx.strokeStyle = '#1e1204';
+      ctx.lineWidth = 2;
+      const lbl = isAttack ? '⚔ CẮM CỜ TẤN CÔNG' : '⚑ CẮM CỜ TẬP HỢP';
+      ctx.strokeText(lbl, px, py - 26);
+      ctx.fillStyle = isAttack ? '#ff9c8a' : '#c8ff8c';
+      ctx.fillText(lbl, px, py - 26);
+    }
+    ctx.restore();
+  };
+
+  if (state.activeFlag && performance.now() < state.activeFlag.until) {
+    drawFlagMarker(state.activeFlag.x, state.activeFlag.y, state.activeFlag.kind, false);
+  }
+  if (state.flagMode && state.cursor) {
+    drawFlagMarker(state.cursor.x, state.cursor.y, state.flagMode, true);
   }
 
   // Pass 4c2: Box-selection rectangle (exact port of f.java:1906-1909 w() -> color 1105252)
