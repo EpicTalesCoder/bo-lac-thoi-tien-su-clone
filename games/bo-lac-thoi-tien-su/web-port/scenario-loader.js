@@ -968,16 +968,28 @@ export function populateForestWildlife(data, targetCount = 10) {
   const need = Math.min(22 - existing, Math.max(0, targetCount - existing));
   if (need <= 0) return 0;
 
-  // Gather existing building centers so wild animals spawn in forests away from town centers
-  const blds = [];
-  for (let bid = 1; bid <= 60; bid++) {
+  // Gather player buildings & villagers so predators (Boars/Tigers) spawn FAR away from the player's base,
+  // while still spreading across deep forests and near enemy territory!
+  const playerAnchors = [];
+  for (let bid = 1; bid <= 30; bid++) {
     if ((e[8505 + bid] & 0xff) > 0) {
-      blds.push({ x: e[8383 + bid] & 0xff, y: e[8444 + bid] & 0xff });
+      playerAnchors.push({ x: e[8383 + bid] & 0xff, y: e[8444 + bid] & 0xff });
     }
   }
-  const distToNearestBld = (x, y) => {
+  for (let uid = 1; uid <= 50; uid++) {
+    if ((e[1919 + uid] & 0xff) > 0) {
+      playerAnchors.push({ x: e[uid] & 0xff, y: e[101 + uid] & 0xff });
+    }
+  }
+  const allBlds = [];
+  for (let bid = 1; bid <= 60; bid++) {
+    if ((e[8505 + bid] & 0xff) > 0) {
+      allBlds.push({ x: e[8383 + bid] & 0xff, y: e[8444 + bid] & 0xff });
+    }
+  }
+  const minDistTo = (list, x, y) => {
     let best = 999;
-    for (const b of blds) {
+    for (const b of list) {
       const d = Math.hypot(b.x - x, b.y - y);
       if (d < best) best = d;
     }
@@ -996,22 +1008,24 @@ export function populateForestWildlife(data, targetCount = 10) {
     return false;
   };
 
-  // Collect deep-forest grass tiles well away from town buildings (>= 12 tiles)
+  // Collect deep-forest grass tiles well away from player's base (>= 12 tiles for Deer, >= 18 for Boar/Tiger)
+  const predatorMinPlayerDist = Math.min(18, Math.max(14, Math.floor(Math.max(w, h) * 0.42)));
   const candidates = [];
   for (let y = 2; y < h - 2; y++) {
     for (let x = 2; x < w - 2; x++) {
       if (data.occupancy[y][x] !== 0) continue;
       if ((data.terrain[y][x] & 0xff) >= 175) continue;
-      const bDist = distToNearestBld(x, y);
-      if (bDist < 12) continue;
+      const pDist = minDistTo(playerAnchors, x, y);
+      const bDist = minDistTo(allBlds, x, y);
+      if (pDist < 12 || bDist < 8) continue;
       if (isNearTree(x, y)) {
-        candidates.push({ x, y, bDist });
+        candidates.push({ x, y, pDist, bDist });
       }
     }
   }
   if (candidates.length === 0) return 0;
 
-  // Deterministic spread across the forest (Deer=2, Boar=0, Tiger=1)
+  // Deterministic spread across the deep forest (Deer=2, Boar=0, Tiger=1)
   const speciesOrder = [2, 0, 2, 1, 2, 0, 2, 1, 0, 2];
   let spawned = 0;
   const chosen = [];
@@ -1020,11 +1034,11 @@ export function populateForestWildlife(data, targetCount = 10) {
     for (let idx = (pass * 7) % candidates.length; idx < candidates.length && spawned < need; idx += step) {
       const c = candidates[idx];
       if (data.occupancy[c.y][c.x] !== 0) continue;
-      const minSep = pass === 0 ? 7 : 3;
+      const minSep = pass === 0 ? 7 : 4;
       if (chosen.some((p) => Math.hypot(p.x - c.x, p.y - c.y) < minSep)) continue;
       const kind = speciesOrder[(existing + spawned) % speciesOrder.length];
-      // Keep Tigers (kind 1) even deeper in the forest (>= 15 tiles from bases)
-      if (kind === 1 && c.bDist < 15 && pass === 0) continue;
+      // Strictly keep Boars (0) & Tigers (1) far from the player's base in BOTH passes!
+      if ((kind === 0 || kind === 1) && c.pDist < predatorMinPlayerDist) continue;
       const aid = spawnWildAnimal(data, kind, c.x, c.y, (existing + spawned) % 4);
       if (aid >= 0) {
         chosen.push(c);
