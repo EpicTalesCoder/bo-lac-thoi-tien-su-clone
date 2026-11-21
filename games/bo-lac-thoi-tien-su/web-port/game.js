@@ -1532,8 +1532,16 @@ function setUnitAnim(unitId, animId, frame = 0) {
   // - When carrying a resource (e[3535] !== 0), walking (0 or 7) uses anim 1 (carry walk) and standing (8) uses anim 9.
   // - When holding Đá ném (wId === 1) without sprinting, walking (0) uses anim 1 (stone walk) and standing (8) uses anim 9.
   // - When sprinting in combat (animId === 7), use anim 1 when holding Đá ném (wId === 1) so the stone in hand (partKind 8 = 1184) renders at 2x sprint speed!
+  const isChild = (e[1414 + unitId] & 0xff) < 12;
   let resolvedAnim = animId;
-  if ((e[1414 + unitId] & 0xff) >= 12 && ((e[3535 + unitId] & 0xff) !== 0 || (e[6565 + unitId] & 0xff) === 1)) {
+  if (isChild) {
+    // Children (age < 12) ONLY use child animations (6=walk, 14=idle, 46=play, 100/101=kindergarten, 108=death)
+    // so they can NEVER flash as an adult sprite!
+    if (animId === 0 || animId === 1 || animId === 7) resolvedAnim = 6;
+    else if (animId !== 6 && animId !== 14 && animId !== 46 && animId !== 100 && animId !== 101 && animId !== 108) {
+      resolvedAnim = 14;
+    }
+  } else if ((e[3535 + unitId] & 0xff) !== 0 || (e[6565 + unitId] & 0xff) === 1) {
     if (animId === 0 || animId === 7) resolvedAnim = 1;
     else if (animId === 8) resolvedAnim = 9;
   }
