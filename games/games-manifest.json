@@ -1,0 +1,20 @@
+[
+  {
+    "slug": "bo-lac-thoi-tien-su",
+    "title": "Bộ lạc thời tiền sử",
+    "originalTitle": "Prehistoric Tribes",
+    "vendor": "Inlogic Software",
+    "resolution": "240×320",
+    "genre": "Chiến thuật thời gian thực (RTS)",
+    "jarFile": "games/bo-lac-thoi-tien-su/original/Bolacthoitiensu.jar",
+    "playUrl": "./games/bo-lac-thoi-tien-su/web-port/index.html",
+    "directGameUrl": "./games/bo-lac-thoi-tien-su/web-port/index.html?screen=game&scenario=0",
+    "coverImage": "./games/bo-lac-thoi-tien-su/web-port/assets/campaign-captures/frame-03.png",
+    "status": "playable",
+    "features": [
+      "10 màn Chiến dịch + Trận tùy chỉnh",
+      "5 ngôn ngữ gốc (/0../4)",
+      "60 FPS Canvas & Web Audio MIDI (/sa)"
+    ]
+  }
+]

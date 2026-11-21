@@ -1,10 +1,11 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "version": 2,
-  "outputDirectory": "game/web-port",
+  "buildCommand": "python3 tools/build-portal.py",
+  "outputDirectory": "dist",
   "headers": [
     {
-      "source": "/assets/(.*)",
+      "source": "/games/(.*)/assets/(.*)",
       "headers": [
         {
           "key": "Cache-Control",

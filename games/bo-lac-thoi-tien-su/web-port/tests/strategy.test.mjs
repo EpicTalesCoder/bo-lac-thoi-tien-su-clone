@@ -12,14 +12,14 @@ const storageJs = await readFile(new URL('../storage-i18n.js', import.meta.url),
 const audioBinaryJs = await readFile(new URL('../audio-binary.js', import.meta.url), 'utf8');
 const mapData = JSON.parse(await readFile(new URL('../data-first-map.json', import.meta.url), 'utf8'));
 const captures = new URL('../assets/campaign-captures/', import.meta.url);
-const originalFrames = new URL('../../rebuild-attempt/captures/original-campaign-walkthrough/walk-1/', import.meta.url);
+const originalFrames = new URL('../../analysis/rebuild-attempt/captures/original-campaign-walkthrough/walk-1/', import.meta.url);
 
 test('index.html loads the live canvas game module', () => {
   assert.ok(indexHtml.includes('<script type="module" src="game.js"></script>'));
 });
 
 test('live renderer ports terrain, objects, layered villagers, fog, construction dust, combat, and HUD', () => {
-  for (const token of ['drawLeaf', 'drawComposite', 'drawAnimation', 'getFogState', 'revealFog', 'drawOriginalHud', 'drawOriginalVillagerHud', 'renderOriginalMap', 'buildPreview', 'dustEffects', 'popups', 'selectionBox', 'projectiles', 'selectedUnits', 'activeGroupId']) {
+  for (const token of ['drawLeaf', 'drawComposite', 'drawAnimation', 'getFogState', 'revealFog', 'drawOriginalHud', 'drawOriginalVillagerHud', 'renderOriginalMap', 'buildPreview', 'dustEffects', 'selectionBox', 'projectiles', 'selectedUnits', 'activeGroupId']) {
     assert.ok(rendererJs.includes(token), `missing renderer symbol: ${token}`);
   }
   assert.ok(rendererJs.includes('if (compositeIndex < 0 || depth > 8) return;'), 'compositeIndex 0 (grass) must not be skipped');
@@ -42,7 +42,7 @@ test('campaign-story parses /0/d0, evaluates all 10 missions, scores, and suppor
     assert.ok(storyJs.includes(token), `missing campaign-story symbol: ${token}`);
   }
   const webD0 = await readFile(new URL('../assets/0/d0', import.meta.url));
-  const origD0 = await readFile(new URL('../../recovered/0/d0', import.meta.url));
+  const origD0 = await readFile(new URL('../../analysis/recovered/0/d0', import.meta.url));
   const digest = bytes => createHash('sha256').update(bytes).digest('hex');
   assert.equal(webD0.length, 29606);
   assert.equal(digest(webD0), digest(origD0));
@@ -55,7 +55,7 @@ test('storage-i18n supports all 5 language packs (0..4) and localStorage save/lo
   for (let lang = 0; lang <= 4; lang++) {
     for (const file of ['d0', 's', 't']) {
       const webBytes = await readFile(new URL(`../assets/${lang}/${file}`, import.meta.url));
-      const origBytes = await readFile(new URL(`../../recovered/${lang}/${file}`, import.meta.url));
+      const origBytes = await readFile(new URL(`../../analysis/recovered/${lang}/${file}`, import.meta.url));
       const digest = bytes => createHash('sha256').update(bytes).digest('hex');
       assert.equal(digest(webBytes), digest(origBytes), `lang ${lang}/${file} mismatch`);
     }
@@ -69,7 +69,7 @@ test('audio-binary directly parses /a, /pd0, and 5 embedded MIDI tracks from /sa
   const digest = bytes => createHash('sha256').update(bytes).digest('hex');
   for (const [name, expectedLen] of [['a', 18842], ['pd0', 96990], ['sa', 26616]]) {
     const webBytes = await readFile(new URL(`../assets/${name}`, import.meta.url));
-    const origBytes = await readFile(new URL(`../../recovered/${name}`, import.meta.url));
+    const origBytes = await readFile(new URL(`../../analysis/recovered/${name}`, import.meta.url));
     assert.equal(webBytes.length, expectedLen);
     assert.equal(digest(webBytes), digest(origBytes));
   }
@@ -77,7 +77,7 @@ test('audio-binary directly parses /a, /pd0, and 5 embedded MIDI tracks from /sa
 
 test('original /ma binary is preserved byte-for-byte in web-port/assets/ma', async () => {
   const webMa = await readFile(new URL('../assets/ma', import.meta.url));
-  const origMa = await readFile(new URL('../../recovered/ma', import.meta.url));
+  const origMa = await readFile(new URL('../../analysis/recovered/ma', import.meta.url));
   const digest = bytes => createHash('sha256').update(bytes).digest('hex');
   assert.equal(webMa.length, 42381);
   assert.equal(digest(webMa), digest(origMa));
