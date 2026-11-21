@@ -1169,7 +1169,14 @@ export function prepareMultiplayerMatch(baseData, maBytes, scenarioIndex = 1, lo
       if ((occ >= 1 && occ <= 100) || (occ <= -1 && occ >= -60)) {
         data.occupancy[y][x] = 0;
       }
-      data.fog[y][x] = 2; // reset fog of war
+    }
+  }
+  // Reset bit-packed fogOfWar (0 = unexplored / fog state 2)
+  if (Array.isArray(data.fogOfWar)) {
+    for (let layer = 0; layer < data.fogOfWar.length; layer++) {
+      for (let word = 0; word < data.fogOfWar[layer].length; word++) {
+        data.fogOfWar[layer][word].fill(0);
+      }
     }
   }
   for (let uid = 1; uid <= 100; uid++) {

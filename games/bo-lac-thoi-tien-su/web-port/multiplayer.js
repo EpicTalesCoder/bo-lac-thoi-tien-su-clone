@@ -5,6 +5,17 @@
  *  2) BroadcastChannel (instant <5ms connection for 2 browser tabs on the same machine / offline)
  */
 
+const PEER_CONFIG = {
+  debug: 0,
+  config: {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun2.l.google.com:19302' },
+    ],
+  },
+};
+
 export function generateRoomCode() {
   return String(Math.floor(1000 + Math.random() * 9000));
 }
@@ -92,7 +103,7 @@ export class MultiplayerClient {
     // 2) PeerJS WebRTC P2P for internet play across devices
     if (typeof window !== 'undefined' && window.Peer) {
       try {
-        this.peer = new window.Peer(`pt-room-${code}`, { debug: 0 });
+        this.peer = new window.Peer(`pt-room-${code}`, PEER_CONFIG);
         this.peer.on('open', () => {
           this.transport = this.transport || 'WebRTC P2P';
           this.emitLobby();
@@ -158,7 +169,7 @@ export class MultiplayerClient {
     // 2) PeerJS WebRTC P2P join
     if (typeof window !== 'undefined' && window.Peer) {
       try {
-        this.peer = new window.Peer(undefined, { debug: 0 });
+        this.peer = new window.Peer(undefined, PEER_CONFIG);
         this.peer.on('open', () => {
           const conn = this.peer.connect(`pt-room-${cleanCode}`, { reliable: true });
           this.conn = conn;
