@@ -2495,18 +2495,28 @@ function commandUnitTo(tx, ty, overrideIds = null, owner = state.localTribe ?? 0
   const adultIds = activeIds.filter((id) => (d.entityData[1414 + id] & 0xff) >= 12);
   const childIds = activeIds.filter((id) => (d.entityData[1414 + id] & 0xff) < 12);
 
-  // If player clicks a finished Nhà trẻ (bType 10) with a child selected, send the child inside Nhà trẻ for safety!
-  if (isOwnBldOcc && childIds.length > 0 && adultIds.length === 0) {
+  // If player clicks a finished Nhà trẻ (bType 10) with any unit(s) selected, send child(ren) inside Nhà trẻ for safety!
+  if (isOwnBldOcc) {
     const bid = -occ;
     const bld = getPlayerBuildings(owner).find((b) => b.bid === bid);
     if (bld && !bld.underConstruction && bld.targetType === 10) {
+      const targets =
+        childIds.length > 0
+          ? childIds
+          : getVillagerIds(owner).filter(
+              (id) => (d.entityData[1414 + id] & 0xff) < 12 && !isUnitInsideBuilding(d, id)
+            );
       let sent = 0;
-      for (const cid of childIds) {
+      for (const cid of targets) {
         if (assignWorkAtBuilding(cid, bld)) sent++;
       }
       if (sent > 0 && !overrideIds) {
-        state.message = `${getVillagerInfo(childIds[0]).role} đang đi vào Nhà trẻ để được bảo vệ an toàn!`;
+        state.message = `${sent > 1 ? `${sent} trẻ em` : getVillagerInfo(targets[0]).role} đang đi vào Nhà trẻ để được bảo vệ an toàn!`;
         render();
+        return;
+      }
+      if (!overrideIds) {
+        openCanvasBuildingMenu(bld);
       }
       return;
     }
@@ -3914,6 +3924,18 @@ function stepSimulation() {
           // Dust cloud d(74) plays ONLY when the building finishes construction (f.java:1517)!
           addDust(bld.x, bld.y, bld.w, bld.h);
 
+          // If this finished building is a Nhà trẻ (bType 10), immediately call all outside children (< 12) of the tribe to run inside for safety!
+          if ((e[8749 + bid] & 0xff) === 10) {
+            const finishedKg = getPlayerBuildings(bldOwner).find((b) => b.bid === bid);
+            if (finishedKg) {
+              for (const cid of getVillagerIds(bldOwner)) {
+                if ((e[1414 + cid] & 0xff) < 12 && !isUnitInsideBuilding(d, cid)) {
+                  assignWorkAtBuilding(cid, finishedKg);
+                }
+              }
+            }
+          }
+
           // Collect all builders who were working on OR heading to this completed site
           const allFinishedBuilders = new Set([unitId, ...workers]);
           for (const [uid, t] of state.tasks.entries()) {
@@ -4396,7 +4418,9 @@ function stepSimulation() {
                   ? 'đã vào Khu thánh địa hành lễ'
                   : bt === 0
                     ? 'đã vào Kho vũ khí rèn đồ'
-                    : `đã vào làm việc tại ${bld.spec.name}`;
+                    : bt === 10
+                      ? 'đã vào Nhà trẻ vui chơi an toàn'
+                      : `đã vào làm việc tại ${bld.spec.name}`;
           state.message = `${info.role} ${roleVerb}!`;
           uiChanged = true;
         } else {
@@ -5022,7 +5046,7 @@ function stepVillagerNeeds() {
             changed = true;
           }
         } else if (!task && !isUnitInsideBuilding(d, id)) {
-          if (finishedKindergartens.length > 0 && age < 11) {
+          if (finishedKindergartens.length > 0 && age < 12) {
             const kg = pickNearestBld(finishedKindergartens, e[id] & 0xff, e[101 + id] & 0xff);
             if (kg && assignWorkAtBuilding(id, kg)) {
               changed = true;
@@ -5569,6 +5593,24 @@ function openCanvasBuildingMenu(bld) {
       action: () => {
         const uid = state.selectedUnit || findNearestVillager(bld.x, bld.y, true);
         if (uid) assignWorkAtBuilding(uid, bld, [1, 2, 3, 4, 5, 6]);
+        state.canvasMenu = null;
+        render();
+      },
+    });
+  } else if (bld.targetType === 10) {
+    // Nhà trẻ: call all outside children (< 12) into the kindergarten for protection!
+    items.push({
+      label: 'ĐƯA TRẺ EM VÀO NHÀ TRẺ',
+      iconAnim: 13,
+      action: () => {
+        const owner = state.localTribe ?? 0;
+        const e = state.data.entityData;
+        const kids = getVillagerIds(owner).filter((id) => (e[1414 + id] & 0xff) < 12 && !isUnitInsideBuilding(state.data, id));
+        let sent = 0;
+        for (const cid of kids) {
+          if (assignWorkAtBuilding(cid, bld)) sent++;
+        }
+        state.message = sent > 0 ? `👶 Đã gọi ${sent} trẻ em vào Nhà trẻ để bảo vệ an toàn!` : 'Hiện tất cả trẻ em đã ở trong Nhà trẻ (hoặc chưa có trẻ em mới).';
         state.canvasMenu = null;
         render();
       },
