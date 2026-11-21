@@ -3007,11 +3007,12 @@ function openCanvasBuildMenu() {
   cancelBuildPlacement();
   state.showMinimap = false;
   const items = BUILDINGS.map((b) => {
-    const spec = getBuildingSpec(state.data, b.bType);
+    const bType = b.type;
+    const spec = getBuildingSpec(state.data, bType);
     const canAfford = state.wood >= spec.woodCost && state.stone >= spec.stoneCost && state.tools >= spec.toolsCost;
     return {
       label: spec.name.toUpperCase(),
-      bType: b.bType,
+      bType,
       spec,
       canAfford,
       desc: spec.desc,
@@ -3022,7 +3023,7 @@ function openCanvasBuildMenu() {
           return;
         }
         state.canvasMenu = null;
-        startBuildPlacement(b.bType);
+        startBuildPlacement(bType);
       },
     };
   });
