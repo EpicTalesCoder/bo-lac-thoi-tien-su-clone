@@ -23,29 +23,79 @@
         <div class="mp-lobby-overlay" id="mp-lobby" role="dialog" aria-label="Phòng chơi Multiplayer 1v1">
           <div class="mp-card">
             <div class="mp-brand">
-              <span class="mp-pill">⚔️ CHẾ ĐỘ ĐỐI KHÁNG 1v1 REAL-TIME</span>
+              <span class="mp-pill">⚔️ ĐỐI KHÁNG 1v1 & CHƠI VỚI MÁY (AI)</span>
               <h1>Prehistoric Tribes</h1>
-              <p class="mp-sub">Tạo phòng & mời bạn chơi 2 bên bản đồ — cả 2 bấm Sẵn sàng để vào trận!</p>
+              <p class="mp-sub">Chọn chơi ngay với Máy AI (Xanh vs Đỏ) hoặc tạo phòng 1v1 Real-Time cùng bạn bè!</p>
             </div>
 
-            <!-- Landing: Create or Join -->
+            <!-- Landing: Vs AI, Create or Join -->
             <div id="mp-home-view" class="mp-view">
+              <button type="button" id="mp-ai-open-btn" class="mp-btn mp-btn-ai">
+                🤖 CHƠI VỚI MÁY (BỘ LẠC XANH VS MÁY ĐỎ)
+              </button>
+
+              <div class="mp-divider"><span>HOẶC ĐỐI KHÁNG 1v1 CÙNG NGƯỜI CHƠI KHÁC</span></div>
+
               <label class="mp-field">
                 <span>TÊN TÙ TRƯỞNG CỦA BẠN</span>
                 <input type="text" id="mp-name-input" maxlength="16" value="Tù trưởng" placeholder="Nhập tên của bạn..." />
               </label>
 
               <button type="button" id="mp-create-btn" class="mp-btn mp-btn-primary">
-                🏰 TẠO PHÒNG MỚI (BỘ LẠC XANH)
+                🏰 TẠO PHÒNG 1v1 (BỘ LẠC XANH)
               </button>
-
-              <div class="mp-divider"><span>HOẶC VÀO PHÒNG ĐÃ CÓ</span></div>
 
               <div class="mp-join-row">
                 <input type="text" id="mp-code-input" maxlength="6" placeholder="Nhập mã phòng (VD: 4829)" />
                 <button type="button" id="mp-join-btn" class="mp-btn mp-btn-danger">⚔️ VÀO PHÒNG</button>
               </div>
-              <p class="mp-hint" id="mp-home-msg">Hỗ trợ chơi qua mạng (WebRTC P2P) hoặc mở 2 tab trên cùng máy để test ngay!</p>
+              <p class="mp-hint" id="mp-home-msg">Hỗ trợ chơi với Máy AI ngay lập tức hoặc đấu 1v1 qua mạng (WebRTC P2P / 2 tab)!</p>
+            </div>
+
+            <!-- Vs AI Setup View -->
+            <div id="mp-ai-view" class="mp-view hidden">
+              <div class="mp-room-bar">
+                <div>
+                  <span class="mp-room-label">CHẾ ĐỘ ĐẤU MÁY</span>
+                  <strong class="mp-room-code" style="font-size:16px;letter-spacing:0.04em;">XANH VS MÁY ĐỎ</strong>
+                </div>
+                <div class="mp-room-actions">
+                  <button type="button" id="mp-ai-back-btn" class="mp-btn-sm mp-btn-ghost">← Quay lại</button>
+                </div>
+              </div>
+
+              <div class="mp-versus">
+                <div class="mp-slot mp-slot-blue">
+                  <span class="mp-tribe-tag">🟢 BỘ LẠC XANH · BẠN</span>
+                  <strong id="mp-ai-player-name">Tù trưởng Xanh</strong>
+                  <span class="mp-ready-badge ready">Người chơi</span>
+                </div>
+                <div class="mp-vs-badge">VS</div>
+                <div class="mp-slot mp-slot-red">
+                  <span class="mp-tribe-tag">🔴 BỘ LẠC ĐỎ · MÁY AI</span>
+                  <strong>Tù trưởng Đỏ (AI)</strong>
+                  <span class="mp-ready-badge ready">Tự động</span>
+                </div>
+              </div>
+
+              <label class="mp-field">
+                <span>BẢN ĐỒ CHIẾN ĐẤU (2 BỘ LẠC ĐỐI ĐẦU CÂN BẰNG)</span>
+                <select id="mp-ai-map-select"></select>
+              </label>
+
+              <label class="mp-field">
+                <span>ĐỘ KHÓ CỦA MÁY (BỘ LẠC ĐỎ)</span>
+                <select id="mp-ai-diff-select">
+                  <option value="easy">Dễ — Máy phát triển chậm, tấn công nhẹ</option>
+                  <option value="normal" selected>Thường — Máy thu thập, xây nhà & tập kích cân bằng</option>
+                  <option value="hard">Khó — Máy phát triển nhanh, rèn vũ khí & tổng tấn công</option>
+                </select>
+              </label>
+
+              <button type="button" id="mp-ai-start-btn" class="mp-btn mp-btn-ai">
+                ⚔️ BẮT ĐẦU TRẬN ĐẤU VỚI MÁY
+              </button>
+              <p class="mp-hint">Bạn điều khiển Bộ lạc Xanh — Máy AI sẽ tự động thu thập tài nguyên, xây nhà, trang bị vũ khí và tấn công!</p>
             </div>
 
             <!-- Room Waiting View -->

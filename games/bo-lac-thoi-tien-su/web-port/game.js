@@ -191,6 +191,8 @@ const state = {
   animTick: 0,
   lastAlertTick: -999,
   mpMode: true,
+  aiMode: false,
+  aiDifficulty: 'normal', // 'easy' | 'normal' | 'hard'
   localTribe: 0, // 0 = Host (Blue Tribe 1..50), 1 = Guest (Red Tribe 51..100)
   mpWinner: null,
   tribeUseRawWeapon: [true, true], // Per-tribe toggle: allow taking 1 Stone/Wood from Storage when no crafted weapons exist
@@ -2496,6 +2498,198 @@ function stepProjectiles() {
   return changed;
 }
 
+function stepAiCommander() {
+  const d = state.data;
+  if (!d || !state.aiMode) return false;
+  const e = d.entityData;
+  const redUnits = getVillagerIds(1);
+  if (redUnits.length === 0) return false;
+  const redBlds = getTribeBuildings(1);
+  const blueUnits = getVillagerIds(0);
+  const blueBlds = getTribeBuildings(0);
+  if (blueUnits.length === 0 && blueBlds.length === 0) return false;
+
+  const diff = state.aiDifficulty || 'normal';
+  const r1 = d.resources?.[1];
+  // Gentle difficulty-based economy assist on Hard
+  if (diff === 'hard' && r1 && state.animTick % 110 === 0) {
+    r1[0] = Math.min(99, (r1[0] || 0) + 2);
+    r1[1] = Math.min(99, (r1[1] || 0) + 2);
+    r1[2] = Math.min(99, (r1[2] || 0) + 2);
+  }
+
+  // Locate Red home center (Chief's Hut / Storage / first building)
+  const home = redBlds.find((b) => b.targetType === 3) || redBlds.find((b) => b.targetType === 6) || redBlds[0];
+  const homeX = home ? home.x + Math.floor(home.w / 2) : (e[redUnits[0]] & 0xff);
+  const homeY = home ? home.y + Math.floor(home.h / 2) : (e[101 + redUnits[0]] & 0xff);
+  const adults = redUnits.filter((id) => (e[1414 + id] & 0xff) >= 12);
+  let changed = false;
+
+  // 1. Base Defense: if any Blue unit is near a Red building, intercept with idle/gathering Red adults!
+  let intruder = null;
+  for (const bu of blueUnits) {
+    if (isUnitInsideBuilding(d, bu)) continue;
+    const bx = e[bu] & 0xff;
+    const by = e[101 + bu] & 0xff;
+    if (redBlds.some((rb) => Math.hypot(rb.x - bx, rb.y - by) <= 10)) {
+      intruder = bu;
+      break;
+    }
+  }
+  if (intruder) {
+    let defenders = 0;
+    for (const id of adults) {
+      const t = state.tasks.get(id);
+      if (t && (t.kind === 'attackUnit' || t.kind === 'attackBuilding' || t.kind === 'armForBattle')) {
+        defenders++;
+        continue;
+      }
+      if (!t || t.kind === 'gather' || t.kind === 'return') {
+        if (defenders < 4) {
+          if (assignAttackUnitTask(id, intruder)) {
+            defenders++;
+            changed = true;
+          }
+        }
+      }
+    }
+    if (defenders > 0) return changed;
+  }
+
+  // 2. Finish any under-construction Red buildings first
+  const unfinished = redBlds.find((b) => b.underConstruction);
+  if (unfinished) {
+    const builders = adults.filter((id) => state.tasks.get(id)?.kind === 'build' || state.tasks.get(id)?.kind === 'buildFetch');
+    if (builders.length === 0) {
+      const idle = adults.find((id) => !state.tasks.has(id) && !isUnitInsideBuilding(d, id));
+      if (idle && assignBuildTask(idle, unfinished)) changed = true;
+    }
+  } else if (r1 && (r1[1] || 0) >= 14 && (r1[2] || 0) >= 6 && state.animTick % 88 === 0) {
+    // 3. Build key buildings in authentic order: Lều(2) -> Bếp(4) -> Kho vũ khí(0) -> Phòng tập(1) -> Khu tập ném(5)
+    const wantOrder = [2, 4, 0, 1, 5];
+    const desiredType = wantOrder.find((bt) => !redBlds.some((b) => b.targetType === bt));
+    if (desiredType !== undefined) {
+      const spec = getBuildingSpec(d, desiredType);
+      if ((r1[1] || 0) >= spec.wood && (r1[2] || 0) >= spec.stone && (r1[3] || 0) >= spec.bones) {
+        const idle = adults.find((id) => !state.tasks.has(id) && !isUnitInsideBuilding(d, id));
+        if (idle) {
+          // Search a valid build spot near Red home
+          let placedBid = 0;
+          for (let r = 3; r <= 11 && !placedBid; r++) {
+            for (let dy = -r; dy <= r && !placedBid; dy += 2) {
+              for (let dx = -r; dx <= r && !placedBid; dx += 2) {
+                const bx = homeX + dx;
+                const by = homeY + dy;
+                if (canPlaceBuilding(d, desiredType, bx, by)) {
+                  placedBid = placeConstructionSite(d, desiredType, bx, by, 1);
+                  if (placedBid > 0) {
+                    state.siteMaterials.set(placedBid, { wood: spec.wood, stone: spec.stone, tools: spec.bones });
+                    const newBld = getTribeBuildings(1).find((b) => b.bid === placedBid);
+                    if (newBld) assignBuildTask(idle, newBld);
+                    changed = true;
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // 4. Staff Kho vũ khí (blacksmith) & queue weapons if Red has one
+  const workshop = redBlds.find((b) => !b.underConstruction && b.targetType === 0);
+  if (workshop) {
+    const q = getWeaponQueue(workshop.bid);
+    const totalQueued = q.reduce((s, n) => s + n, 0);
+    if (totalQueued === 0 && r1 && (r1[1] || 0) >= 6) {
+      q[0] = 2; // Queue 2 Dùi cui
+      if ((r1[2] || 0) >= 5) q[1] = 2; // Queue 2 Đá ném
+    }
+    const hasSmith = adults.some((id) => state.tasks.get(id)?.target?.bid === workshop.bid || state.tasks.get(id)?.workshop?.bid === workshop.bid);
+    if (!hasSmith) {
+      const idle = adults.find((id) => !state.tasks.has(id) && !isUnitInsideBuilding(d, id));
+      if (idle && assignWorkAtBuilding(idle, workshop, [0])) changed = true;
+    }
+  }
+
+  // 5. Assign idle adult Red villagers to gather resources continuously (food, wood, stone)
+  const idleAdults = adults.filter((id) => !state.tasks.has(id) && !isUnitInsideBuilding(d, id));
+  for (const id of idleAdults) {
+    const ux = e[id] & 0xff;
+    const uy = e[101 + id] & 0xff;
+    const needFood = (r1?.[0] || 0) < 15;
+    const needWood = (r1?.[1] || 0) <= (r1?.[2] || 0);
+    let bestNode = null;
+    let bestDist = Infinity;
+    for (let ry = Math.max(1, uy - 14); ry < Math.min(d.height - 1, uy + 15); ry++) {
+      for (let rx = Math.max(1, ux - 14); rx < Math.min(d.width - 1, ux + 15); rx++) {
+        const node = inspectResourceTile(rx, ry, 1);
+        if (!node) continue;
+        const priority =
+          (needFood && node.type === 'food') || (needWood && node.type === 'wood') || (!needWood && node.type === 'stone')
+            ? 0
+            : 6;
+        const dist = Math.hypot(rx - ux, ry - uy) + priority;
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestNode = node;
+        }
+      }
+    }
+    if (bestNode && assignGatherTask(id, bestNode)) {
+      changed = true;
+    }
+  }
+
+  // 6. Coordinated Attack Waves against Blue Tribe (scaled by difficulty)
+  const waveInterval = diff === 'easy' ? 820 : diff === 'hard' ? 340 : 520;
+  const waveSize = diff === 'easy' ? 2 : diff === 'hard' ? 5 : 3;
+  if (state.animTick >= 360 && state.animTick % waveInterval < 22) {
+    const attackers = adults.filter((id) => {
+      const t = state.tasks.get(id);
+      return t && (t.kind === 'attackUnit' || t.kind === 'attackBuilding' || t.kind === 'armForBattle');
+    });
+    if (attackers.length < waveSize) {
+      const candidates = adults.filter((id) => {
+        if (isUnitInsideBuilding(d, id)) return false;
+        const t = state.tasks.get(id);
+        return !t || t.kind === 'gather' || t.kind === 'return';
+      });
+      const targetBld = blueBlds[0];
+      const targetUnit = blueUnits.find((u) => !isUnitInsideBuilding(d, u));
+      const tx = targetUnit ? (e[targetUnit] & 0xff) : targetBld ? targetBld.x : 0;
+      const ty = targetUnit ? (e[101 + targetUnit] & 0xff) : targetBld ? targetBld.y : 0;
+      const needCount = Math.min(waveSize - attackers.length, Math.max(1, candidates.length - 2));
+      for (let i = 0; i < needCount; i++) {
+        const id = candidates[i];
+        if (!id) break;
+        const storage = findNearestDropoff(e[id] & 0xff, e[101 + id] & 0xff, 1);
+        const curW = e[6565 + id] & 0xff;
+        if (curW === 9 && storage) {
+          const p = planUnitPath(id, storage.x, storage.y, false, storage);
+          if (p !== null) {
+            state.tasks.set(id, {
+              kind: 'armForBattle',
+              path: p.path,
+              stepProgress: p.stepProgress,
+              target: storage,
+              flagX: tx,
+              flagY: ty,
+              workTicks: 0,
+            });
+            changed = true;
+            continue;
+          }
+        }
+        if (targetUnit && assignAttackUnitTask(id, targetUnit)) changed = true;
+        else if (targetBld && assignAttackBuildingTask(id, targetBld)) changed = true;
+      }
+    }
+  }
+  return changed;
+}
+
 function stepEnemyAI() {
   const d = state.data;
   if (!d) return false;
@@ -4002,14 +4196,18 @@ function stepSimulation() {
     }
   }
 
-  // Wild animal movement & animation, flying projectiles, and Enemy Tribe AI (disabled in 1v1 PvP!)
+  // Wild animal movement & animation, flying projectiles, and Enemy AI
   stepWildAnimals();
   if (stepProjectiles()) uiChanged = true;
-  if (!state.mpMode && stepEnemyAI()) uiChanged = true;
+  if (state.aiMode && state.animTick % 22 === 0) {
+    if (stepAiCommander()) uiChanged = true;
+  } else if (!state.mpMode && !state.aiMode && stepEnemyAI()) {
+    uiChanged = true;
+  }
 
   // Per-unit aggro scan radius: idle or marching adult villagers automatically attack nearby enemies!
   if (state.animTick % 6 === 0) {
-    const tribesToScan = state.mpMode ? [0, 1] : [0];
+    const tribesToScan = state.mpMode || state.aiMode ? [0, 1] : [0];
     for (const owner of tribesToScan) {
       const allies = getVillagerIds(owner);
       const enemies = getEnemyIds(owner);
@@ -4047,8 +4245,8 @@ function stepSimulation() {
     if (stepVillagerNeeds()) uiChanged = true;
   }
 
-  // Periodic Tribe Auto-AI assignment (disabled in 1v1 PvP so player has full control)
-  if (!state.mpMode && state.animTick % 18 === 0) {
+  // Periodic Tribe Auto-AI assignment (disabled in 1v1 PvP & Vs AI so player has full control)
+  if (!state.mpMode && !state.aiMode && state.animTick % 18 === 0) {
     runTribeAutoAI();
   }
 
@@ -4056,22 +4254,23 @@ function stepSimulation() {
   for (const id of getVillagerIds(0)) {
     syncUnitJobBadge(id);
   }
-  if (state.mpMode) {
+  if (state.mpMode || state.aiMode) {
     for (const id of getVillagerIds(1)) {
       syncUnitJobBadge(id);
     }
   }
 
-  // Evaluate 1v1 Multiplayer Victory OR Campaign Mission Victory
-  if (state.mpMode && state.localTribe === 0 && state.mpWinner === null && state.animTick % 10 === 0) {
+  // Evaluate 1v1 Multiplayer / Vs AI Victory OR Campaign Mission Victory
+  if ((state.mpMode || state.aiMode) && state.localTribe === 0 && state.mpWinner === null && state.animTick % 10 === 0) {
     const t0Alive = getVillagerIds(0).length;
     const t1Alive = getVillagerIds(1).length;
     if (t1Alive === 0 || t0Alive === 0) {
       state.mpWinner = t1Alive === 0 ? 0 : 1;
       const hostWon = state.mpWinner === 0;
+      const redLabel = state.aiMode ? 'Máy AI (Bộ lạc Đỏ)' : 'Bộ lạc Đỏ';
       state.missionResult = {
         status: hostWon ? 'victory' : 'defeat',
-        reason: hostWon ? 'Bộ lạc Xanh đã đánh bại Bộ lạc Đỏ!' : 'Bộ lạc Đỏ đã chiến thắng trận đấu!',
+        reason: hostWon ? `Bộ lạc Xanh đã đánh bại ${redLabel}!` : `${redLabel} đã chiến thắng trận đấu!`,
         epilogue: '',
         score: {
           population: t0Alive,
@@ -4082,10 +4281,10 @@ function stepSimulation() {
           totalScore: (t0Alive * 100) + (state.missionStats.enemiesKilled * 50),
         },
       };
-      state.message = hostWon ? '🏆 CHIẾN THẮNG! Bộ lạc Xanh đã giành thắng lợi!' : '💀 THẤT BẠI! Bộ lạc Đỏ đã chiến thắng!';
+      state.message = hostWon ? '🏆 CHIẾN THẮNG! Bộ lạc Xanh đã giành thắng lợi!' : `💀 THẤT BẠI! ${redLabel} đã chiến thắng!`;
       uiChanged = true;
     }
-  } else if (!state.mpMode && !state.victoryDismissed && state.animTick % 12 === 0) {
+  } else if (!state.mpMode && !state.aiMode && !state.victoryDismissed && state.animTick % 12 === 0) {
     const evalRes = getCurrentMissionEvaluation();
     if (evalRes.status === 'victory' || evalRes.status === 'defeat') {
       const score = computeMissionScore({
@@ -4132,7 +4331,7 @@ function stepVillagerNeeds() {
   const d = state.data;
   if (!d) return false;
   const e = d.entityData;
-  const tribes = state.mpMode ? [0, 1] : [state.localTribe ?? 0];
+  const tribes = state.mpMode || state.aiMode ? [0, 1] : [state.localTribe ?? 0];
   let changed = false;
 
   const pickNearestBld = (list, ux, uy) => {
@@ -6634,9 +6833,16 @@ Promise.all([
     });
     syncViewportToWindow();
 
-    // === 1v1 Multiplayer Lobby & Real-Time Sync Setup ===
+    // === 1v1 Multiplayer & Vs AI Lobby Setup ===
     const mpHomeView = document.getElementById('mp-home-view');
+    const mpAiView = document.getElementById('mp-ai-view');
     const mpRoomView = document.getElementById('mp-room-view');
+    const mpAiOpenBtn = document.getElementById('mp-ai-open-btn');
+    const mpAiBackBtn = document.getElementById('mp-ai-back-btn');
+    const mpAiStartBtn = document.getElementById('mp-ai-start-btn');
+    const mpAiMapSelect = document.getElementById('mp-ai-map-select');
+    const mpAiDiffSelect = document.getElementById('mp-ai-diff-select');
+    const mpAiPlayerNameEl = document.getElementById('mp-ai-player-name');
     const mpNameInput = document.getElementById('mp-name-input');
     const mpCodeInput = document.getElementById('mp-code-input');
     const mpCreateBtn = document.getElementById('mp-create-btn');
@@ -6656,13 +6862,14 @@ Promise.all([
     const mpRoomMsgEl = document.getElementById('mp-room-msg');
     const openLobbyToolbarBtn = document.getElementById('btn-mp-lobby');
 
-    if (mpMapSelect) {
-      mpMapSelect.innerHTML = '';
+    for (const sel of [mpMapSelect, mpAiMapSelect]) {
+      if (!sel) continue;
+      sel.innerHTML = '';
       for (const m of MP_MAPS) {
         const opt = document.createElement('option');
         opt.value = String(m.scenarioIndex);
         opt.textContent = m.name;
-        mpMapSelect.appendChild(opt);
+        sel.appendChild(opt);
       }
     }
 
@@ -6695,8 +6902,10 @@ Promise.all([
       }
     };
 
-    const startMultiplayerMatch = (mapIdx, myTribe) => {
-      state.mpMode = true;
+    const startMatchCommon = (mapIdx, myTribe, { isMp, isAi, difficulty = 'normal' }) => {
+      state.mpMode = isMp;
+      state.aiMode = isAi;
+      state.aiDifficulty = difficulty;
       state.localTribe = myTribe;
       state.mpWinner = null;
       state.missionResult = null;
@@ -6707,6 +6916,8 @@ Promise.all([
       state.showMinimap = false;
       state.tasks.clear();
       state.enemyTasks.clear();
+      state.weaponQueues.clear();
+      state.siteMaterials.clear();
       state.projectiles = [];
       state.dustEffects = [];
       state.selectedUnits.clear();
@@ -6724,8 +6935,10 @@ Promise.all([
       state.cursor = { x: state.data.cursorX, y: state.data.cursorY };
       state.phase = 'game';
       state.paused = false;
-      state.message =
-        myTribe === 0
+      const diffLabel = difficulty === 'easy' ? 'Dễ' : difficulty === 'hard' ? 'Khó' : 'Thường';
+      state.message = isAi
+        ? `🤖 Chơi với Máy (${diffLabel})! Bạn điều khiển BỘ LẠC XANH đối đầu MÁY AI (BỘ LẠC ĐỎ).`
+        : myTribe === 0
           ? '🟢 Trận đấu 1v1 bắt đầu! Bạn điều khiển BỘ LẠC XANH (Chủ phòng).'
           : '🔴 Trận đấu 1v1 bắt đầu! Bạn điều khiển BỘ LẠC ĐỎ (Khách).';
       clampCamera();
@@ -6733,10 +6946,30 @@ Promise.all([
       render();
     };
 
+    const startMultiplayerMatch = (mapIdx, myTribe) => startMatchCommon(mapIdx, myTribe, { isMp: true, isAi: false });
+    const startAiMatch = (mapIdx, difficulty) => startMatchCommon(mapIdx, 0, { isMp: false, isAi: true, difficulty });
+
+    mpAiOpenBtn?.addEventListener('click', () => {
+      if (mpAiPlayerNameEl) mpAiPlayerNameEl.textContent = (mpNameInput?.value || 'Tù trưởng').trim() || 'Tù trưởng';
+      mpHomeView?.classList.add('hidden');
+      mpRoomView?.classList.add('hidden');
+      mpAiView?.classList.remove('hidden');
+    });
+    mpAiBackBtn?.addEventListener('click', () => {
+      mpAiView?.classList.add('hidden');
+      mpHomeView?.classList.remove('hidden');
+    });
+    mpAiStartBtn?.addEventListener('click', () => {
+      const mapIdx = Number(mpAiMapSelect?.value ?? MP_MAPS[0].scenarioIndex);
+      const diff = mpAiDiffSelect?.value || 'normal';
+      startAiMatch(mapIdx, diff);
+    });
+
     const updateLobbyUI = (lob) => {
       if (!lob) return;
       const inRoom = lob.status !== 'idle';
-      mpHomeView?.classList.toggle('hidden', inRoom);
+      if (inRoom) mpAiView?.classList.add('hidden');
+      mpHomeView?.classList.toggle('hidden', inRoom || !mpAiView?.classList.contains('hidden'));
       mpRoomView?.classList.toggle('hidden', !inRoom);
       if (!inRoom) return;
 

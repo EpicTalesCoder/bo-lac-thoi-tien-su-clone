@@ -256,6 +256,11 @@ h2, p { margin-top: 0; }
   border-color: #9ae07b66;
   color: #f7fce9;
 }
+.mp-btn-ai {
+  background: linear-gradient(135deg, #e09c2c, #b56514);
+  border-color: #ffde8a77;
+  color: #1f1202;
+}
 .mp-btn-danger {
   background: linear-gradient(135deg, #c94c38, #942b1d);
   border-color: #ff9a8a55;
