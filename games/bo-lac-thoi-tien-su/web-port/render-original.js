@@ -338,12 +338,25 @@ function drawMapObject(ctx, data, n, layer, ah, ai, camX, camY, originY, animTic
 
     if (kind === 1 && stageReq <= n7) {
       if (n8 === 6 && resCounter < 5) {
+        // Exact port of f.java:1063-1072: Storage (Kho chứa) displays 5 live resource piles (levels 0..4)!
+        // mo[142] = [25(food/meat), 2(stone), 1(wood), 3(bones/tools), 4(extra)]
+        const resArr = data.resources?.[0] || [];
+        const resSlotMap = [resArr[0] || 0, resArr[2] || 0, resArr[1] || 0, resArr[3] || 0, Math.floor((resArr[0] || 0) / 2)];
+        const amt = resSlotMap[resCounter] || 0;
+        if (amt > 0 || n9 >= 31) {
+          const lvl = n9 >= 31 ? 4 : Math.min(4, Math.floor(amt / 7));
+          drawComposite(ctx, data, (shorts[1][idx] & 0xfff) + lvl, px, py, imageCache);
+        }
         resCounter++;
       } else if (n8 === 4 && resCounter < 1) {
-        const food = data.resources?.[0]?.[0] || 0;
-        if (food >= 5) {
-          const lvl = food > 35 ? 2 : Math.floor((food - 5) / 15);
-          drawComposite(ctx, data, (shorts[1][idx] & 0xfff) + lvl, px, py, imageCache);
+        if (n9 >= 31) {
+          drawComposite(ctx, data, (shorts[1][idx] & 0xfff) + 2, px, py, imageCache);
+        } else {
+          const food = data.resources?.[0]?.[0] || 0;
+          if (food >= 5) {
+            const lvl = food > 35 ? 2 : Math.floor((food - 5) / 15);
+            drawComposite(ctx, data, (shorts[1][idx] & 0xfff) + lvl, px, py, imageCache);
+          }
         }
         resCounter++;
       } else {
@@ -1349,7 +1362,7 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
     }
   }
 
-  // Pass 4c: Building placement preview footprint
+  // Pass 4c: Authentic building placement ghost/frame preview + per-tile green/red footprint
   if (state.buildPreview) {
     const bp = state.buildPreview;
     const bx = (bp.x - camX) * CELL_WIDTH;
@@ -1357,17 +1370,66 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
     const bw = bp.width * CELL_WIDTH;
     const bh = bp.height * CELL_HEIGHT;
     ctx.save();
-    ctx.fillStyle = bp.valid ? 'rgba(116, 224, 92, 0.34)' : 'rgba(235, 68, 52, 0.42)';
-    ctx.strokeStyle = bp.valid ? '#b7ff8f' : '#ff8a80';
-    ctx.lineWidth = 1.5;
-    ctx.fillRect(bx, by, bw, bh);
-    ctx.strokeRect(bx + 0.5, by + 0.5, bw - 1, bh - 1);
+    // 1. Per-tile green (open) / red (blocked) footprint grid underneath the building frame
     for (let dy = 0; dy < bp.height; dy++) {
       for (let dx = 0; dx < bp.width; dx++) {
-        ctx.strokeStyle = bp.valid ? 'rgba(200,255,160,0.45)' : 'rgba(255,150,140,0.45)';
+        const tx = bp.x + dx;
+        const ty = bp.y + dy;
+        const tileFree =
+          tx >= 1 &&
+          ty >= 1 &&
+          tx < data.width - 1 &&
+          ty < data.height - 1 &&
+          data.occupancy[ty]?.[tx] === 0 &&
+          (data.terrain[ty]?.[tx] & 0xff) < 175 &&
+          getFogState(data, tx, ty) < 2;
+        const cellOk = bp.valid || tileFree;
+        ctx.fillStyle = cellOk ? 'rgba(98, 224, 78, 0.34)' : 'rgba(235, 58, 44, 0.48)';
+        ctx.fillRect(bx + dx * CELL_WIDTH, by + dy * CELL_HEIGHT, CELL_WIDTH, CELL_HEIGHT);
+        ctx.strokeStyle = cellOk ? 'rgba(205, 255, 165, 0.55)' : 'rgba(255, 150, 140, 0.65)';
         ctx.lineWidth = 1;
         ctx.strokeRect(bx + dx * CELL_WIDTH + 0.5, by + dy * CELL_HEIGHT + 0.5, CELL_WIDTH - 1, CELL_HEIGHT - 1);
       }
+    }
+
+    // 2. Authentic building blueprint / ghost sprite drawn directly from /pd0 building table (shorts[0][bType+1])
+    if (bp.bType !== undefined && bp.bType >= 0 && bp.bType <= 11) {
+      const shorts = data.shortSpriteTables;
+      const bytes = data.byteSpriteTables;
+      const startIdx = shorts[0][bp.bType + 1];
+      const partCount = bytes[0][bp.bType + 1] & 0xff;
+      let resSkip = 0;
+      ctx.globalAlpha = bp.valid ? 0.82 : 0.52;
+      for (let i = 0, idx = startIdx; i < partCount && idx < shorts[1].length; i++, idx++) {
+        const kind = bytes[3][idx] & 7;
+        const stageReq = (bytes[3][idx] & 0xff) >>> 6;
+        if (stageReq > 1) continue;
+        if (kind !== 0 && kind !== 1) continue;
+        if (kind === 1 && bp.bType === 6 && resSkip < 5) {
+          resSkip++;
+          continue;
+        }
+        if (kind === 1 && bp.bType === 4 && resSkip < 1) {
+          resSkip++;
+          continue;
+        }
+        const xHi = ((shorts[1][idx] & 0xc000) >>> 14) << 7;
+        const px = bx + toSignedByte(bytes[1][idx]) + xHi;
+        const py = by + toSignedByte(bytes[2][idx]);
+        drawComposite(ctx, data, shorts[1][idx] & 0xfff, px, py, imageCache);
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    // 3. Authentic animated corner brackets (d(6)..d(9)) + outer frame border
+    ctx.strokeStyle = bp.valid ? '#b7ff8f' : '#ff7b70';
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(bx + 0.5, by + 0.5, bw - 1, bh - 1);
+    if (bp.valid) {
+      drawAnimation(ctx, data, 6, bx, by, animTick, imageCache);
+      drawAnimation(ctx, data, 7, bx + bw, by, animTick, imageCache);
+      drawAnimation(ctx, data, 8, bx, by + bh, animTick, imageCache);
+      drawAnimation(ctx, data, 9, bx + bw, by + bh, animTick, imageCache);
     }
     ctx.restore();
   }
