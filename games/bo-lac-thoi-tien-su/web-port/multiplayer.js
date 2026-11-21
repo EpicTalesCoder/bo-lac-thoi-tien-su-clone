@@ -20,6 +20,8 @@ export class MultiplayerClient {
     this.connected = false;
     this.transport = '';
     this.countdownTimer = null;
+    this._seqOut = 0;
+    this._seenSeq = new Set();
 
     this.lobby = {
       roomCode: '',
@@ -39,19 +41,21 @@ export class MultiplayerClient {
   }
 
   sendRaw(msg) {
+    const packet = { ...msg, _from: this.role, _seq: ++this._seqOut };
+    let sent = false;
     if (this.conn && this.conn.open) {
       try {
-        this.conn.send(msg);
-        return true;
+        this.conn.send(packet);
+        sent = true;
       } catch {}
     }
     if (this.bc) {
       try {
-        this.bc.postMessage({ ...msg, _from: this.role });
-        return true;
+        this.bc.postMessage(packet);
+        sent = true;
       } catch {}
     }
-    return false;
+    return sent;
   }
 
   createRoom(hostName = 'Tù trưởng Xanh', mapIdx = 1) {
@@ -145,9 +149,9 @@ export class MultiplayerClient {
         }
         this.handleMessage(msg);
       };
-      // Announce join immediately via BroadcastChannel
+      // Announce join immediately via BroadcastChannel (and retry briefly in case Host is still initializing)
       setTimeout(() => {
-        this.sendRaw({ type: 'guestJoin', guestName: this.lobby.guestName });
+        this.sendRaw({ type: 'guestJoin', guestName: this.lobby.guestName, ready: this.lobby.guestReady });
       }, 60);
     }
 
@@ -161,7 +165,7 @@ export class MultiplayerClient {
           conn.on('open', () => {
             this.connected = true;
             this.transport = 'WebRTC P2P';
-            this.sendRaw({ type: 'guestJoin', guestName: this.lobby.guestName });
+            this.sendRaw({ type: 'guestJoin', guestName: this.lobby.guestName, ready: this.lobby.guestReady });
             this.emitLobby();
           });
           conn.on('data', (msg) => this.handleMessage(msg));
@@ -178,6 +182,8 @@ export class MultiplayerClient {
   }
 
   handlePeerDisconnect() {
+    // If local BroadcastChannel is active on the same machine, don't tear down the room on a WebRTC hiccup
+    if (this.bc && this.transport === 'Local Tab') return;
     if (this.role === 'host') {
       this.connected = false;
       this.lobby.guestJoined = false;
@@ -203,7 +209,7 @@ export class MultiplayerClient {
       this.checkStartCountdown();
     } else if (this.role === 'guest') {
       this.lobby.guestReady = val;
-      this.sendRaw({ type: 'guestReady', ready: val });
+      this.sendRaw({ type: 'guestReady', ready: val, guestName: this.lobby.guestName });
       this.emitLobby();
     }
   }
@@ -255,7 +261,7 @@ export class MultiplayerClient {
           this.sendRaw({ type: 'lobbySync', lobby: this.lobby });
           this.emitLobby();
         }
-      }, 1000);
+      }, 700);
     }
   }
 
@@ -281,15 +287,33 @@ export class MultiplayerClient {
 
   handleMessage(msg) {
     if (!msg || !msg.type) return;
+    // Deduplicate packets received over both WebRTC and BroadcastChannel
+    if (msg._seq && msg._from) {
+      const key = `${msg._from}:${msg._seq}`;
+      if (this._seenSeq.has(key)) return;
+      this._seenSeq.add(key);
+      if (this._seenSeq.size > 400) this._seenSeq.clear();
+    }
+
     if (this.role === 'host') {
       if (msg.type === 'guestJoin') {
         this.connected = true;
+        const alreadyJoined = this.lobby.guestJoined;
         this.lobby.guestJoined = true;
-        this.lobby.guestName = msg.guestName || 'Tù trưởng Đỏ';
-        this.lobby.guestReady = false;
+        this.lobby.guestName = msg.guestName || this.lobby.guestName || 'Tù trưởng Đỏ';
+        // Never wipe guestReady on a secondary transport reconnect!
+        if (!alreadyJoined) {
+          this.lobby.guestReady = Boolean(msg.ready);
+        } else if (msg.ready) {
+          this.lobby.guestReady = true;
+        }
         this.sendRaw({ type: 'lobbySync', lobby: this.lobby });
         this.emitLobby();
+        this.checkStartCountdown();
       } else if (msg.type === 'guestReady') {
+        this.connected = true;
+        this.lobby.guestJoined = true;
+        if (msg.guestName) this.lobby.guestName = msg.guestName;
         this.lobby.guestReady = Boolean(msg.ready);
         if (!this.lobby.guestReady) this.cancelCountdown();
         this.sendRaw({ type: 'lobbySync', lobby: this.lobby });
@@ -304,6 +328,7 @@ export class MultiplayerClient {
         this.lobby = { ...this.lobby, ...msg.lobby };
         this.emitLobby();
       } else if (msg.type === 'startMatch') {
+        if (this.lobby.status === 'playing') return;
         this.lobby = { ...this.lobby, ...(msg.lobby || {}), status: 'playing' };
         this.emitLobby();
         this.callbacks.onStartMatch?.(msg.mapIdx ?? this.lobby.mapIdx, 1);
