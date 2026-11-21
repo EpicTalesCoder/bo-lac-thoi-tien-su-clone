@@ -437,12 +437,14 @@ function applyUnitDamage(attackerId, targetId, dmg) {
   if (nextHp > 0 && (e[1414 + targetId] & 0xff) >= 12) {
     if (targetId <= 50 && attackerId > 50) {
       if ((state.localTribe ?? 0) === 0) alertCombat('Chúng ta đang bị tấn công!');
-      if (state.tasks.get(targetId)?.kind !== 'attackUnit') {
+      const curT = state.tasks.get(targetId);
+      if (curT?.kind !== 'attackUnit' && curT?.kind !== 'armForBattle') {
         assignAttackTask(targetId, 'unit', attackerId);
       }
     } else if (targetId > 50 && attackerId <= 50) {
-      if (state.mpMode) {
-        if (state.tasks.get(targetId)?.kind !== 'attackUnit') {
+      if (state.mpMode || state.aiMode) {
+        const curT = state.tasks.get(targetId);
+        if (curT?.kind !== 'attackUnit' && curT?.kind !== 'armForBattle') {
           assignAttackTask(targetId, 'unit', attackerId);
         }
       } else if (!state.enemyTasks.has(targetId)) {
@@ -627,12 +629,9 @@ function findBestStorageWeaponForUnit(unitId, owner) {
       return { weaponId: wid, fromStock: true };
     }
   }
-  // If unarmed and no crafted weapon in stock, automatically take 1 Stone as Đá ném (wId=1) first, then Wood if no Stone!
-  if (curW === 9 && state.tribeUseRawWeapon[owner] !== false) {
-    const stoneAmt = owner === (state.localTribe ?? 0) ? state.stone : (r[2] || 0);
-    const woodAmt = owner === (state.localTribe ?? 0) ? state.wood : (r[1] || 0);
-    if (stoneAmt >= 1) return { weaponId: 1, fromStock: false, resType: 'stone' };
-    if (woodAmt >= 1) return { weaponId: 0, fromStock: false, resType: 'wood' };
+  // If unarmed and no crafted weapon in stock, ALWAYS take Stone as default weapon (Đá ném, wId=1)!
+  if (curW === 9) {
+    return { weaponId: 1, fromStock: false, resType: 'stone' };
   }
   return null;
 }
@@ -803,44 +802,40 @@ function assignAttackTask(unitId, targetType, targetId, skipArmFetch = false) {
   const isChildTarget = targetType === 'unit' && (e[1414 + targetId] & 0xff) < 12;
 
   // Authentic original behavior (b.java:2340-2370): if unarmed (wId===9) and not luring a child,
-  // automatically run to Kho chứa to grab a weapon (or 1 Stone as Đá ném) before attacking!
+  // automatically SPRINT (e[7777] = 3) to Kho chứa to grab a weapon (defaulting to Stone / Đá ném) before attacking!
   if (!isChildTarget && !skipArmFetch && (e[6565 + unitId] & 0xff) === 9 && (e[1414 + unitId] & 0xff) >= 12) {
     let tx = info.x;
     let ty = info.y;
-    let distToEnemy = 99;
     if (targetType === 'unit') {
       tx = e[targetId] & 0xff;
       ty = e[101 + targetId] & 0xff;
-      distToEnemy = Math.max(Math.abs(tx - info.x), Math.abs(ty - info.y));
     } else if (targetType === 'building') {
       const bld = getEnemyBuildings(owner).find((b) => b.bid === targetId);
       if (bld) {
         tx = bld.x;
         ty = bld.y;
-        distToEnemy = distanceToRect(info.x, info.y, bld);
       }
     }
-    if (distToEnemy > 1) {
-      const pick = findBestStorageWeaponForUnit(unitId, owner);
-      const storage = pick ? findNearestDropoff(info.x, info.y, owner) : null;
-      if (pick && storage) {
-        const toStorage = planUnitPath(unitId, storage.x, storage.y, false, storage);
-        if (toStorage !== null) {
-          state.tasks.set(unitId, {
-            kind: 'armForBattle',
-            path: toStorage.path,
-            stepProgress: toStorage.stepProgress,
-            target: storage,
-            attackTargetType: targetType,
-            attackTargetId: targetId,
-            battleX: tx,
-            battleY: ty,
-            owner,
-            workTicks: 0,
-          });
-          if (state.selectedUnit === unitId) state.activePath = toStorage.path;
-          return true;
-        }
+    const pick = findBestStorageWeaponForUnit(unitId, owner);
+    const storage = pick ? findNearestDropoff(info.x, info.y, owner) : null;
+    if (pick && storage) {
+      const toStorage = planUnitPath(unitId, storage.x, storage.y, false, storage);
+      if (toStorage !== null) {
+        e[7777 + unitId] = 3; // Sprint to Storage to grab weapon!
+        state.tasks.set(unitId, {
+          kind: 'armForBattle',
+          path: toStorage.path,
+          stepProgress: toStorage.stepProgress,
+          target: storage,
+          attackTargetType: targetType,
+          attackTargetId: targetId,
+          battleX: tx,
+          battleY: ty,
+          owner,
+          workTicks: 0,
+        });
+        if (state.selectedUnit === unitId) state.activePath = toStorage.path;
+        return true;
       }
     }
   }
@@ -854,6 +849,7 @@ function assignAttackTask(unitId, targetType, targetId, skipArmFetch = false) {
     const dist = Math.max(Math.abs(ex - info.x), Math.abs(ey - info.y));
     const planned = dist <= range ? { path: [], stepProgress: 0 } : planUnitPath(unitId, ex, ey, true);
     if (planned === null) return false;
+    e[7777 + unitId] = 3; // Sprint when charging to attack!
     state.tasks.set(unitId, {
       kind: 'attackUnit',
       path: planned.path,
@@ -873,6 +869,7 @@ function assignAttackTask(unitId, targetType, targetId, skipArmFetch = false) {
     const dist = distanceToRect(info.x, info.y, bld);
     const planned = dist <= range ? { path: [], stepProgress: 0 } : planUnitPath(unitId, bld.x, bld.y, false, bld);
     if (planned === null) return false;
+    e[7777 + unitId] = 3; // Sprint when charging to attack enemy building!
     state.tasks.set(unitId, {
       kind: 'attackBuilding',
       path: planned.path,
@@ -1418,11 +1415,13 @@ function setUnitAnim(unitId, animId, frame = 0) {
   const fo = d?.entityFieldOffsets;
   if (!fo) return;
   const e = d.entityData;
-  // Exact port of b.java:1749: when holding Đá ném (wId === 1) or carrying a resource (e[3535] !== 0),
-  // walking (0) uses anim 1 (stone/carry walk, partKind 8 = baseSprite 1184) and standing (8) uses anim 9 (stone/carry stand)!
+  // Exact port of b.java:1749 & 3535:
+  // - When carrying a resource (e[3535] !== 0), walking (0 or 7) uses anim 1 (carry walk) and standing (8) uses anim 9.
+  // - When holding Đá ném (wId === 1) without sprinting, walking (0) uses anim 1 (stone walk) and standing (8) uses anim 9.
+  // - When sprinting in combat (animId === 7), use anim 1 when holding Đá ném (wId === 1) so the stone in hand (partKind 8 = 1184) renders at 2x sprint speed!
   let resolvedAnim = animId;
   if ((e[1414 + unitId] & 0xff) >= 12 && ((e[3535 + unitId] & 0xff) !== 0 || (e[6565 + unitId] & 0xff) === 1)) {
-    if (animId === 0) resolvedAnim = 1;
+    if (animId === 0 || animId === 7) resolvedAnim = 1;
     else if (animId === 8) resolvedAnim = 9;
   }
   const maxFrames = Math.max(1, (d.byteSpriteTables?.[4]?.[resolvedAnim] ?? 1) & 0xff);
@@ -3152,11 +3151,14 @@ function isUnitSprinting(unitId) {
   const d = state.data;
   if (!d || unitId <= 0 || unitId > 100) return false;
   const e = d.entityData;
+  const task = state.tasks.get(unitId) || state.enemyTasks.get(unitId);
+  const isCombatSprint =
+    task && (task.kind === 'armForBattle' || task.kind === 'attackUnit' || task.kind === 'attackBuilding');
   return (
-    (e[7777 + unitId] & 0xff) > 0 &&
+    ((e[7777 + unitId] & 0xff) > 0 || isCombatSprint) &&
     (e[1414 + unitId] & 0xff) >= 12 &&
     (e[3535 + unitId] & 0xff) === 0 &&
-    (e[2020 + unitId] & 0xff) > 10
+    (isCombatSprint || (e[2020 + unitId] & 0xff) > 10)
   );
 }
 
@@ -3229,9 +3231,9 @@ function stepUnitMovement(unitId, task, isEnemy = false) {
 
   // Authentic original pace from mo[15] + e[1010+uid]: 8 ticks/tile cardinal, 11 ticks/tile diagonal at 120ms/tick
   const stepsPerTile = getUnitStepTicks(unitId, dx, dy);
-  const isChild = !isEnemy && (e[1414 + unitId] & 0xff) < 12;
+  const isChild = (e[1414 + unitId] & 0xff) < 12;
   const isCarrying = !isEnemy && e[3535 + unitId] > 0 && e[3636 + unitId] > 0;
-  const sprinting = !isEnemy && isUnitSprinting(unitId);
+  const sprinting = isUnitSprinting(unitId);
   // Exact port of b.java:3529-3546: child=6, carrying=1, sprinting=7 (4f run), normal walk=0
   const walkAnim = isChild ? 6 : isCarrying ? 1 : sprinting ? 7 : 0;
   const walkFrame = Math.floor(((task.stepProgress + 1) * 4) / stepsPerTile) % 4;
@@ -3374,12 +3376,18 @@ function stepSimulation() {
       const unitOwner = unitId > 50 ? 1 : 0;
       const tid = task.targetId;
       if ((e[1919 + tid] & 0xff) <= 0) {
-        // Target dead -> auto-acquire another nearby enemy within 6 tiles
+        // Target dead -> auto-acquire another nearby enemy within 6 tiles, or resume previous job!
+        e[7777 + unitId] = 0;
         state.tasks.delete(unitId);
-        setUnitAnim(unitId, 8, 0);
         if (state.selectedUnit === unitId) state.activePath = [];
         const nextEnemy = getEnemyIds(unitOwner).find((eid) => Math.max(Math.abs((e[eid] & 0xff) - ux), Math.abs((e[101 + eid] & 0xff) - uy)) <= 6);
-        if (nextEnemy) assignAttackTask(unitId, 'unit', nextEnemy);
+        if (nextEnemy && assignAttackTask(unitId, 'unit', nextEnemy)) {
+          uiChanged = true;
+          continue;
+        }
+        if (!resumeSavedJob(unitId)) {
+          setUnitAnim(unitId, 8, 0);
+        }
         uiChanged = true;
         continue;
       }
@@ -3991,7 +3999,7 @@ function stepSimulation() {
         uiChanged = true;
       }
     } else if (task.kind === 'armForBattle') {
-      // Arrived at Storage during Battle Command: grab the strongest weapon matching this villager's skill, then charge!
+      // Arrived at Storage during Battle Command / Enemy Engagement: grab the strongest weapon matching this villager's skill (or default to Stone / Đá ném), then SPRINT to charge!
       const owner = task.owner ?? (unitId > 50 ? 1 : 0);
       const r = d.resources?.[owner];
       const pick = findBestStorageWeaponForUnit(unitId, owner);
@@ -4004,21 +4012,22 @@ function stepSimulation() {
           r[5 + pick.weaponId] = Math.max(0, (r[5 + pick.weaponId] || 0) - 1);
           e[6565 + unitId] = pick.weaponId;
         } else if (!pick.fromStock) {
-          const isStone = pick.resType === 'stone';
-          const curAmt = owner === (state.localTribe ?? 0) ? (isStone ? state.stone : state.wood) : (r?.[isStone ? 2 : 1] || 0);
-          if (curAmt >= 1) {
+          const curStone = owner === (state.localTribe ?? 0) ? state.stone : (r?.[2] || 0);
+          if (curStone >= 1) {
             if (owner === (state.localTribe ?? 0)) {
-              if (isStone) state.stone -= 1;
-              else state.wood -= 1;
+              state.stone -= 1;
               syncResourcesToData(owner);
             } else if (r) {
-              r[isStone ? 2 : 1] = Math.max(0, (r[isStone ? 2 : 1] || 0) - 1);
+              r[2] = Math.max(0, (r[2] || 0) - 1);
             }
-            e[6565 + unitId] = pick.weaponId;
           }
+          // Default to Stone weapon (Đá ném, wId=1) so villager never charges empty-handed!
+          e[6565 + unitId] = 1;
         }
+      } else if ((e[6565 + unitId] & 0xff) === 9) {
+        e[6565 + unitId] = 1;
       }
-      e[7777 + unitId] = 0;
+      e[7777 + unitId] = 3; // Keep sprinting into combat!
       state.tasks.delete(unitId);
       if (task.attackTargetType && task.attackTargetId) {
         if (!assignAttackTask(unitId, task.attackTargetType, task.attackTargetId, true)) {
@@ -4663,7 +4672,7 @@ function stepSimulation() {
     uiChanged = true;
   }
 
-  // Per-unit aggro scan radius: idle or marching adult villagers automatically attack nearby enemies!
+  // Per-unit aggro scan radius: adult villagers seeing a nearby enemy immediately run to grab a weapon (default Stone) and fight back!
   if (state.animTick % 6 === 0) {
     const tribesToScan = state.mpMode || state.aiMode ? [0, 1] : [0];
     for (const owner of tribesToScan) {
@@ -4674,12 +4683,22 @@ function stepSimulation() {
         if ((e[1414 + uid] & 0xff) < 12) continue; // children don't fight
         if (isUnitInsideBuilding(d, uid)) continue;
         const curTask = state.tasks.get(uid);
-        // Only auto-engage when idle or casually walking (never interrupt active gathering, building, courtship, or existing combat)
-        if (curTask && curTask.kind !== 'move') continue;
+        // Never interrupt existing combat, weapon fetching, or courtship
+        if (
+          curTask &&
+          (curTask.kind === 'attackUnit' ||
+            curTask.kind === 'attackBuilding' ||
+            curTask.kind === 'armForBattle' ||
+            curTask.kind === 'courtship')
+        ) {
+          continue;
+        }
         const ux = e[uid] & 0xff;
         const uy = e[101 + uid] & 0xff;
         const hasWeapon = (e[6565 + uid] & 0xff) < 9;
-        const scanRadius = getUnitRange(uid) > 1 ? 6 : hasWeapon ? 5 : 4;
+        // Idle/walking villagers scan 4..6 tiles; busy workers (gathering/returning/building) defend themselves when enemy closes within 4 tiles
+        const isBusyWorker = Boolean(curTask && curTask.kind !== 'move');
+        const scanRadius = isBusyWorker ? 4 : getUnitRange(uid) > 1 ? 6 : hasWeapon ? 5 : 5;
         let nearestEnemy = 0;
         let bestDist = scanRadius + 0.01;
         for (const eid of enemies) {
