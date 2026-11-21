@@ -7783,8 +7783,21 @@ Promise.all([
         // 2. Smooth 60 FPS Sub-Tick Unit Movement Interpolation (no pause at stepProgress===0!)
         if (!state.paused && !state.storyDialog && !state.missionResult) {
           const e = state.data.entityData;
+          const fo29 = state.data.entityFieldOffsets?.[29];
           const interpUnit = (uid, task) => {
             if (!task?.path || task.path.length === 0) return;
+            // Never sub-tick interpolate while the unit is standing still putting on / removing a hat (anim 147/148)
+            // or performing a stationary courtship animation (155..158) — otherwise 60fps slides +3px and snaps back to 0!
+            const curAnim = fo29 !== undefined ? (e[fo29 + uid] & 0xff) : 0;
+            const pendingHat =
+              (task.stepProgress || 0) === 0 &&
+              ((task.hatPutFrame !== undefined && task.hatPutFrame < 7) ||
+                (task.hatRemoveFrame !== undefined && task.hatRemoveFrame < 7));
+            if (pendingHat || curAnim === 147 || curAnim === 148 || (curAnim >= 155 && curAnim <= 158)) {
+              e[202 + uid] = 0;
+              e[303 + uid] = 0;
+              return;
+            }
             const ux = e[uid] & 0xff;
             const uy = e[101 + uid] & 0xff;
             const target = task.path[0];
