@@ -1,0 +1,4221 @@
+import {
+  LOGICAL_WIDTH,
+  LOGICAL_HEIGHT,
+  CELL_WIDTH,
+  CELL_HEIGHT,
+  createImageCache,
+  getFogState,
+  revealFog,
+  getMinimapRect,
+  renderOriginalMap,
+} from './render-original.js';
+import {
+  SCENARIOS,
+  BUILDINGS,
+  WEAPONS,
+  SPELLS,
+  getVillagerName,
+  getBuildingSpec,
+  canPlaceBuilding,
+  placeConstructionSite,
+  enterBuildingSlot,
+  enterBuildingWorkSlot,
+  enterRestHut,
+  exitBuildingSlot,
+  isUnitInsideBuilding,
+  clearUnitFromOccupancy,
+  finishConstructionSite,
+  upgradeBuilding,
+  demolishBuilding,
+  spawnNewbornVillager,
+  captureTribeCarryover,
+  loadScenarioFromMa,
+} from './scenario-loader.js';
+import {
+  DIFFICULTIES,
+  parseStoryD0,
+  getMissionDialogue,
+  evaluateMissionObjectives,
+  computeMissionScore,
+} from './campaign-story.js';
+import {
+  LANGUAGES,
+  loadLanguagePack,
+  getUiStrings,
+  getLocalizedScenarioName,
+  saveGameToStorage,
+  loadSaveMetadata,
+  loadGameFromStorage,
+  exportSaveJson,
+} from './storage-i18n.js';
+import {
+  SA_TRACK_NAMES,
+  parseOriginalPd0,
+  parseOriginalA,
+  PrehistoricMidiSynth,
+} from './audio-binary.js';
+
+const midiSynth = new PrehistoricMidiSynth();
+
+const canvas = document.querySelector('#game');
+const ctx = canvas.getContext('2d');
+ctx.imageSmoothingEnabled = false;
+
+const panelTitle = document.querySelector('#screen-title');
+const panelCopy = document.querySelector('#screen-copy');
+const choicesNode = document.querySelector('#choices');
+const helpNode = document.querySelector('#help-card');
+const noteNode = document.querySelector('#scope-note');
+const hintNode = document.querySelector('#control-hint');
+
+const DIRS = [
+  { dx: 1, dy: 0, dir: 0 },
+  { dx: 1, dy: 1, dir: 1 },
+  { dx: 0, dy: 1, dir: 2 },
+  { dx: -1, dy: 1, dir: 3 },
+  { dx: -1, dy: 0, dir: 4 },
+  { dx: -1, dy: -1, dir: 5 },
+  { dx: 0, dy: -1, dir: 6 },
+  { dx: 1, dy: -1, dir: 7 },
+];
+
+const PHASES = {
+  language: {
+    title: 'Chọn ngôn ngữ',
+    copy: 'Chọn ngôn ngữ hiển thị bằng chuột hoặc bàn phím. Luồng mở đầu dùng ảnh chụp đúng 240×320 từ bản gốc.',
+    options: ['TIẾNG VIỆT', 'FRANÇAIS', 'ITALIANO', 'DEUTSCH', 'ESPAÑOL'],
+    capture: 0,
+  },
+  music: {
+    title: 'Bật âm nhạc?',
+    copy: 'Chọn Bật hoặc Tắt 5 bản nhạc nền MIDI gốc giải mã trực tiếp từ file nhị phân /sa qua Web Audio API.',
+    options: ['BẬT ÂM NHẠC', 'TẮT ÂM NHẠC'],
+    capture: 1,
+  },
+  mainMenu: {
+    title: 'Trò chơi',
+    copy: 'Menu mở đầu dựng theo ảnh chụp từ JAR gốc. Chọn Bắt đầu trò chơi để vào chiến dịch.',
+    options: ['BẮT ĐẦU TRÒ CHƠI', 'TRỢ GIÚP', 'TUỲ CHỌN', 'VỀ TRÒ CHƠI', 'THOÁT'],
+    capture: 2,
+  },
+  mode: {
+    title: 'Chọn chế độ',
+    copy: 'Chọn Chiến dịch (10 màn có cốt truyện /0/d0 & mang bộ lạc), Trò chơi tuỳ chỉnh (chọn map & độ khó), hoặc chọn nhanh màn 1–10.',
+    options: ['CHIẾN DỊCH (10 MÀN)', 'TRÒ CHƠI TUỲ CHỈNH', 'CHỌN MÀN CHIẾN DỊCH (1–10)', 'QUAY LẠI'],
+    capture: 3,
+  },
+  campaignMenu: {
+    title: 'Chiến dịch',
+    copy: 'Chọn Độ khó và bắt đầu Chiến dịch Avnotaklu với đầy đủ cốt truyện gốc từ /0/d0.',
+    options: ['TIẾP TỤC', 'TRÒ CHƠI MỚI (MÀN 1)', 'ĐỘ KHÓ: DỄ', 'QUAY LẠI'],
+    capture: 4,
+  },
+};
+
+const CAPTURED_FLOW = {
+  campaignMenu: 4,
+  newGame: 5,
+  firstStory: 8,
+  gameplay: 24,
+};
+
+const captureCache = new Map();
+function getCaptureImage(frameIndex) {
+  const key = String(frameIndex).padStart(2, '0');
+  let img = captureCache.get(key);
+  if (!img) {
+    img = new Image();
+    img.src = `assets/campaign-captures/frame-${key}.png`;
+    img.onload = () => render();
+    captureCache.set(key, img);
+  }
+  return img;
+}
+
+const spriteCache = createImageCache(() => render());
+
+const state = {
+  phase: 'language',
+  selected: 0,
+  language: 0,
+  music: true,
+  campaignFrame: CAPTURED_FLOW.newGame,
+  baseData: null,
+  maBytes: null,
+  langPack: null,
+  showMinimap: false,
+  storyLines: [],
+  storyDialog: null,
+  missionResult: null,
+  victoryDismissed: false,
+  difficultyIndex: 0, // 0 = DỄ, 1 = KHÓ
+  isCustomGame: false,
+  customConfig: { scenarioIndex: 1, difficultyIndex: 0, abundantResources: false },
+  carryoverTribe: null,
+  missionStats: { buildingsBuilt: 0, enemiesKilled: 0, enemyBuildingsDestroyed: 0, initialEnemies: 0, initialEnemyBuildings: 0 },
+  scenarioIndex: 0,
+  data: null,
+  cameraX: 0,
+  cameraY: 0,
+  cursor: { x: 5, y: 9 },
+  selectedUnit: 0,
+  selectedUnits: new Set(),
+  groups: { 7: new Set(), 9: new Set() },
+  activeGroupId: 0,
+  selectionBox: null,
+  paused: false,
+  compareOriginal: false,
+  autoAI: false,
+  panelMode: 'main', // 'main' | 'build' | 'scenarios' | 'building'
+  selectedBuildingBid: 0,
+  buildType: null,
+  buildPreview: null,
+  animTick: 0,
+  lastAlertTick: -999,
+  food: 0,
+  wood: 0,
+  stone: 0,
+  tools: 0,
+  population: 9,
+  housingCap: 1,
+  message: 'Click hoặc kéo khung chọn dân làng, click đất/cây/địch để đi, thu thập hoặc chiến đấu.',
+  // Active tasks per villager: { kind: 'move'|'gather'|'return'|'build'|'hunt'|'rest'|'eat'|'workBuilding'|'attackUnit'|'attackBuilding', ... }
+  tasks: new Map(),
+  enemyTasks: new Map(),
+  treeWood: new Map(), // remaining wood per tree cell "x,y" (12 wood/tree; clears to grass when depleted)
+  activePath: [],
+  dustEffects: [],
+  projectiles: [],
+  popups: [],
+};
+
+function addPopup() {
+  // Original J2ME game has no floating text popups on the map (+2 gỗ, Ăn no, etc.)
+}
+
+function addDust(x, y, w, h) {
+  state.dustEffects.push({ x, y, w, h, frame: 0, maxFrames: 20 });
+}
+
+function syncResourcesToData() {
+  if (!state.data?.resources?.[0]) return;
+  const r = state.data.resources[0];
+  r[0] = state.food;
+  r[1] = state.wood;
+  r[2] = state.stone;
+  r[3] = state.tools;
+  r[11] = state.population;
+  r[16] = state.housingCap;
+}
+
+function getVillagerIds() {
+  if (!state.data) return [];
+  const e = state.data.entityData;
+  const ids = [];
+  for (let id = 1; id <= 50; id++) {
+    if ((e[1919 + id] & 0xff) > 0) ids.push(id);
+  }
+  return ids;
+}
+
+function getEnemyIds() {
+  if (!state.data) return [];
+  const e = state.data.entityData;
+  const ids = [];
+  for (let id = 51; id <= 100; id++) {
+    if ((e[1919 + id] & 0xff) > 0) ids.push(id);
+  }
+  return ids;
+}
+
+function getEnemyBuildings() {
+  if (!state.data) return [];
+  const e = state.data.entityData;
+  const list = [];
+  for (let bid = 31; bid <= 60; bid++) {
+    const hp = e[8505 + bid] & 0xff;
+    if (hp <= 0) continue;
+    const rawType = e[8749 + bid];
+    const isScaffold = rawType >= 12 && rawType <= 19;
+    const targetType = isScaffold ? e[9237 + bid] : rawType;
+    const spec = getBuildingSpec(state.data, targetType);
+    list.push({
+      bid,
+      bType: rawType,
+      targetType,
+      x: e[8383 + bid] & 0xff,
+      y: e[8444 + bid] & 0xff,
+      w: spec.width,
+      h: spec.height,
+      hp,
+      maxHp: Math.max(1, e[8566 + bid] & 0xff),
+      spec,
+    });
+  }
+  return list;
+}
+
+function getActiveSelectionIds() {
+  const living = new Set(getVillagerIds());
+  const out = [];
+  for (const id of state.selectedUnits) {
+    if (living.has(id)) out.push(id);
+  }
+  if (out.length === 0 && state.selectedUnit && living.has(state.selectedUnit)) {
+    out.push(state.selectedUnit);
+  }
+  return out;
+}
+
+function getCurrentDifficulty() {
+  return DIFFICULTIES[state.difficultyIndex] || DIFFICULTIES[0];
+}
+
+function getUnitDamage(unitId) {
+  const wId = state.data.entityData[6565 + unitId] & 0xff;
+  const w = WEAPONS.find((item) => item.id === wId);
+  const base = 5 + (w ? w.atk : 0);
+  if (unitId > 50) {
+    return Math.max(2, Math.round(base * getCurrentDifficulty().enemyAtkScale));
+  }
+  return base;
+}
+
+function getUnitRange(unitId) {
+  const wId = state.data.entityData[6565 + unitId] & 0xff;
+  if (wId === 2) return 4; // Giáo (spear throw)
+  if (wId === 1) return 3; // Đá ném (thrown stone)
+  return 1; // Melee
+}
+
+function alertCombat(msg, color = '#ff7b6b') {
+  if (state.animTick - state.lastAlertTick < 50) return;
+  state.lastAlertTick = state.animTick;
+  state.message = msg;
+  addPopup(state.cameraX + 5, state.cameraY + 4, msg, color);
+}
+
+function applyUnitDamage(attackerId, targetId, dmg) {
+  const d = state.data;
+  const e = d.entityData;
+  const curHp = e[1919 + targetId] & 0xff;
+  if (curHp <= 0) return true;
+  const nextHp = Math.max(0, curHp - dmg);
+  e[1919 + targetId] = nextHp;
+
+  const tx = e[targetId] & 0xff;
+  const ty = e[101 + targetId] & 0xff;
+  addPopup(tx, ty, `-${dmg}`, targetId <= 50 ? '#ff6f61' : '#ffd84d');
+
+  if (targetId <= 50 && attackerId > 50) {
+    alertCombat('Chúng ta đang bị tấn công!');
+    // Auto self-defense if idle player villager is struck
+    if (!state.tasks.has(targetId) && nextHp > 0) {
+      assignAttackTask(targetId, 'unit', attackerId);
+    }
+  } else if (targetId > 50 && attackerId <= 50) {
+    // Enemy retaliates if attacked
+    if (!state.enemyTasks.has(targetId) && nextHp > 0) {
+      assignEnemyAttack(targetId, 'unit', attackerId);
+    }
+  }
+
+  if (nextHp <= 0) {
+    exitBuildingSlot(d, targetId);
+    clearUnitFromOccupancy(d, targetId);
+    state.tasks.delete(targetId);
+    state.enemyTasks.delete(targetId);
+    state.selectedUnits.delete(targetId);
+    state.groups[7].delete(targetId);
+    state.groups[9].delete(targetId);
+    if (state.selectedUnit === targetId) {
+      state.selectedUnit = getVillagerIds()[0] || 0;
+      state.activePath = [];
+    }
+
+    if (targetId > 50) {
+      state.tools += 1;
+      state.missionStats.enemiesKilled++;
+      syncResourcesToData();
+      addPopup(tx, ty, 'Hạ địch! +1 xương', '#9cff7b');
+      state.message = 'Đã hạ gục chiến binh địch (+1 xương)!';
+    } else {
+      const deadName = getVillagerName(d, targetId);
+      state.population = getVillagerIds().length;
+      syncResourcesToData();
+      addPopup(tx, ty, `${deadName} tử trận!`, '#ff5252');
+      // Elect new Chief if Chief died!
+      if (d.resources?.[0]?.[17] === targetId) {
+        const survivors = getVillagerIds();
+        if (survivors.length > 0) {
+          d.resources[0][17] = survivors[0];
+          const newChief = getVillagerName(d, survivors[0]);
+          state.message = `${deadName} đã tử trận! ${newChief} trở thành Tộc trưởng mới!`;
+        } else {
+          state.message = 'Toàn bộ bộ lạc đã tử trận!';
+        }
+      }
+    }
+    return true;
+  }
+  return false;
+}
+
+function applyBuildingDamage(attackerId, bid, dmg) {
+  const d = state.data;
+  const e = d.entityData;
+  const curHp = e[8505 + bid] & 0xff;
+  if (curHp <= 0) return true;
+  const maxHp = Math.max(1, e[8566 + bid] & 0xff);
+  const nextHp = Math.max(0, curHp - dmg);
+  e[8505 + bid] = nextHp;
+
+  const bx = e[8383 + bid] & 0xff;
+  const by = e[8444 + bid] & 0xff;
+  addPopup(bx + 1, by, `-${dmg}`, '#ff944d');
+  if (nextHp > 0 && nextHp * 2 < maxHp) {
+    e[8627 + bid] = 2; // damaged burning state -> renders authentic fire flames d(110)!
+  }
+  if (bid <= 30 && attackerId > 50) {
+    alertCombat('Nhà của chúng ta đang bị tấn công!');
+  }
+
+  if (nextHp <= 0) {
+    const res = demolishBuilding(d, bid);
+    addDust(res.x, res.y, res.w, res.h);
+    addPopup(res.x + Math.floor(res.w / 2), res.y, 'Nhà đã bị phá hủy!', '#ff5252');
+    if (bid > 30) state.missionStats.enemyBuildingsDestroyed++;
+    state.message = bid > 30 ? `Đã phá hủy ${res.spec.name} của địch!` : `${res.spec.name} của ta đã bị phá hủy!`;
+    if (bid <= 30 && !res.isScaffold && res.spec.housingBonus > 0) {
+      state.housingCap = Math.max(1, state.housingCap - res.spec.housingBonus);
+      syncResourcesToData();
+    }
+    return true;
+  }
+  return false;
+}
+
+function launchProjectile(attackerId, targetType, targetId, x0, y0, x1, y1, weaponId, dmg) {
+  const dist = Math.max(1, Math.hypot(x1 - x0, y1 - y0));
+  state.projectiles.push({
+    attackerId,
+    targetType,
+    targetId,
+    x0,
+    y0,
+    x1,
+    y1,
+    weaponId,
+    dmg,
+    age: 0,
+    duration: Math.max(4, Math.round(dist * 2.5)),
+  });
+}
+
+function assignGroup(groupNum) {
+  const ids = getActiveSelectionIds();
+  if (ids.length === 0) {
+    state.message = 'Hãy chọn ít nhất 1 dân làng (hoặc kéo khung chọn nhóm) rồi gán nhóm.';
+    render();
+    return;
+  }
+  state.groups[groupNum] = new Set(ids);
+  state.activeGroupId = groupNum;
+  state.message = `Đã gán ${ids.length} chiến binh vào Nhóm ${groupNum}! Nhấn phím ${groupNum} hoặc nút ${groupNum} ở thanh đáy để gọi nhanh.`;
+  render();
+}
+
+function recallGroup(groupNum) {
+  const living = new Set(getVillagerIds());
+  const members = [...state.groups[groupNum]].filter((id) => living.has(id));
+  if (members.length === 0) {
+    assignGroup(groupNum);
+    return;
+  }
+  state.groups[groupNum] = new Set(members);
+  state.selectedUnits = new Set(members);
+  state.selectedUnit = members[0];
+  state.activeGroupId = groupNum;
+  centerOnUnit(members[0]);
+  state.message = `Đã gọi Nhóm ${groupNum} (${members.length} chiến binh). Click ô đất để hành quân hoặc click địch để tấn công!`;
+  render();
+}
+
+function rallyAllVillagers() {
+  const ids = getVillagerIds();
+  if (ids.length === 0) return;
+  state.selectedUnits = new Set(ids);
+  state.selectedUnit = ids[0];
+  state.activeGroupId = 0;
+  const cx = state.cursor.x;
+  const cy = state.cursor.y;
+  issueGroupMove(ids, cx, cy);
+  state.message = `Tập hợp! Toàn bộ ${ids.length} dân làng đang tập trung về (${cx}, ${cy}).`;
+  render();
+}
+
+function disbandGroupToWork() {
+  const ids = getActiveSelectionIds();
+  for (const id of ids) {
+    const task = state.tasks.get(id);
+    if (task && (task.kind === 'attackUnit' || task.kind === 'attackBuilding' || task.kind === 'move')) {
+      state.tasks.delete(id);
+      setUnitAnim(id, 8, 0);
+    }
+  }
+  state.activeGroupId = 0;
+  state.selectedUnits.clear();
+  if (state.selectedUnit) state.selectedUnits.add(state.selectedUnit);
+  state.message = 'Đã giải tán đội hình chiến đấu — dân làng trở lại trạng thái rảnh/làm việc.';
+  render();
+}
+
+function distanceToRect(x, y, rect) {
+  const dx = x < rect.x ? rect.x - x : x >= rect.x + rect.w ? x - (rect.x + rect.w - 1) : 0;
+  const dy = y < rect.y ? rect.y - y : y >= rect.y + rect.h ? y - (rect.y + rect.h - 1) : 0;
+  return Math.max(dx, dy);
+}
+
+function assignAttackTask(unitId, targetType, targetId) {
+  const d = state.data;
+  if (!d) return false;
+  const e = d.entityData;
+  if ((e[1919 + unitId] & 0xff) <= 0) return false;
+  ensureUnitOutside(unitId);
+  setUnitCarry(unitId, 0, 0);
+  const info = getVillagerInfo(unitId);
+  const range = getUnitRange(unitId);
+
+  if (targetType === 'unit') {
+    if ((e[1919 + targetId] & 0xff) <= 0) return false;
+    const ex = e[targetId] & 0xff;
+    const ey = e[101 + targetId] & 0xff;
+    const dist = Math.max(Math.abs(ex - info.x), Math.abs(ey - info.y));
+    const planned = dist <= range ? { path: [], stepProgress: 0 } : planUnitPath(unitId, ex, ey, true);
+    if (planned === null) return false;
+    state.tasks.set(unitId, {
+      kind: 'attackUnit',
+      path: planned.path,
+      stepProgress: planned.stepProgress,
+      targetId,
+      target: null,
+      workTicks: 0,
+      cooldown: 0,
+    });
+    if (state.selectedUnit === unitId) state.activePath = planned.path;
+    return true;
+  }
+
+  if (targetType === 'building') {
+    const bld = getEnemyBuildings().find((b) => b.bid === targetId);
+    if (!bld || bld.hp <= 0) return false;
+    const dist = distanceToRect(info.x, info.y, bld);
+    const planned = dist <= range ? { path: [], stepProgress: 0 } : planUnitPath(unitId, bld.x, bld.y, false, bld);
+    if (planned === null) return false;
+    state.tasks.set(unitId, {
+      kind: 'attackBuilding',
+      path: planned.path,
+      stepProgress: planned.stepProgress,
+      targetId,
+      target: bld,
+      workTicks: 0,
+      cooldown: 0,
+    });
+    if (state.selectedUnit === unitId) state.activePath = planned.path;
+    return true;
+  }
+  return false;
+}
+
+function assignEnemyAttack(enemyId, targetType, targetId) {
+  const d = state.data;
+  if (!d) return false;
+  const e = d.entityData;
+  if ((e[1919 + enemyId] & 0xff) <= 0) return false;
+  const ex = e[enemyId] & 0xff;
+  const ey = e[101 + enemyId] & 0xff;
+  const range = getUnitRange(enemyId);
+
+  if (targetType === 'unit') {
+    if ((e[1919 + targetId] & 0xff) <= 0) return false;
+    if (isUnitInsideBuilding(d, targetId)) {
+      const bid = e[4444 + targetId] & 0xff;
+      if (bid >= 1 && bid <= 30) return assignEnemyAttack(enemyId, 'building', bid);
+      return false;
+    }
+    const tx = e[targetId] & 0xff;
+    const ty = e[101 + targetId] & 0xff;
+    const dist = Math.max(Math.abs(tx - ex), Math.abs(ty - ey));
+    const path = dist <= range ? [] : findPath(ex, ey, tx, ty, enemyId, true);
+    if (path === null) return false;
+    state.enemyTasks.set(enemyId, {
+      kind: 'attackUnit',
+      path,
+      stepProgress: 0,
+      targetId,
+      target: null,
+      workTicks: 0,
+      cooldown: 0,
+    });
+    return true;
+  }
+
+  if (targetType === 'building') {
+    const bld = getPlayerBuildings().find((b) => b.bid === targetId);
+    if (!bld || bld.hp <= 0) return false;
+    const dist = distanceToRect(ex, ey, bld);
+    const path = dist <= range ? [] : findPath(ex, ey, bld.x, bld.y, enemyId, false, bld);
+    if (path === null) return false;
+    state.enemyTasks.set(enemyId, {
+      kind: 'attackBuilding',
+      path,
+      stepProgress: 0,
+      targetId,
+      target: bld,
+      workTicks: 0,
+      cooldown: 0,
+    });
+    return true;
+  }
+  return false;
+}
+
+function issueGroupMove(unitIds, tx, ty) {
+  const d = state.data;
+  if (!d || unitIds.length === 0) return 0;
+  const offsets = [{ dx: 0, dy: 0 }];
+  for (let r = 1; r <= 3; r++) {
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) === r) offsets.push({ dx, dy });
+      }
+    }
+  }
+  const reserved = new Set();
+  let dispatched = 0;
+  for (const uid of unitIds) {
+    ensureUnitOutside(uid);
+    setUnitCarry(uid, 0, 0);
+    const info = getVillagerInfo(uid);
+    let assigned = false;
+    for (const off of offsets) {
+      const gx = tx + off.dx;
+      const gy = ty + off.dy;
+      const key = `${gx},${gy}`;
+      if (reserved.has(key)) continue;
+      if (!isWalkable(gx, gy, uid)) continue;
+      const planned = planUnitPath(uid, gx, gy, false);
+      if (planned !== null) {
+        reserved.add(key);
+        if (planned.path.length > 0) {
+          state.tasks.set(uid, {
+            kind: 'move',
+            path: planned.path,
+            stepProgress: planned.stepProgress,
+            target: { x: gx, y: gy },
+            workTicks: 0,
+          });
+        } else {
+          state.tasks.delete(uid);
+          setUnitAnim(uid, 8, 0);
+        }
+        if (state.selectedUnit === uid) state.activePath = planned.path;
+        dispatched++;
+        assigned = true;
+        break;
+      }
+    }
+    if (!assigned && state.selectedUnit === uid) state.activePath = [];
+  }
+  return dispatched;
+}
+
+function issueGroupAttack(unitIds, targetType, targetId) {
+  let dispatched = 0;
+  for (const uid of unitIds) {
+    if (assignAttackTask(uid, targetType, targetId)) dispatched++;
+  }
+  return dispatched;
+}
+
+function attackNearestEnemy() {
+  const d = state.data;
+  const activeIds = getActiveSelectionIds();
+  if (!d || activeIds.length === 0) return;
+  const e = d.entityData;
+  const lead = getVillagerInfo(activeIds[0]);
+  const enemies = getEnemyIds();
+  if (enemies.length > 0) {
+    let bestEid = enemies[0];
+    let bestDist = Infinity;
+    for (const eid of enemies) {
+      const dist = Math.abs((e[eid] & 0xff) - lead.x) + Math.abs((e[101 + eid] & 0xff) - lead.y);
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestEid = eid;
+      }
+    }
+    const ex = e[bestEid] & 0xff;
+    const ey = e[101 + bestEid] & 0xff;
+    const dispatched = issueGroupAttack(activeIds, 'unit', bestEid);
+    if (dispatched > 0) {
+      state.cursor = { x: ex, y: ey };
+      centerOnUnit(activeIds[0]);
+      state.message = `${dispatched} chiến binh đang tiến quân tấn công địch gần nhất tại (${ex}, ${ey})!`;
+      render();
+      return;
+    }
+    // If enemy is beyond BFS limit (>1400 tiles), march step-by-step toward enemy direction
+    const stepX = Math.max(1, Math.min(d.width - 2, lead.x + Math.sign(ex - lead.x) * Math.min(10, Math.abs(ex - lead.x))));
+    const stepY = Math.max(1, Math.min(d.height - 2, lead.y + Math.sign(ey - lead.y) * Math.min(10, Math.abs(ey - lead.y))));
+    const moved = issueGroupMove(activeIds, stepX, stepY);
+    state.message = moved > 0 ? `${moved} chiến binh đang trinh sát tiến về phía địch (${ex}, ${ey})!` : `Địch đang ở (${ex}, ${ey}) — hãy dò đường quanh sông/rừng!`;
+    render();
+    return;
+  }
+  const eblds = getEnemyBuildings();
+  if (eblds.length > 0) {
+    const bld = eblds[0];
+    const dispatched = issueGroupAttack(activeIds, 'building', bld.bid);
+    state.message = dispatched > 0 ? `${dispatched} chiến binh đang tiến công ${bld.spec.name} của địch!` : `Nhà địch tại (${bld.x}, ${bld.y}).`;
+    render();
+    return;
+  }
+  state.message = 'Không còn quân địch hay nhà địch nào trên bản đồ!';
+  render();
+}
+
+function getPlayerBuildings() {
+  if (!state.data) return [];
+  const e = state.data.entityData;
+  const list = [];
+  for (let bid = 1; bid <= 30; bid++) {
+    const hp = e[8505 + bid] & 0xff;
+    if (hp <= 0) continue;
+    const rawType = e[8749 + bid];
+    const isScaffold = rawType >= 12 && rawType <= 19;
+    const targetType = isScaffold ? e[9237 + bid] : rawType;
+    const spec = getBuildingSpec(state.data, targetType);
+    list.push({
+      bid,
+      bType: rawType,
+      targetType,
+      x: e[8383 + bid] & 0xff,
+      y: e[8444 + bid] & 0xff,
+      w: spec.width,
+      h: spec.height,
+      hp,
+      maxHp: e[8566 + bid] & 0xff,
+      underConstruction: isScaffold || e[8627 + bid] === 1,
+      spec,
+    });
+  }
+  return list;
+}
+
+function getWildAnimals() {
+  if (!state.data) return [];
+  const e = state.data.entityData;
+  const list = [];
+  for (let aid = 0; aid < 22; aid++) {
+    const hp = e[9513 + aid] & 0xff;
+    if (hp <= 0) continue;
+    list.push({
+      aid,
+      occ: 101 + aid,
+      x: e[9359 + aid] & 0xff,
+      y: e[9381 + aid] & 0xff,
+      hp,
+    });
+  }
+  return list;
+}
+
+function getVillagerInfo(id) {
+  const e = state.data.entityData;
+  const insideBid = isUnitInsideBuilding(state.data, id) ? e[4444 + id] & 0xff : 0;
+  const x = insideBid > 0 ? e[8383 + insideBid] & 0xff : e[id] & 0xff;
+  const y = insideBid > 0 ? e[8444 + insideBid] & 0xff : e[101 + id] & 0xff;
+  const hp = e[1919 + id] & 0xff;
+  const maxHp = Math.max(1, e[6767 + id] & 0xff);
+  const energy = Math.min(100, e[2020 + id] & 0xff);
+  const satiety = Math.min(100, e[2121 + id] & 0xff);
+  const minNeed = Math.min(satiety, energy);
+  const moodIdx = minNeed >= 55 ? 0 : minNeed >= 35 ? 1 : minNeed >= 18 ? 2 : 3;
+  const age = e[1414 + id] & 0xff;
+  const sex = e[1515 + id] === 1 ? 'Nữ' : 'Nam';
+  const weaponId = e[6565 + id] & 0xff;
+  const weaponObj = WEAPONS.find((w) => w.id === weaponId) || null;
+  const role = getVillagerName(state.data, id);
+  return { id, role, x, y, hp, maxHp, energy, satiety, moodIdx, age, sex, weaponId, weaponName: weaponObj ? weaponObj.name : 'Tay không', insideBid };
+}
+
+function syncUnitJobBadge(unitId) {
+  if (!state.data) return;
+  const e = state.data.entityData;
+  const task = state.tasks.get(unitId);
+  let badge = 0; // 0 = Idle/None (mo[41][69] = 0)
+  if (task) {
+    if (task.kind === 'gather' || task.kind === 'return') {
+      const t = task.kind === 'gather' ? task.target?.type : task.carrying?.type;
+      const cs = task.kind === 'gather' ? task.target?.carrySprite : task.carrying?.carrySprite;
+      if (t === 'wood') badge = 2;
+      else if (t === 'stone') badge = 5;
+      else if (t === 'fish') badge = 4;
+      else if (t === 'bones') badge = 7;
+      else if (t === 'food') badge = cs === 1 ? 3 : cs === 6 ? 6 : 1;
+    } else if (task.kind === 'build') {
+      badge = 12; // authentic builder badge (mo[41][56] = 12)
+    } else if (task.kind === 'hunt' || task.kind === 'eat') {
+      badge = 3; // authentic meat/hunt/eat badge (mo[41][12] = 3)
+    } else if (task.kind === 'attackUnit' || task.kind === 'attackBuilding') {
+      badge = 14; // authentic combat badge (sprite 591)
+    } else if (task.kind === 'workBuilding') {
+      const bt = task.target?.targetType;
+      if (bt === 4) badge = 9; // Bếp (Chef cooking pot badge: mo[41][54] = 9)
+      else if (bt === 8) badge = 11; // Khu thánh địa (Shaman: mo[41][57] = 11)
+      else if (bt === 0 || bt === 1 || bt === 5) badge = 8; // Weapons / Training
+      else badge = 0;
+    }
+  }
+  e[2222 + unitId] = badge;
+}
+
+function setUnitCarry(unitId, carrySpriteId, amount) {
+  const e = state.data.entityData;
+  e[3535 + unitId] = carrySpriteId;
+  e[3636 + unitId] = amount;
+}
+
+function ensureUnitOutside(unitId) {
+  if (isUnitInsideBuilding(state.data, unitId)) {
+    exitBuildingSlot(state.data, unitId);
+  }
+}
+
+function isWalkable(x, y, movingUnitId) {
+  const d = state.data;
+  if (!d || x < 0 || y < 0 || x >= d.width || y >= d.height) return false;
+  const occ = d.occupancy[y][x];
+  const isFriend =
+    movingUnitId >= 1 && movingUnitId <= 50
+      ? occ >= 1 && occ <= 50
+      : movingUnitId >= 51 && movingUnitId <= 100
+        ? occ >= 51 && occ <= 100
+        : false;
+  if (occ === 0 || occ === movingUnitId || isFriend) {
+    const tile = d.terrain[y][x] & 0xff;
+    return tile < 175;
+  }
+  return false;
+}
+
+function setUnitOnTile(d, unitId, x, y) {
+  if (y < 0 || y >= d.height || x < 0 || x >= d.width) return;
+  const curOcc = d.occupancy[y][x];
+  // Never overwrite a building (-1..-60) or resource prop (-61..-127)
+  if (curOcc >= 0) {
+    d.occupancy[y][x] = unitId;
+  }
+}
+
+function clearUnitTile(d, unitId, x, y) {
+  clearUnitFromOccupancy(d, unitId);
+  // If another living villager/warrior is still standing on (x, y), restore their occupancy so they never turn invisible!
+  const e = d.entityData;
+  for (let id = 1; id <= 100; id++) {
+    if (id === unitId) continue;
+    if ((e[1919 + id] & 0xff) <= 0) continue;
+    if (isUnitInsideBuilding(d, id)) continue;
+    if ((e[id] & 0xff) === x && (e[101 + id] & 0xff) === y) {
+      if (d.occupancy[y]?.[x] === 0) d.occupancy[y][x] = id;
+      break;
+    }
+  }
+}
+
+function findPath(sx, sy, tx, ty, movingUnitId, allowAdjacent = false, targetRect = null) {
+  const d = state.data;
+  if (!allowAdjacent && !targetRect && sx === tx && sy === ty) return [];
+  const maxX = d.width;
+  const maxY = d.height;
+  const visited = new Uint8Array(maxX * maxY);
+  const parent = new Int32Array(maxX * maxY).fill(-1);
+  const queue = [];
+  const startKey = sy * maxX + sx;
+  visited[startKey] = 1;
+  queue.push(startKey);
+
+  function isGoal(cx, cy) {
+    if (targetRect) {
+      const dx = cx < targetRect.x ? targetRect.x - cx : cx >= targetRect.x + targetRect.w ? cx - (targetRect.x + targetRect.w - 1) : 0;
+      const dy = cy < targetRect.y ? targetRect.y - cy : cy >= targetRect.y + targetRect.h ? cy - (targetRect.y + targetRect.h - 1) : 0;
+      return Math.max(dx, dy) <= 1;
+    }
+    if (cx === tx && cy === ty) return true;
+    if (allowAdjacent && Math.max(Math.abs(cx - tx), Math.abs(cy - ty)) === 1) return true;
+    return false;
+  }
+
+  let goalKey = -1;
+  let head = 0;
+
+  while (head < queue.length && head < 4000) {
+    const cur = queue[head++];
+    const cx = cur % maxX;
+    const cy = (cur - cx) / maxX;
+
+    if (isGoal(cx, cy)) {
+      goalKey = cur;
+      break;
+    }
+
+    for (const step of DIRS) {
+      const nx = cx + step.dx;
+      const ny = cy + step.dy;
+      if (nx < 0 || ny < 0 || nx >= maxX || ny >= maxY) continue;
+      const nKey = ny * maxX + nx;
+      if (visited[nKey]) continue;
+      if (!isWalkable(nx, ny, movingUnitId)) continue;
+      // Prevent diagonal corner-cutting across building corners, trees, cliffs, or water!
+      if (step.dx !== 0 && step.dy !== 0) {
+        if (!isWalkable(cx + step.dx, cy, movingUnitId) || !isWalkable(cx, cy + step.dy, movingUnitId)) {
+          continue;
+        }
+      }
+      visited[nKey] = 1;
+      parent[nKey] = cur;
+      queue.push(nKey);
+    }
+  }
+
+  if (goalKey === -1) return null;
+  const path = [];
+  let k = goalKey;
+  while (k !== startKey && k !== -1) {
+    const x = k % maxX;
+    const y = (k - x) / maxX;
+    path.push({ x, y });
+    k = parent[k];
+  }
+  path.reverse();
+  return path;
+}
+
+/**
+ * Smooth mid-step path planner (port of b.java:1320):
+ * If the villager is currently mid-step toward `inFlight = curTask.path[0]` (`stepProgress > 0`),
+ * finish that current step seamlessly and route from `inFlight` to the new destination so the
+ * villager never snaps backward or stutters when the player clicks rapidly across the map!
+ */
+function planUnitPath(unitId, tx, ty, allowAdjacent = false, targetRect = null) {
+  const curTask = state.tasks.get(unitId);
+  if (curTask && curTask.path?.length > 0 && curTask.stepProgress > 0) {
+    const inFlight = curTask.path[0];
+    const tail = findPath(inFlight.x, inFlight.y, tx, ty, unitId, allowAdjacent, targetRect);
+    if (tail !== null) {
+      return {
+        path: [inFlight, ...tail],
+        stepProgress: curTask.stepProgress,
+      };
+    }
+  }
+  const e = state.data.entityData;
+  e[202 + unitId] = 0;
+  e[303 + unitId] = 0;
+  const info = getVillagerInfo(unitId);
+  const path = findPath(info.x, info.y, tx, ty, unitId, allowAdjacent, targetRect);
+  if (path === null) return null;
+  return { path, stepProgress: 0 };
+}
+
+function directionFromDelta(dx, dy) {
+  const found = DIRS.find((d) => d.dx === Math.sign(dx) && d.dy === Math.sign(dy));
+  return found ? found.dir : 2;
+}
+
+function clampCamera() {
+  const d = state.data;
+  if (!d) return;
+  const maxCamX = Math.max(0, d.width - (d.viewportColumns || 11));
+  const maxCamY = Math.max(0, d.height - (d.viewportRows || 18));
+  state.cameraX = Math.max(0, Math.min(maxCamX, state.cameraX));
+  state.cameraY = Math.max(0, Math.min(maxCamY, state.cameraY));
+}
+
+function ensureCursorInView() {
+  const d = state.data;
+  if (!d) return;
+  const cols = d.viewportColumns || 11;
+  const rows = d.viewportRows || 18;
+  const marginX = 2;
+  const marginY = 3;
+  if (state.cursor.x < state.cameraX + marginX) state.cameraX = state.cursor.x - marginX;
+  if (state.cursor.x >= state.cameraX + cols - marginX) state.cameraX = state.cursor.x - cols + marginX + 1;
+  if (state.cursor.y < state.cameraY + marginY) state.cameraY = state.cursor.y - marginY;
+  if (state.cursor.y >= state.cameraY + rows - marginY) state.cameraY = state.cursor.y - rows + marginY + 1;
+  clampCamera();
+}
+
+function centerOnUnit(unitId) {
+  const d = state.data;
+  if (!d || !unitId) return;
+  const info = getVillagerInfo(unitId);
+  state.cursor = { x: info.x, y: info.y };
+  state.cameraX = Math.round(info.x - (d.viewportColumns || 11) / 2);
+  state.cameraY = Math.round(info.y - (d.viewportRows || 18) / 2);
+  clampCamera();
+}
+
+function setUnitAnim(unitId, animId, frame = 0) {
+  const d = state.data;
+  const fo = d.entityFieldOffsets;
+  if (!fo) return;
+  d.entityData[fo[29] + unitId] = animId;
+  d.entityData[fo[30] + unitId] = frame;
+}
+
+function updateBuildPreview() {
+  if (state.buildType === null || !state.data) {
+    state.buildPreview = null;
+    return;
+  }
+  const spec = getBuildingSpec(state.data, state.buildType);
+  const bx = Math.max(1, Math.min(state.data.width - spec.width - 1, state.cursor.x));
+  const by = Math.max(1, Math.min(state.data.height - spec.height - 1, state.cursor.y));
+  state.buildPreview = {
+    bType: state.buildType,
+    x: bx,
+    y: by,
+    width: spec.width,
+    height: spec.height,
+    valid: canPlaceBuilding(state.data, state.buildType, bx, by),
+    spec,
+  };
+}
+
+function startBuildPlacement(bType) {
+  const spec = getBuildingSpec(state.data, bType);
+  if (state.wood < spec.woodCost || state.stone < spec.stoneCost || state.tools < spec.toolsCost) {
+    state.message = `Cần ${spec.woodCost} gỗ, ${spec.stoneCost} đá${spec.toolsCost ? `, ${spec.toolsCost} công cụ` : ''} để xây ${spec.name}.`;
+    render();
+    return;
+  }
+  state.buildType = bType;
+  state.panelMode = 'main';
+  updateBuildPreview();
+  state.message = `Đặt ${spec.name} (${spec.width}×${spec.height}): click vùng ô màu xanh để xây, hoặc nhấn Esc để hủy.`;
+  render();
+}
+
+function cancelBuildPlacement() {
+  state.buildType = null;
+  state.buildPreview = null;
+}
+
+function findNearestVillager(x, y, preferIdle = true) {
+  const ids = getVillagerIds();
+  let best = 0;
+  let bestScore = Infinity;
+  for (const id of ids) {
+    const info = getVillagerInfo(id);
+    const busyPenalty = preferIdle && state.tasks.has(id) ? 40 : 0;
+    const score = Math.abs(info.x - x) + Math.abs(info.y - y) + busyPenalty;
+    if (score < bestScore) {
+      bestScore = score;
+      best = id;
+    }
+  }
+  return best;
+}
+
+function isWearingJobHat(unitId) {
+  const job = state.data?.entityData?.[6464 + unitId] & 0xff;
+  return job === 38 || job === 54 || job === 57 || job === 86;
+}
+
+function assignBuildTask(unitId, bld, carryWood = false) {
+  ensureUnitOutside(unitId);
+  const planned = planUnitPath(unitId, bld.x, bld.y, false, bld);
+  if (planned === null) return false;
+  const e = state.data.entityData;
+  const needHatAnim = (e[6464 + unitId] & 0xff) !== 38;
+  // During the 14-frame hat-putting animation (anim 147 / -109), hands are free; wood log is hoisted right after
+  if (!needHatAnim && carryWood) setUnitCarry(unitId, 2, 1);
+  else setUnitCarry(unitId, 0, 0);
+  state.tasks.set(unitId, {
+    kind: 'build',
+    path: planned.path,
+    stepProgress: planned.stepProgress,
+    target: bld,
+    insideSlot: null,
+    workTicks: 0,
+    hatJob: 38, // 38 -> badge 12 -> hatCode 2 (builder hard hat)
+    hatPutFrame: needHatAnim ? 0 : 14,
+    carryWoodAfterHat: Boolean(carryWood),
+  });
+  if (state.selectedUnit === unitId) state.activePath = planned.path;
+  return true;
+}
+
+function confirmBuildAtCursor() {
+  updateBuildPreview();
+  const bp = state.buildPreview;
+  if (!bp || !bp.valid) {
+    state.message = 'Vị trí này bị vướng vật cản. Hãy di chuyển tới bãi đất/cỏ trống (màu xanh).';
+    render();
+    return;
+  }
+  const spec = bp.spec;
+  if (state.wood < spec.woodCost || state.stone < spec.stoneCost || state.tools < spec.toolsCost) {
+    state.message = `Không đủ nguyên liệu để xây ${spec.name}!`;
+    cancelBuildPlacement();
+    render();
+    return;
+  }
+
+  state.wood -= spec.woodCost;
+  state.stone -= spec.stoneCost;
+  state.tools -= spec.toolsCost;
+  const bid = placeConstructionSite(state.data, bp.bType, bp.x, bp.y, 0);
+  if (bid < 0) {
+    state.message = 'Đã đạt giới hạn công trình trên bản đồ.';
+    cancelBuildPlacement();
+    render();
+    return;
+  }
+
+  syncResourcesToData();
+  addPopup(bp.x + Math.floor(bp.width / 2), bp.y, `Công trường ${spec.name}`, '#ffd84d');
+
+  // Dispatch selected or nearest villager carrying wood to enter the scaffold and build
+  const builderId = state.selectedUnit || findNearestVillager(bp.x, bp.y, true);
+  const bldObj = { bid, x: bp.x, y: bp.y, w: bp.width, h: bp.height, spec };
+  if (builderId && assignBuildTask(builderId, bldObj, true)) {
+    const info = getVillagerInfo(builderId);
+    state.message = `Đã dựng công trường ${spec.name}! ${info.role} đang vác gỗ vào công trường thi công.`;
+  } else {
+    state.message = `Đã dựng công trường ${spec.name} tại (${bp.x}, ${bp.y}). Click dân rồi click công trường để xây.`;
+  }
+  cancelBuildPlacement();
+  render();
+}
+
+function selectUnit(unitId) {
+  state.selectedUnit = unitId;
+  state.selectedUnits = new Set([unitId]);
+  state.activeGroupId = 0;
+  const info = getVillagerInfo(unitId);
+  state.cursor = { x: info.x, y: info.y };
+  const task = state.tasks.get(unitId);
+  state.activePath = task ? task.path : [];
+  const taskNote = task ? ` · Nhiệm vụ: ${describeTask(task)}` : '';
+  state.message = `Đã chọn ${info.role} (${info.sex}, ${info.age}t, HP ${info.hp}/${info.maxHp})${taskNote}.`;
+  ensureCursorInView();
+  render();
+}
+
+function describeTask(task) {
+  if (!task) return 'Rảnh';
+  if (task.kind === 'gather') return task.target.type === 'fish' ? 'Đánh cá' : `Thu thập ${task.target.label}`;
+  if (task.kind === 'return') return `Vác ${task.carrying?.label || 'tài nguyên'} về trại`;
+  if (task.kind === 'build') return `Xây ${task.target.spec.name}`;
+  if (task.kind === 'hunt') return 'Săn thú hoang';
+  if (task.kind === 'attackUnit') return 'Chiến đấu với địch';
+  if (task.kind === 'attackBuilding') return `Phá hủy ${task.target?.spec?.name || 'nhà địch'}`;
+  if (task.kind === 'rest') return 'Nghỉ ngủ trong Lều';
+  if (task.kind === 'eat') return 'Đi ăn';
+  if (task.kind === 'workBuilding') return `Làm việc tại ${task.target.spec.name}`;
+  return 'Di chuyển';
+}
+
+function cycleUnit() {
+  const ids = getVillagerIds();
+  if (ids.length === 0) return;
+  const idx = ids.indexOf(state.selectedUnit);
+  const nextId = ids[(idx + 1) % ids.length];
+  selectUnit(nextId);
+}
+
+function classifyGatherable(x, y) {
+  const d = state.data;
+  if (!d || x < 0 || y < 0 || x >= d.width || y >= d.height) return null;
+  const occ = d.occupancy[y][x];
+  const tile = d.terrain[y][x] & 0xff;
+  // Resource props (-61..-110) mapped strictly by mo[16][22+kind], mo[40], mo[41] from /a
+  if (occ <= -61 && occ >= -110) {
+    const idx = -occ - 61;
+    const kind = d.entityData[9833 + idx];
+    if (kind === 0) return null;
+    const rem = d.entityData[9883 + idx] & 0xff;
+    // Empty berry bushes / mushrooms (stage 0, rem === 0) cannot be picked until berries regrow (b.java:4660-4675)
+    if (kind !== 5 && rem <= 0) return null;
+    if (kind === 5) {
+      return { x, y, type: 'fish', label: 'cá', carrySprite: 7, occ, propIdx: idx }; // job 13: fish school
+    }
+    if (kind === 4) {
+      return { x, y, type: 'food', label: 'nấm', carrySprite: 6, occ, propIdx: idx }; // job 15: mushrooms/food
+    }
+    if (kind === 6) {
+      return { x, y, type: 'food', label: 'thịt', carrySprite: 1, occ, propIdx: idx }; // job 12: meat carcass
+    }
+    if (kind === 7) {
+      return { x, y, type: 'bones', label: 'xương', carrySprite: 4, occ, propIdx: idx }; // job 16: bones
+    }
+    // kind 1, 2, 3 -> job 10: berries/fruit bushes (mo[40][10]=5, mo[41][10]=1)
+    return { x, y, type: 'food', label: 'hoa quả', carrySprite: 5, occ, propIdx: idx };
+  }
+  // occ === -125 is stone cliff/quarry (f.java:6229, mo[16][31]=14 -> carrySprite 3, badge 5)
+  if (occ === -125) {
+    return { x, y, type: 'stone', label: 'đá', carrySprite: 3, occ };
+  }
+  // occ === -127 is fishing shoreline adjacent to fish school kind===5 (f.java:6247-6250)
+  if (occ === -127) {
+    return { x, y, type: 'fish', label: 'cá', carrySprite: 7, occ };
+  }
+  // occ === -124 / tiles 180..231 are trees (f.java:6233, mo[16][30]=11 -> carrySprite 2, badge 2)
+  if (occ === -124 || (tile >= 180 && tile <= 231)) {
+    return { x, y, type: 'wood', label: 'gỗ', carrySprite: 2, tile };
+  }
+  return null;
+}
+
+function depleteGatherTarget(gt, amount) {
+  const d = state.data;
+  if (!d || !gt) return false;
+  if (gt.type === 'wood') {
+    const key = `${gt.x},${gt.y}`;
+    const cur = state.treeWood.has(key) ? state.treeWood.get(key) : 12;
+    const next = cur - amount;
+    if (next <= 0) {
+      state.treeWood.delete(key);
+      d.terrain[gt.y][gt.x] = 0; // felled tree clears into grass tile!
+      d.occupancy[gt.y][gt.x] = 0;
+      addPopup(gt.x, gt.y, 'Đốn xong cây!', '#c5f285');
+      return true;
+    }
+    state.treeWood.set(key, next);
+    return false;
+  }
+  if (gt.propIdx !== undefined) {
+    const e = d.entityData;
+    const idx = gt.propIdx;
+    const kind = e[9833 + idx] & 0xff;
+    if (kind === 5) return false; // fish school in water is renewable
+    const maxCap = (d.mapTableData?.[d.mapTableOffsets?.[110] + kind] & 0xff) || 20;
+    const cur = e[9883 + idx] & 0xff;
+    const next = Math.max(0, cur - amount);
+    e[9883 + idx] = next;
+    // Update visual stage e[9933+idx] (3=full fruit, 2=medium, 1=sparse, 0=bare green bush; b.java:4669)
+    const ratio = next / Math.max(1, maxCap);
+    e[9933 + idx] = next <= 0 ? 0 : ratio <= 0.35 ? 1 : ratio <= 0.7 ? 2 : 3;
+
+    if (next <= 0) {
+      if (kind === 6) {
+        // Fresh meat carcass turns into skeleton bones (kind 7, b.java:4707-4709)
+        e[9833 + idx] = 7;
+        e[9883 + idx] = 15;
+        e[9933 + idx] = 3;
+      } else if (kind === 7) {
+        // Skeleton bones disappear completely into grass (b.java:4702-4705)
+        e[9833 + idx] = 0;
+        d.occupancy[gt.y][gt.x] = 0;
+        if ((d.terrain[gt.y][gt.x] & 0xff) >= 175) d.terrain[gt.y][gt.x] = 0;
+      } else {
+        // Berry bushes & mushrooms (kind 1..4) stay as bare bushes (stage 0) on grass and regrow over time!
+        addPopup(gt.x, gt.y, 'Bụi cây đã hết quả!', '#ffd84d');
+      }
+      return true;
+    }
+    return false;
+  }
+  return false; // water/stone cliff is renewable
+}
+
+function assignRestTask(unitId, hut) {
+  ensureUnitOutside(unitId);
+  setUnitCarry(unitId, 0, 0);
+  const planned = planUnitPath(unitId, hut.x, hut.y, false, hut);
+  if (planned === null) return false;
+  state.tasks.set(unitId, {
+    kind: 'rest',
+    path: planned.path,
+    stepProgress: planned.stepProgress,
+    target: hut,
+    insideSlot: null,
+    workTicks: 0,
+  });
+  if (state.selectedUnit === unitId) state.activePath = planned.path;
+  return true;
+}
+
+function assignEatTask(unitId, foodBuilding) {
+  ensureUnitOutside(unitId);
+  setUnitCarry(unitId, 0, 0);
+  const planned = planUnitPath(unitId, foodBuilding.x, foodBuilding.y, false, foodBuilding);
+  if (planned === null) return false;
+  state.tasks.set(unitId, {
+    kind: 'eat',
+    path: planned.path,
+    stepProgress: planned.stepProgress,
+    target: foodBuilding,
+    workTicks: 0,
+  });
+  if (state.selectedUnit === unitId) state.activePath = planned.path;
+  return true;
+}
+
+function assignWorkAtBuilding(unitId, bld) {
+  ensureUnitOutside(unitId);
+  setUnitCarry(unitId, 0, 0);
+  const planned = planUnitPath(unitId, bld.x, bld.y, false, bld);
+  if (planned === null) return false;
+  const bt = bld.targetType;
+  // Authentic job hats: 4=Bếp (54 Chef hat), 7=Sàn Disco (86 DJ hat), 8=Khu thánh địa (57 Shaman hat)
+  const hatJob = bt === 4 ? 54 : bt === 7 ? 86 : bt === 8 ? 57 : 69;
+  const curHat = state.data.entityData[6464 + unitId] & 0xff;
+  const needPutHat = hatJob !== 69 && curHat !== hatJob;
+  const needRemoveHat = hatJob === 69 && isWearingJobHat(unitId);
+  state.tasks.set(unitId, {
+    kind: 'workBuilding',
+    path: planned.path,
+    stepProgress: planned.stepProgress,
+    target: bld,
+    insideSlot: null,
+    workTicks: 0,
+    hatJob,
+    hatPutFrame: needPutHat ? 0 : 14,
+    hatRemoveFrame: needRemoveHat ? 0 : 7,
+  });
+  if (state.selectedUnit === unitId) state.activePath = planned.path;
+  return true;
+}
+
+function craftAndEquipWeapon(weapon) {
+  if (!state.selectedUnit) {
+    state.message = 'Hãy chọn một dân làng trước để trang bị vũ khí!';
+    render();
+    return;
+  }
+  if (state.wood < weapon.wood || state.stone < weapon.stone || state.tools < weapon.bones) {
+    state.message = `Cần 🪵${weapon.wood} 🪨${weapon.stone} 🦴${weapon.bones} để chế tạo ${weapon.name}.`;
+    render();
+    return;
+  }
+  state.wood -= weapon.wood;
+  state.stone -= weapon.stone;
+  state.tools -= weapon.bones;
+  state.data.entityData[6565 + state.selectedUnit] = weapon.id;
+  syncResourcesToData();
+  const info = getVillagerInfo(state.selectedUnit);
+  addPopup(info.x, info.y, `Trang bị ${weapon.name}!`, '#ffd84d');
+  state.message = `${info.role} đã nhận vũ khí mới: ${weapon.name} (sức đánh +${weapon.atk})!`;
+  render();
+}
+
+function castShamanSpell(spell) {
+  if (state.tools < spell.bones) {
+    state.message = `Cần ${spell.bones} xương để thi triển phép ${spell.name}.`;
+    render();
+    return;
+  }
+  state.tools -= spell.bones;
+  const e = state.data.entityData;
+  const ids = getVillagerIds();
+  if (spell.id === 'heal') {
+    for (const id of ids) {
+      e[1919 + id] = e[6767 + id];
+      e[2222 + id] = 0;
+    }
+    state.message = 'Pháp sư thi triển Chữa vết thương: toàn bộ bộ lạc đã hồi đầy máu!';
+  } else if (spell.id === 'shield') {
+    for (const id of ids) {
+      const nextMax = Math.min(120, (e[6767 + id] & 0xff) + 10);
+      e[6767 + id] = nextMax;
+      e[1919 + id] = Math.min(nextMax, (e[1919 + id] & 0xff) + 10);
+    }
+    state.message = 'Pháp sư thi triển Phòng thủ: +10 HP tối đa cho toàn bộ bộ lạc!';
+  } else if (spell.id === 'love') {
+    for (const id of ids) {
+      e[2222 + id] = 0;
+      e[2020 + id] = 100;
+      e[3333 + id] = -1;
+    }
+    const camp = getPlayerBuildings().find((b) => !b.underConstruction);
+    if (camp && state.population < state.housingCap) {
+      const newId = spawnNewbornVillager(state.data, camp.x + 1, camp.y + camp.h);
+      if (newId > 0) {
+        state.population = getVillagerIds().length;
+        addPopup(camp.x + 1, camp.y, `${getVillagerName(state.data, newId)} được sinh ra!`, '#ff9ee5');
+      }
+    }
+    state.message = 'Pháp sư thi triển Thuốc tình yêu: tinh thần bộ lạc dâng cao 100%!';
+  } else if (spell.id === 'plague') {
+    let hit = 0;
+    for (const eid of getEnemyIds()) {
+      const curHp = e[1919 + eid] & 0xff;
+      e[1919 + eid] = Math.max(1, Math.floor(curHp / 2));
+      addPopup(e[eid] & 0xff, e[101 + eid] & 0xff, 'Bệnh dịch!', '#b79eff');
+      hit++;
+    }
+    for (const a of getWildAnimals()) {
+      e[9513 + a.aid] = Math.max(1, Math.floor(a.hp / 2));
+      hit++;
+    }
+    state.message = `Pháp sư thi triển Bệnh dịch: làm suy yếu ${hit} chiến binh địch & thú hoang trên bản đồ!`;
+  }
+  syncResourcesToData();
+  const bld = getPlayerBuildings().find((b) => b.bid === state.selectedBuildingBid);
+  if (bld) addPopup(bld.x + 1, bld.y, `✨ ${spell.name}!`, '#b79eff');
+  render();
+}
+
+function performUpgradeBuilding(bld) {
+  const level = state.data.entityData[9115 + bld.bid] & 0xff;
+  if (level >= 3) {
+    state.message = `${bld.spec.name} đã đạt cấp tối đa (Cấp 3).`;
+    render();
+    return;
+  }
+  const woodNeed = 15;
+  const stoneNeed = 10;
+  if (state.wood < woodNeed || state.stone < stoneNeed) {
+    state.message = `Cần 🪵${woodNeed} 🪨${stoneNeed} để nâng cấp ${bld.spec.name} lên Cấp ${level + 1}.`;
+    render();
+    return;
+  }
+  state.wood -= woodNeed;
+  state.stone -= stoneNeed;
+  upgradeBuilding(state.data, bld.bid);
+  if (bld.targetType === 2) state.housingCap = Math.min(50, state.housingCap + 2);
+  syncResourcesToData();
+  addDust(bld.x, bld.y, bld.w, bld.h);
+  addPopup(bld.x + Math.floor(bld.w / 2), bld.y, `Nâng cấp Cấp ${level + 1}!`, '#9cff7b');
+  state.message = `Đã nâng cấp ${bld.spec.name} lên Cấp ${level + 1}!`;
+  render();
+}
+
+function performDemolishBuilding(bld) {
+  if (bld.targetType === 3) {
+    state.message = 'Không thể phá hủy Lều của Tù trưởng!';
+    render();
+    return;
+  }
+  const res = demolishBuilding(state.data, bld.bid);
+  addDust(res.x, res.y, res.w, res.h);
+  if (!res.isScaffold && res.spec.housingBonus > 0) {
+    state.housingCap = Math.max(1, state.housingCap - res.spec.housingBonus);
+  }
+  const refundWood = Math.floor(res.spec.woodCost * 0.3);
+  const refundStone = Math.floor(res.spec.stoneCost * 0.3);
+  state.wood += refundWood;
+  state.stone += refundStone;
+  syncResourcesToData();
+  for (const wid of res.workers) {
+    setUnitAnim(wid, 8, 0);
+    state.tasks.delete(wid);
+  }
+  state.selectedBuildingBid = 0;
+  state.panelMode = 'main';
+  state.message = `Đã phá hủy ${res.spec.name} (thu hồi 🪵${refundWood} 🪨${refundStone}).`;
+  render();
+}
+
+function findNearestDropoff(x, y) {
+  const finished = getPlayerBuildings().filter((b) => !b.underConstruction);
+  // In the original game (b.java:819 & /0/d0[20]), gathered resources (wood, stone, meat, fish, berries, bones)
+  // are ONLY deposited into a finished Kho chứa (targetType === 6) or Lều của Tù trưởng (targetType === 3)!
+  const storageBuildings = finished.filter((b) => b.targetType === 6 || b.targetType === 3);
+  const candidates = storageBuildings.length > 0 ? storageBuildings : finished;
+  if (candidates.length === 0) return null;
+  let best = candidates[0];
+  let bestDist = Infinity;
+  for (const b of candidates) {
+    const cx = b.x + Math.floor(b.w / 2);
+    const cy = b.y + Math.floor(b.h / 2);
+    const dist = Math.abs(cx - x) + Math.abs(cy - y);
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = b;
+    }
+  }
+  return best;
+}
+
+function assignGatherTask(unitId, gatherTarget) {
+  ensureUnitOutside(unitId);
+  setUnitCarry(unitId, 0, 0);
+  const planned = planUnitPath(unitId, gatherTarget.x, gatherTarget.y, true);
+  if (planned === null) return false;
+  state.tasks.set(unitId, {
+    kind: 'gather',
+    path: planned.path,
+    stepProgress: planned.stepProgress,
+    target: gatherTarget,
+    workTicks: 0,
+    carrying: null,
+  });
+  if (state.selectedUnit === unitId) state.activePath = planned.path;
+  return true;
+}
+
+function assignHuntTask(unitId, animalOcc) {
+  ensureUnitOutside(unitId);
+  setUnitCarry(unitId, 0, 0);
+  const aid = animalOcc - 101;
+  const e = state.data.entityData;
+  const ax = e[9359 + aid] & 0xff;
+  const ay = e[9381 + aid] & 0xff;
+  const planned = planUnitPath(unitId, ax, ay, true);
+  if (planned === null) return false;
+  state.tasks.set(unitId, {
+    kind: 'hunt',
+    path: planned.path,
+    stepProgress: planned.stepProgress,
+    target: { aid, occ: animalOcc, x: ax, y: ay },
+    phase: 'attack',
+    workTicks: 0,
+  });
+  if (state.selectedUnit === unitId) state.activePath = planned.path;
+  return true;
+}
+
+function commandUnitTo(tx, ty) {
+  const d = state.data;
+  const activeIds = getActiveSelectionIds();
+  if (!d || activeIds.length === 0) return;
+  const unitId = activeIds[0];
+  const occ = d.occupancy[ty]?.[tx] ?? 0;
+
+  // Click an enemy warrior (51..100) to attack with selected unit(s)
+  if (occ >= 51 && occ <= 100) {
+    const dispatched = issueGroupAttack(activeIds, 'unit', occ);
+    if (dispatched > 0) {
+      state.message =
+        dispatched > 1
+          ? `${dispatched} chiến binh đang xung phong tấn công quân địch!`
+          : `${getVillagerInfo(unitId).role} đang tấn công chiến binh địch!`;
+      render();
+      return;
+    }
+    state.message = 'Không tìm được đường tiếp cận chiến binh địch.';
+    render();
+    return;
+  }
+
+  // Click an enemy building (-31..-60) to attack/raze with selected unit(s)
+  if (occ <= -31 && occ >= -60) {
+    const bid = -occ;
+    const ebld = getEnemyBuildings().find((b) => b.bid === bid);
+    if (ebld) {
+      const dispatched = issueGroupAttack(activeIds, 'building', bid);
+      if (dispatched > 0) {
+        state.message =
+          dispatched > 1
+            ? `${dispatched} chiến binh đang tấn công ${ebld.spec.name} của địch!`
+            : `${getVillagerInfo(unitId).role} đang phá hủy ${ebld.spec.name} của địch!`;
+        render();
+        return;
+      }
+      state.message = `Không tìm được đường tiếp cận ${ebld.spec.name} của địch.`;
+      render();
+      return;
+    }
+  }
+
+  // Click an unfinished building to build, or a finished Lều to rest / Bếp to eat
+  if (occ <= -1 && occ >= -30) {
+    const bid = -occ;
+    const bld = getPlayerBuildings().find((b) => b.bid === bid);
+    if (bld && bld.underConstruction) {
+      let builders = 0;
+      for (const uid of activeIds) {
+        if (assignBuildTask(uid, bld, true)) builders++;
+      }
+      if (builders > 0) {
+        const info = getVillagerInfo(unitId);
+        state.message =
+          builders > 1
+            ? `${builders} dân làng đang mang gỗ vào công trường xây ${bld.spec.name}.`
+            : `${info.role} đang mang gỗ vào công trường xây ${bld.spec.name}.`;
+        render();
+        return;
+      }
+    } else if (bld && bld.targetType === 2) {
+      if (assignRestTask(unitId, bld)) {
+        const info = getVillagerInfo(unitId);
+        state.message = `${info.role} đang đi vào Lều nghỉ ngủ hồi sức.`;
+        render();
+        return;
+      }
+    } else if (bld && (bld.targetType === 4 || bld.targetType === 3) && state.food > 0) {
+      if (assignEatTask(unitId, bld)) {
+        const info = getVillagerInfo(unitId);
+        state.message = `${info.role} đang tới ${bld.spec.name} ăn hồi sức.`;
+        render();
+        return;
+      }
+    } else if (bld && [1, 4, 5, 7, 8, 9, 11].includes(bld.targetType)) {
+      if (assignWorkAtBuilding(unitId, bld)) {
+        const info = getVillagerInfo(unitId);
+        state.message = `${info.role} đang đi tới làm việc tại ${bld.spec.name}.`;
+        render();
+        return;
+      }
+    } else if (bld) {
+      // Walk to the nearest walkable tile adjacent to the building without entering an interior slot
+      const planned = planUnitPath(unitId, bld.x, bld.y, false, bld);
+      if (planned && planned.path.length > 0) {
+        ensureUnitOutside(unitId);
+        setUnitCarry(unitId, 0, 0);
+        state.tasks.set(unitId, {
+          kind: 'move',
+          path: planned.path,
+          stepProgress: planned.stepProgress,
+          target: { x: bld.x, y: bld.y },
+          workTicks: 0,
+        });
+        state.activePath = planned.path;
+        state.message = `${getVillagerInfo(unitId).role} đang đi tới cạnh ${bld.spec.name}.`;
+        render();
+        return;
+      }
+    }
+  }
+
+  // Click a wild animal to hunt
+  if (occ >= 101 && occ <= 122) {
+    let hunters = 0;
+    for (const uid of activeIds) {
+      if (assignHuntTask(uid, occ)) hunters++;
+    }
+    if (hunters > 0) {
+      const info = getVillagerInfo(unitId);
+      state.message = hunters > 1 ? `${hunters} thợ săn đang đi săn thú hoang!` : `${info.role} đang đi săn thú hoang!`;
+      render();
+      return;
+    }
+  }
+
+  // Click a tree or resource item to gather & haul back to camp
+  const gatherTarget = classifyGatherable(tx, ty);
+  if (gatherTarget) {
+    let gatherers = 0;
+    for (const uid of activeIds) {
+      if (assignGatherTask(uid, gatherTarget)) gatherers++;
+    }
+    if (gatherers === 0) {
+      state.message = `Không tìm được đường tới nguồn ${gatherTarget.label} tại (${tx}, ${ty}).`;
+      render();
+      return;
+    }
+    const info = getVillagerInfo(unitId);
+    state.message =
+      gatherers > 1
+        ? `${gatherers} dân làng đang đi thu thập ${gatherTarget.label} và vác về trại.`
+        : `${info.role} đang đi chặt/thu thập ${gatherTarget.label} và vác về trại.`;
+    render();
+    return;
+  }
+
+  // Multi-unit group formation move
+  if (activeIds.length > 1) {
+    const moved = issueGroupMove(activeIds, tx, ty);
+    if (moved > 0) {
+      state.message = `Đội hình ${moved} chiến binh đang hành quân tới (${tx}, ${ty}).`;
+      render();
+      return;
+    }
+    state.message = `Không có đường hành quân tới (${tx}, ${ty}).`;
+    render();
+    return;
+  }
+
+  ensureUnitOutside(unitId);
+  setUnitCarry(unitId, 0, 0);
+  const info = getVillagerInfo(unitId);
+  let destX = tx;
+  let destY = ty;
+  if (!isWalkable(destX, destY, unitId)) {
+    // If clicked tile is blocked by a cliff edge, water bank, or obstacle, snap to the nearest walkable neighbor tile!
+    let foundWalkable = false;
+    for (let r = 1; r <= 2 && !foundWalkable; r++) {
+      for (let dy = -r; dy <= r && !foundWalkable; dy++) {
+        for (let dx = -r; dx <= r && !foundWalkable; dx++) {
+          if (isWalkable(tx + dx, ty + dy, unitId)) {
+            destX = tx + dx;
+            destY = ty + dy;
+            foundWalkable = true;
+          }
+        }
+      }
+    }
+    if (!foundWalkable) {
+      state.message = `Ô (${tx}, ${ty}) bị chặn. Hãy chọn bãi đất trống, cây, thú hoang, quân địch hoặc công trình.`;
+      render();
+      return;
+    }
+  }
+
+  const planned = planUnitPath(unitId, destX, destY, false);
+  if (!planned || planned.path.length === 0) {
+    state.message = planned ? `${info.role} đã ở vị trí (${destX}, ${destY}).` : `Không có đường đi tới (${destX}, ${destY}).`;
+    render();
+    return;
+  }
+
+  state.tasks.set(unitId, {
+    kind: 'move',
+    path: planned.path,
+    stepProgress: planned.stepProgress,
+    target: { x: destX, y: destY },
+    workTicks: 0,
+  });
+  state.activePath = planned.path;
+  state.message = `${info.role} đang di chuyển tới (${destX}, ${destY}) (${planned.path.length} bước).`;
+  render();
+}
+
+function findNearestGatherable(x, y, radius = 9, preferType = null) {
+  let best = null;
+  let bestScore = Infinity;
+  for (let dy = -radius; dy <= radius; dy++) {
+    for (let dx = -radius; dx <= radius; dx++) {
+      const gx = x + dx;
+      const gy = y + dy;
+      if (gx < 0 || gy < 0 || gx >= state.data.width || gy >= state.data.height) continue;
+      if (getFogState(state.data, gx, gy) === 2) continue;
+      const target = classifyGatherable(gx, gy);
+      if (!target) continue;
+      const bonus = preferType && target.type === preferType ? -5 : 0;
+      const score = Math.abs(dx) + Math.abs(dy) + bonus;
+      if (score < bestScore) {
+        bestScore = score;
+        best = target;
+      }
+    }
+  }
+  return best;
+}
+
+function gatherNearest() {
+  if (!state.data) return;
+  if (!state.selectedUnit) {
+    const ids = getVillagerIds();
+    if (ids.length) state.selectedUnit = ids[0];
+    else return;
+  }
+  const info = getVillagerInfo(state.selectedUnit);
+  const best = findNearestGatherable(info.x, info.y, 10);
+  if (!best) {
+    state.message = 'Không thấy cây hoặc tài nguyên gần đây. Hãy dẫn dân làng khám phá thêm bản đồ.';
+    render();
+    return;
+  }
+  state.cursor = { x: best.x, y: best.y };
+  commandUnitTo(best.x, best.y);
+}
+
+function stepWildAnimals() {
+  const d = state.data;
+  const e = d.entityData;
+  const animals = getWildAnimals();
+  for (const a of animals) {
+    const aid = a.aid;
+    const animId = e[9557 + aid] & 0xff;
+    const frameCount = d.byteSpriteTables[4][animId] & 0xff;
+    if (frameCount > 1) {
+      e[9579 + aid] = (e[9579 + aid] + 1) % frameCount;
+    }
+    if ((state.animTick + aid * 3) % 12 !== 0) continue;
+    const dirObj = DIRS[(state.animTick + aid * 5) % DIRS.length];
+    const nx = a.x + dirObj.dx;
+    const ny = a.y + dirObj.dy;
+    if (nx > 1 && ny > 1 && nx < d.width - 2 && ny < d.height - 2 && d.occupancy[ny][nx] === 0 && (d.terrain[ny][nx] & 0xff) < 175) {
+      d.occupancy[a.y][a.x] = 0;
+      e[9359 + aid] = nx;
+      e[9381 + aid] = ny;
+      e[9491 + aid] = dirObj.dir;
+      d.occupancy[ny][nx] = a.occ;
+    }
+  }
+}
+
+function stepProjectiles() {
+  if (state.projectiles.length === 0) return false;
+  let changed = false;
+  for (let i = state.projectiles.length - 1; i >= 0; i--) {
+    const p = state.projectiles[i];
+    p.age++;
+    if (p.age >= p.duration) {
+      state.projectiles.splice(i, 1);
+      if (p.targetType === 'unit') {
+        applyUnitDamage(p.attackerId, p.targetId, p.dmg);
+      } else if (p.targetType === 'building') {
+        applyBuildingDamage(p.attackerId, p.targetId, p.dmg);
+      }
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function stepEnemyAI() {
+  const d = state.data;
+  if (!d) return false;
+  const e = d.entityData;
+  const fo = d.entityFieldOffsets;
+  const enemies = getEnemyIds();
+  if (enemies.length === 0) return false;
+  let changed = false;
+
+  for (const eid of enemies) {
+    const ex = e[eid] & 0xff;
+    const ey = e[101 + eid] & 0xff;
+    const task = state.enemyTasks.get(eid);
+
+    if (task) {
+      if (task.kind === 'attackUnit') {
+        const tid = task.targetId;
+        if ((e[1919 + tid] & 0xff) <= 0) {
+          state.enemyTasks.delete(eid);
+          setUnitAnim(eid, 8, 0);
+          continue;
+        }
+        if (isUnitInsideBuilding(d, tid)) {
+          const bid = e[4444 + tid] & 0xff;
+          state.enemyTasks.delete(eid);
+          if (bid >= 1 && bid <= 30) assignEnemyAttack(eid, 'building', bid);
+          continue;
+        }
+        const tx = e[tid] & 0xff;
+        const ty = e[101 + tid] & 0xff;
+        const range = getUnitRange(eid);
+        const dist = Math.max(Math.abs(tx - ex), Math.abs(ty - ey));
+        if (dist > range) {
+          if (task.path.length === 0 || (task.stepProgress === 0 && task.workTicks % 5 === 0)) {
+            const p = findPath(ex, ey, tx, ty, eid, true);
+            if (p && p.length > 0) task.path = p;
+            else if (!p) {
+              state.enemyTasks.delete(eid);
+              setUnitAnim(eid, 8, 0);
+              continue;
+            }
+          }
+          task.workTicks++;
+          if (task.path.length > 0) stepUnitMovement(eid, task, true);
+          continue;
+        }
+        // In range: attack player villager
+        e[202 + eid] = 0;
+        e[303 + eid] = 0;
+        task.path = [];
+        task.stepProgress = 0;
+        e[606 + eid] = directionFromDelta(tx - ex, ty - ey);
+        const dmg = getUnitDamage(eid);
+        const wId = e[6565 + eid] & 0xff;
+        if (range > 1) {
+          setUnitAnim(eid, 35, Math.floor(task.cooldown / 2) % 6);
+          if (task.cooldown === 8) {
+            launchProjectile(eid, 'unit', tid, ex, ey, tx, ty, wId, dmg);
+            changed = true;
+          }
+        } else {
+          setUnitAnim(eid, 25, Math.floor(task.cooldown / 2) % 6);
+          if (task.cooldown === 8) {
+            applyUnitDamage(eid, tid, dmg);
+            changed = true;
+          }
+        }
+        task.cooldown = (task.cooldown + 1) % 14;
+        continue;
+      }
+
+      if (task.kind === 'attackBuilding') {
+        const bld = getPlayerBuildings().find((b) => b.bid === task.targetId);
+        if (!bld || bld.hp <= 0) {
+          state.enemyTasks.delete(eid);
+          setUnitAnim(eid, 8, 0);
+          continue;
+        }
+        const range = getUnitRange(eid);
+        const dist = distanceToRect(ex, ey, bld);
+        if (dist > range) {
+          if (task.path.length === 0) {
+            const p = findPath(ex, ey, bld.x, bld.y, eid, false, bld);
+            if (p && p.length > 0) task.path = p;
+            else {
+              state.enemyTasks.delete(eid);
+              setUnitAnim(eid, 8, 0);
+              continue;
+            }
+          }
+          if (task.path.length > 0) stepUnitMovement(eid, task, true);
+          continue;
+        }
+        e[202 + eid] = 0;
+        e[303 + eid] = 0;
+        task.path = [];
+        task.stepProgress = 0;
+        const cx = bld.x + Math.floor(bld.w / 2);
+        const cy = bld.y + Math.floor(bld.h / 2);
+        e[606 + eid] = directionFromDelta(cx - ex, cy - ey);
+        const dmg = getUnitDamage(eid);
+        const wId = e[6565 + eid] & 0xff;
+        if (range > 1) {
+          setUnitAnim(eid, 35, Math.floor(task.cooldown / 2) % 6);
+          if (task.cooldown === 8) {
+            launchProjectile(eid, 'building', bld.bid, ex, ey, cx, cy, wId, dmg);
+            changed = true;
+          }
+        } else {
+          setUnitAnim(eid, 25, Math.floor(task.cooldown / 2) % 6);
+          if (task.cooldown === 8) {
+            applyBuildingDamage(eid, bld.bid, dmg);
+            changed = true;
+          }
+        }
+        task.cooldown = (task.cooldown + 1) % 14;
+        continue;
+      }
+
+      if (task.kind === 'patrol') {
+        if (task.path.length > 0) {
+          stepUnitMovement(eid, task, true);
+          continue;
+        }
+        state.enemyTasks.delete(eid);
+        setUnitAnim(eid, 8, 0);
+      }
+    }
+
+    // Idle or patrolling enemy scans for player units/buildings within difficulty scan range
+    if ((state.animTick + eid) % 12 === 0) {
+      const scanRange = getCurrentDifficulty().enemyScanRange || 7;
+      let bestUnit = 0;
+      let bestDist = scanRange + 1;
+      for (const pid of getVillagerIds()) {
+        if (isUnitInsideBuilding(d, pid)) continue;
+        const px = e[pid] & 0xff;
+        const py = e[101 + pid] & 0xff;
+        const dist = Math.max(Math.abs(px - ex), Math.abs(py - ey));
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestUnit = pid;
+        }
+      }
+      if (bestUnit > 0 && assignEnemyAttack(eid, 'unit', bestUnit)) {
+        if (getFogState(d, ex, ey) === 0) alertCombat('Đã phát hiện kẻ thù!', '#ffd84d');
+        continue;
+      }
+      let bestBld = null;
+      let bestBldDist = scanRange + 1;
+      for (const bld of getPlayerBuildings()) {
+        const dist = distanceToRect(ex, ey, bld);
+        if (dist < bestBldDist) {
+          bestBldDist = dist;
+          bestBld = bld;
+        }
+      }
+      if (bestBld && assignEnemyAttack(eid, 'building', bestBld.bid)) {
+        if (getFogState(d, ex, ey) === 0) alertCombat('Kẻ thù đang tiến công trại!', '#ff7b6b');
+        continue;
+      }
+    }
+
+    // Gentle camp patrol when idle
+    if (!state.enemyTasks.has(eid) && (state.animTick + eid * 7) % 42 === 0) {
+      const dirObj = DIRS[(state.animTick + eid * 3) % DIRS.length];
+      const nx = ex + dirObj.dx * 2;
+      const ny = ey + dirObj.dy * 2;
+      if (isWalkable(nx, ny, eid)) {
+        const p = findPath(ex, ey, nx, ny, eid, false);
+        if (p && p.length > 0 && p.length <= 4) {
+          state.enemyTasks.set(eid, { kind: 'patrol', path: p, stepProgress: 0, workTicks: 0 });
+        }
+      }
+    }
+
+    // Gentle idle animation for stationary enemy warriors
+    if (!state.enemyTasks.has(eid) && state.animTick % 5 === 0 && fo) {
+      const animId = e[fo[29] + eid] & 0xff;
+      const frameCount = d.byteSpriteTables[4][animId] & 0xff;
+      if (frameCount > 1) {
+        e[fo[30] + eid] = (e[fo[30] + eid] + 1) % frameCount;
+      }
+    }
+  }
+  return changed;
+}
+
+function runTribeAutoAI() {
+  if (!state.autoAI || !state.data) return;
+  const pendingBuildings = getPlayerBuildings().filter((b) => b.underConstruction);
+  const ids = getVillagerIds();
+  let assignedCount = 0;
+  for (const id of ids) {
+    if (state.tasks.has(id)) continue;
+    if (assignedCount >= 2) break;
+    const info = getVillagerInfo(id);
+    if (pendingBuildings.length > 0) {
+      const bld = pendingBuildings[0];
+      if (assignBuildTask(id, bld, true)) {
+        assignedCount++;
+        continue;
+      }
+    }
+    const want = state.wood <= state.stone ? 'wood' : state.food < 10 ? 'food' : 'stone';
+    const res = findNearestGatherable(info.x, info.y, 12, want);
+    if (res && assignGatherTask(id, res)) {
+      assignedCount++;
+    }
+  }
+}
+
+function getUnitStepTicks(unitId, dx, dy) {
+  const d = state.data;
+  const speedIdx = Math.max(2, Math.min(8, (d.entityData[1010 + unitId] & 0xff) || 8));
+  const isDiagonal = dx !== 0 && dy !== 0;
+  const tableVal = d.mapTableData[d.mapTableOffsets[15] + (isDiagonal ? 9 : 0) + speedIdx] & 0xff;
+  return tableVal || (isDiagonal ? 11 : 8);
+}
+
+function getUnitCarryCap(unitId) {
+  const cap = state.data.entityData[3737 + unitId] & 0xff;
+  return cap > 0 ? cap : 2;
+}
+
+function stepUnitMovement(unitId, task, isEnemy = false) {
+  const d = state.data;
+  const e = d.entityData;
+  const ux = e[unitId] & 0xff;
+  const uy = e[101 + unitId] & 0xff;
+  const next = task.path[0];
+
+  if (task.stepProgress === 0 && !isWalkable(next.x, next.y, unitId)) {
+    const dest = task.path[task.path.length - 1];
+    const replanned = findPath(
+      ux,
+      uy,
+      dest.x,
+      dest.y,
+      unitId,
+      task.kind === 'gather' || task.kind === 'hunt' || task.kind === 'attackUnit',
+      task.kind === 'build' || task.kind === 'return' || task.kind === 'attackBuilding' ? task.target : null
+    );
+    if (replanned && replanned.length > 0) {
+      task.path = replanned;
+      if (!isEnemy && state.selectedUnit === unitId) state.activePath = replanned;
+    } else {
+      e[202 + unitId] = 0;
+      e[303 + unitId] = 0;
+      const isCarrying = !isEnemy && e[3535 + unitId] > 0 && e[3636 + unitId] > 0;
+      setUnitAnim(unitId, isCarrying ? 9 : 8, 0);
+      if (isEnemy) state.enemyTasks.delete(unitId);
+      else state.tasks.delete(unitId);
+      if (!isEnemy && state.selectedUnit === unitId) state.activePath = [];
+      return false;
+    }
+  }
+
+  const target = task.path[0];
+  const dx = target.x - ux;
+  const dy = target.y - uy;
+  e[606 + unitId] = directionFromDelta(dx, dy);
+
+  task.stepProgress++;
+  // Authentic original pace from mo[15] + e[1010+uid]: 8 ticks/tile cardinal, 11 ticks/tile diagonal at 120ms/tick
+  const stepsPerTile = getUnitStepTicks(unitId, dx, dy);
+  const walkAnim = !isEnemy && e[3535 + unitId] > 0 && e[3636 + unitId] > 0 ? 1 : 0;
+  const walkFrame = Math.floor((task.stepProgress * 4) / stepsPerTile) % 4;
+  setUnitAnim(unitId, walkAnim, walkFrame);
+
+  if (task.stepProgress >= stepsPerTile) {
+    // If this is the final tile in the path and another unit is already standing on it, try an empty adjacent tile
+    let destX = target.x;
+    let destY = target.y;
+    if (task.path.length === 1 && d.occupancy[destY]?.[destX] > 0 && d.occupancy[destY][destX] !== unitId) {
+      for (const s of DIRS) {
+        const ax = destX + s.dx;
+        const ay = destY + s.dy;
+        if (ax >= 0 && ay >= 0 && ax < d.width && ay < d.height && d.occupancy[ay][ax] === 0 && (d.terrain[ay][ax] & 0xff) < 175) {
+          destX = ax;
+          destY = ay;
+          break;
+        }
+      }
+    }
+    clearUnitTile(d, unitId, ux, uy);
+    e[unitId] = destX;
+    e[101 + unitId] = destY;
+    e[202 + unitId] = 0;
+    e[303 + unitId] = 0;
+    setUnitOnTile(d, unitId, destX, destY);
+    if (!isEnemy) revealFog(d, destX, destY, 4);
+    task.path.shift();
+    task.stepProgress = 0;
+    if (!isEnemy && state.selectedUnit === unitId) state.activePath = task.path;
+    return true;
+  } else {
+    // Ensure moving unit stays registered in occupancy at its current tile if nothing else holds it
+    if (d.occupancy[uy]?.[ux] === 0) {
+      d.occupancy[uy][ux] = unitId;
+    }
+    const frac = task.stepProgress / stepsPerTile;
+    e[202 + unitId] = Math.round(dx * CELL_WIDTH * frac);
+    e[303 + unitId] = Math.round(dy * CELL_HEIGHT * frac);
+    return false;
+  }
+}
+
+function stepSimulation() {
+  if (!state.data || state.phase !== 'game' || state.paused || state.storyDialog || state.missionResult) return;
+  state.lastSimTime = performance.now();
+  state.animTick++;
+  const d = state.data;
+  const e = d.entityData;
+  const fo = d.entityFieldOffsets;
+  let uiChanged = false;
+
+  // Step building completion dust effects (f.java s() d(74)) and floating popups
+  for (let i = state.dustEffects.length - 1; i >= 0; i--) {
+    state.dustEffects[i].frame++;
+    if (state.dustEffects[i].frame >= state.dustEffects[i].maxFrames) state.dustEffects.splice(i, 1);
+  }
+  for (let i = state.popups.length - 1; i >= 0; i--) {
+    state.popups[i].age++;
+    if (state.popups[i].age >= state.popups[i].maxAge) state.popups.splice(i, 1);
+  }
+
+  // Step villager tasks
+  for (const [unitId, task] of state.tasks.entries()) {
+    const ux = e[unitId] & 0xff;
+    const uy = e[101 + unitId] & 0xff;
+
+    // Authentic Hat-Putting (anim 147 / -109, 14 frames) and Hat-Removing (anim 148 / -108, 7 frames) from b.java:1455-1460
+    const taskHatJob =
+      task.kind === 'build'
+        ? 38
+        : task.kind === 'workBuilding'
+          ? task.target?.targetType === 4
+            ? 54
+            : task.target?.targetType === 7
+              ? 86
+              : task.target?.targetType === 8
+                ? 57
+                : 69
+          : 69;
+
+    if (taskHatJob === 69 && (isWearingJobHat(unitId) || (task.hatRemoveFrame !== undefined && task.hatRemoveFrame < 7))) {
+      if (task.hatRemoveFrame === undefined) task.hatRemoveFrame = 0;
+      if (task.hatRemoveFrame < 7) {
+        e[202 + unitId] = 0;
+        e[303 + unitId] = 0;
+        setUnitAnim(unitId, 148, task.hatRemoveFrame);
+        if (task.hatRemoveFrame === 6) {
+          e[6464 + unitId] = 69; // b.java:1455 removes job hat at frame 6
+        }
+        task.hatRemoveFrame++;
+        if (task.hatRemoveFrame >= 7 && task.kind === 'removeHat') {
+          setUnitAnim(unitId, 8, 0);
+          state.tasks.delete(unitId);
+          uiChanged = true;
+        }
+        continue;
+      }
+    } else if (taskHatJob !== 69) {
+      if ((e[6464 + unitId] & 0xff) !== taskHatJob && task.hatPutFrame === undefined) {
+        task.hatPutFrame = 0;
+      }
+      if (task.hatPutFrame !== undefined && task.hatPutFrame < 14) {
+        e[202 + unitId] = 0;
+        e[303 + unitId] = 0;
+        setUnitAnim(unitId, 147, task.hatPutFrame);
+        if (task.hatPutFrame === 1) {
+          e[6464 + unitId] = taskHatJob; // b.java:1458 equips job hat at frame 1
+        }
+        task.hatPutFrame++;
+        if (task.hatPutFrame >= 14 && task.carryWoodAfterHat) {
+          setUnitCarry(unitId, 2, 1);
+        }
+        continue;
+      }
+    }
+
+    // Combat tasks handle chase + ranged/melee engagement dynamically
+    if (task.kind === 'attackUnit') {
+      const tid = task.targetId;
+      if ((e[1919 + tid] & 0xff) <= 0) {
+        // Target dead -> auto-acquire another nearby enemy within 6 tiles
+        state.tasks.delete(unitId);
+        setUnitAnim(unitId, 8, 0);
+        if (state.selectedUnit === unitId) state.activePath = [];
+        const nextEnemy = getEnemyIds().find((eid) => Math.max(Math.abs((e[eid] & 0xff) - ux), Math.abs((e[101 + eid] & 0xff) - uy)) <= 6);
+        if (nextEnemy) assignAttackTask(unitId, 'unit', nextEnemy);
+        uiChanged = true;
+        continue;
+      }
+      const tx = e[tid] & 0xff;
+      const ty = e[101 + tid] & 0xff;
+      const range = getUnitRange(unitId);
+      const dist = Math.max(Math.abs(tx - ux), Math.abs(ty - uy));
+      if (dist > range) {
+        if (task.path.length === 0 || (task.stepProgress === 0 && task.workTicks % 4 === 0)) {
+          const chase = findPath(ux, uy, tx, ty, unitId, true);
+          if (chase && chase.length > 0) {
+            task.path = chase;
+            if (state.selectedUnit === unitId) state.activePath = chase;
+          } else if (!chase) {
+            state.tasks.delete(unitId);
+            setUnitAnim(unitId, 8, 0);
+            if (state.selectedUnit === unitId) state.activePath = [];
+            continue;
+          }
+        }
+        task.workTicks++;
+        if (task.path.length > 0 && stepUnitMovement(unitId, task)) uiChanged = true;
+        continue;
+      }
+      e[202 + unitId] = 0;
+      e[303 + unitId] = 0;
+      task.path = [];
+      task.stepProgress = 0;
+      if (state.selectedUnit === unitId) state.activePath = [];
+      e[606 + unitId] = directionFromDelta(tx - ux, ty - uy);
+      const dmg = getUnitDamage(unitId);
+      const wId = e[6565 + unitId] & 0xff;
+      if (range > 1) {
+        setUnitAnim(unitId, 35, Math.floor(task.cooldown / 2) % 6);
+        if (task.cooldown === 8) {
+          launchProjectile(unitId, 'unit', tid, ux, uy, tx, ty, wId, dmg);
+          uiChanged = true;
+        }
+      } else {
+        setUnitAnim(unitId, 25, Math.floor(task.cooldown / 2) % 6);
+        if (task.cooldown === 8) {
+          applyUnitDamage(unitId, tid, dmg);
+          uiChanged = true;
+        }
+      }
+      task.cooldown = (task.cooldown + 1) % 14;
+      continue;
+    }
+
+    if (task.kind === 'attackBuilding') {
+      const bld = getEnemyBuildings().find((b) => b.bid === task.targetId);
+      if (!bld || bld.hp <= 0) {
+        state.tasks.delete(unitId);
+        setUnitAnim(unitId, 8, 0);
+        if (state.selectedUnit === unitId) state.activePath = [];
+        uiChanged = true;
+        continue;
+      }
+      const range = getUnitRange(unitId);
+      const dist = distanceToRect(ux, uy, bld);
+      if (dist > range) {
+        if (task.path.length === 0) {
+          const chase = findPath(ux, uy, bld.x, bld.y, unitId, false, bld);
+          if (chase && chase.length > 0) {
+            task.path = chase;
+            if (state.selectedUnit === unitId) state.activePath = chase;
+          } else {
+            state.tasks.delete(unitId);
+            setUnitAnim(unitId, 8, 0);
+            if (state.selectedUnit === unitId) state.activePath = [];
+            continue;
+          }
+        }
+        if (task.path.length > 0 && stepUnitMovement(unitId, task)) uiChanged = true;
+        continue;
+      }
+      e[202 + unitId] = 0;
+      e[303 + unitId] = 0;
+      task.path = [];
+      task.stepProgress = 0;
+      if (state.selectedUnit === unitId) state.activePath = [];
+      const cx = bld.x + Math.floor(bld.w / 2);
+      const cy = bld.y + Math.floor(bld.h / 2);
+      e[606 + unitId] = directionFromDelta(cx - ux, cy - uy);
+      const dmg = getUnitDamage(unitId);
+      const wId = e[6565 + unitId] & 0xff;
+      if (range > 1) {
+        setUnitAnim(unitId, 35, Math.floor(task.cooldown / 2) % 6);
+        if (task.cooldown === 8) {
+          launchProjectile(unitId, 'building', bld.bid, ux, uy, cx, cy, wId, dmg);
+          uiChanged = true;
+        }
+      } else {
+        setUnitAnim(unitId, 25, Math.floor(task.cooldown / 2) % 6);
+        if (task.cooldown === 8) {
+          applyBuildingDamage(unitId, bld.bid, dmg);
+          uiChanged = true;
+        }
+      }
+      task.cooldown = (task.cooldown + 1) % 14;
+      continue;
+    }
+
+    if (task.path.length > 0) {
+      if (stepUnitMovement(unitId, task)) uiChanged = true;
+      continue;
+    }
+
+    // Arrived at destination!
+    e[202 + unitId] = 0;
+    e[303 + unitId] = 0;
+
+    if (task.kind === 'move') {
+      setUnitAnim(unitId, 8, 0);
+      state.tasks.delete(unitId);
+      if (state.selectedUnit === unitId) state.activePath = [];
+      uiChanged = true;
+    } else if (task.kind === 'gather') {
+      const gt = task.target;
+      const cap = getUnitCarryCap(unitId); // authentic e[3737+uid]: 2..3 units per trip
+      const harvestTicks = cap * 20; // ~2.4s per unit (4.8s-7.2s working at resource, no dust cloud!)
+      e[606 + unitId] = directionFromDelta(gt.x - ux, gt.y - uy);
+
+      if (task.workTicks < harvestTicks) {
+        // Authentic work animation: fishing uses anim 142 (10-frame cast/reel); wood/stone/berries use anim 21 — NO dust cloud
+        if (gt.type === 'fish') {
+          setUnitAnim(unitId, 142, Math.floor(task.workTicks / 2) % 10);
+        } else {
+          setUnitAnim(unitId, 21, Math.floor(task.workTicks / 4) % 2);
+        }
+        task.workTicks++;
+        continue;
+      }
+
+      // Authentic b.java:2582-2744 & mo[164]: Gathering jobs (10..16) ONLY use anim 21 (or fishing 141..146).
+      // Anim 22 (14 frames) belongs EXCLUSIVELY to delivery/unloading jobs (19..26) at Chief's Tent / Storage!
+      const depleted = depleteGatherTarget(gt, cap);
+      task.targetDepleted = depleted;
+      setUnitCarry(unitId, gt.carrySprite || 2, cap);
+      addPopup(ux, uy, `+${cap} ${gt.label}`, '#c5f285');
+
+      // Immediately carry bundle back to nearest finished Chief's Tent or Storage (anim 1)
+      const dropoff = findNearestDropoff(ux, uy);
+      if (dropoff) {
+        const retPath = findPath(ux, uy, dropoff.x, dropoff.y, unitId, false, dropoff);
+        if (retPath !== null) {
+          state.tasks.set(unitId, {
+            kind: 'return',
+            path: retPath,
+            stepProgress: 0,
+            target: dropoff,
+            returnToGather: task.targetDepleted ? null : gt,
+            carrying: { type: gt.type, label: gt.label, amount: cap, carrySprite: gt.carrySprite || 2 },
+            workTicks: 0,
+          });
+          if (state.selectedUnit === unitId) state.activePath = retPath;
+          uiChanged = true;
+          continue;
+        }
+      }
+      // Fallback direct deposit if no dropoff reachable
+      if (gt.type === 'wood') state.wood += cap;
+      else if (gt.type === 'stone') state.stone += cap;
+      else if (gt.type === 'bones') state.tools += cap;
+      else state.food += cap;
+      setUnitCarry(unitId, 0, 0);
+      syncResourcesToData();
+      setUnitAnim(unitId, 8, 0);
+      state.tasks.delete(unitId);
+      uiChanged = true;
+    } else if (task.kind === 'return') {
+      const carry = task.carrying;
+      const dropoff = task.target;
+      e[606 + unitId] = directionFromDelta(dropoff.x + Math.floor(dropoff.w / 2) - ux, dropoff.y + Math.floor(dropoff.h / 2) - uy);
+      // Authentic unloading animation: anim 22 (14 frames), sets bundle down at frame 10
+      const frame = task.workTicks;
+      if (frame < 14) {
+        setUnitAnim(unitId, 22, frame);
+        if (frame === 10 && carry) {
+          setUnitCarry(unitId, 0, 0);
+          if (carry.type === 'wood') state.wood += carry.amount;
+          else if (carry.type === 'stone') state.stone += carry.amount;
+          else if (carry.type === 'bones') state.tools += carry.amount;
+          else state.food += carry.amount;
+          syncResourcesToData();
+          addPopup(ux, uy, `Nộp +${carry.amount} ${carry.label}`, '#fff37b');
+          const info = getVillagerInfo(unitId);
+          state.message = `${info.role} đã vác và nộp ${carry.amount} ${carry.label} tại ${dropoff.spec.name}!`;
+          uiChanged = true;
+        }
+        task.workTicks++;
+        continue;
+      }
+      // Loop back to gather again automatically (or find next nearby tree/resource if depleted)!
+      const nextTarget =
+        task.returnToGather && classifyGatherable(task.returnToGather.x, task.returnToGather.y)
+          ? task.returnToGather
+          : task.carrying?.type && task.carrying.type !== 'food'
+            ? findNearestGatherable(ux, uy, 10, task.carrying.type)
+            : null;
+      if (nextTarget && assignGatherTask(unitId, nextTarget)) {
+        uiChanged = true;
+      } else {
+        setUnitCarry(unitId, 0, 0);
+        setUnitAnim(unitId, 8, 0);
+        state.tasks.delete(unitId);
+        if (state.selectedUnit === unitId) state.activePath = [];
+        uiChanged = true;
+      }
+    } else if (task.kind === 'build') {
+      const bld = task.target;
+      const bid = bld.bid;
+      const maxHp = Math.max(20, e[8566 + bid] & 0xff);
+      const stillScaffold = (e[8749 + bid] >= 12 && e[8749 + bid] <= 19) || e[8627 + bid] === 1;
+      if (!stillScaffold) {
+        ensureUnitOutside(unitId);
+        setUnitCarry(unitId, 0, 0);
+        setUnitAnim(unitId, 8, 0);
+        state.tasks.delete(unitId);
+        uiChanged = true;
+        continue;
+      }
+
+      // Step INSIDE the construction scaffold slot (rendered by drawMapObject kind===3!)
+      if (!task.insideSlot) {
+        const slot = enterBuildingSlot(d, bid, unitId);
+        if (slot) {
+          task.insideSlot = slot;
+          const info = getVillagerInfo(unitId);
+          state.message = `${info.role} đã vào công trường và đang đóng khung xây ${bld.spec.name}!`;
+          uiChanged = true;
+        } else {
+          task.insideSlot = { slotIdx: -1, animId: 53 };
+          setUnitCarry(unitId, 0, 0);
+          e[606 + unitId] = directionFromDelta(bld.x - ux, bld.y - uy);
+        }
+      }
+
+      // Play authentic hammering (anim 53, 3 frames) or sawing (anim 54, 3 frames) INSIDE the scaffold
+      const buildAnim = task.insideSlot.animId || 53;
+      setUnitAnim(unitId, buildAnim, Math.floor(task.workTicks / 2) % 3);
+      task.workTicks++;
+
+      // Authentic steady construction rate: +1 HP every 3 ticks per builder (~13s for a 40 HP Lều)
+      if (task.workTicks % 3 === 0) {
+        const nextHp = Math.min(maxHp, (e[8505 + bid] & 0xff) + 1);
+        e[8505 + bid] = nextHp;
+        const ratio = nextHp / maxHp;
+        e[9115 + bid] = ratio >= 0.78 ? 3 : ratio >= 0.48 ? 2 : ratio >= 0.22 ? 1 : 0;
+
+        if (nextHp >= maxHp) {
+          const { spec, workers } = finishConstructionSite(d, bid);
+          state.missionStats.buildingsBuilt++;
+          // Dust cloud d(74) plays ONLY when the building finishes construction (f.java:1517)!
+          addDust(bld.x, bld.y, bld.w, bld.h);
+          if (spec.housingBonus > 0) {
+            state.housingCap = Math.min(50, state.housingCap + spec.housingBonus);
+            syncResourcesToData();
+          }
+          addPopup(bld.x + Math.floor(bld.w / 2), bld.y, `${spec.name} hoàn thành!`, '#9cff7b');
+          state.message = `Nhà đã xây xong: ${spec.name}!${spec.housingBonus ? ` (+${spec.housingBonus} chỗ ở)` : ''}`;
+          for (const wid of workers) {
+            setUnitCarry(wid, 0, 0);
+            state.tasks.set(wid, { kind: 'removeHat', path: [], stepProgress: 0, hatRemoveFrame: 0, workTicks: 0 });
+            if (state.selectedUnit === wid) state.activePath = [];
+          }
+          setUnitCarry(unitId, 0, 0);
+          state.tasks.set(unitId, { kind: 'removeHat', path: [], stepProgress: 0, hatRemoveFrame: 0, workTicks: 0 });
+          if (state.selectedUnit === unitId) state.activePath = [];
+          uiChanged = true;
+        }
+      }
+    } else if (task.kind === 'hunt') {
+      const aid = task.target.aid;
+      const ahp = e[9513 + aid] & 0xff;
+      if (task.phase === 'pickup') {
+        const meatAmount = Math.max(3, getUnitCarryCap(unitId) + 2);
+        // Authentic job 12 (butchering meat): uses anim 21 (2 frames), NOT unloading anim 22!
+        if (task.workTicks < 16) {
+          setUnitAnim(unitId, 21, Math.floor(task.workTicks / 4) % 2);
+          task.workTicks++;
+          continue;
+        }
+        setUnitCarry(unitId, 1, meatAmount); // 1 = meat sprite
+        addPopup(ux, uy, `+${meatAmount} Thịt săn!`, '#ffaa5e');
+        const dropoff = findNearestDropoff(ux, uy);
+        if (dropoff) {
+          const retPath = findPath(ux, uy, dropoff.x, dropoff.y, unitId, false, dropoff);
+          if (retPath !== null) {
+            state.tasks.set(unitId, {
+              kind: 'return',
+              path: retPath,
+              stepProgress: 0,
+              target: dropoff,
+              returnToGather: null,
+              carrying: { type: 'food', label: 'thịt săn', amount: meatAmount, carrySprite: 1 },
+              workTicks: 0,
+            });
+            if (state.selectedUnit === unitId) state.activePath = retPath;
+            uiChanged = true;
+            continue;
+          }
+        }
+        state.food += meatAmount;
+        setUnitCarry(unitId, 0, 0);
+        syncResourcesToData();
+        setUnitAnim(unitId, 8, 0);
+        state.tasks.delete(unitId);
+        uiChanged = true;
+        continue;
+      }
+
+      if (ahp <= 0) {
+        setUnitAnim(unitId, 8, 0);
+        state.tasks.delete(unitId);
+        uiChanged = true;
+        continue;
+      }
+      const ax = e[9359 + aid] & 0xff;
+      const ay = e[9381 + aid] & 0xff;
+      if (Math.max(Math.abs(ax - ux), Math.abs(ay - uy)) > 1) {
+        const chase = findPath(ux, uy, ax, ay, unitId, true);
+        if (chase && chase.length > 0) {
+          task.path = chase;
+          if (state.selectedUnit === unitId) state.activePath = chase;
+          continue;
+        }
+      }
+      e[606 + unitId] = directionFromDelta(ax - ux, ay - uy);
+      // Authentic melee attack animation (anim 25, 6 frames at 2 ticks/frame) — NO dust cloud
+      setUnitAnim(unitId, 25, Math.floor(task.workTicks / 2) % 6);
+      task.workTicks++;
+      if (task.workTicks >= 36) {
+        e[9513 + aid] = 0;
+        if (d.occupancy[ay][ax] === 101 + aid) d.occupancy[ay][ax] = 0;
+        state.tools += 2; // hunting yields +2 bones (xương - 4th HUD resource)
+        syncResourcesToData();
+        task.phase = 'pickup';
+        task.workTicks = 0;
+        const info = getVillagerInfo(unitId);
+        state.message = `${info.role} đã hạ thú hoang (+2 xương) và đang vác thịt về trại!`;
+        uiChanged = true;
+      }
+    } else if (task.kind === 'rest') {
+      const hut = task.target;
+      if (!task.insideSlot) {
+        const slot = enterRestHut(d, hut.bid, unitId);
+        if (slot) {
+          task.insideSlot = slot;
+          const info = getVillagerInfo(unitId);
+          state.message = slot.breeding
+            ? `${info.role} đã vào chung Lều (1 nam 1 nữ) — đang sinh thêm dân làng mới!`
+            : `${info.role} đã vào Lều ngủ hồi sức...`;
+          uiChanged = true;
+        } else {
+          setUnitAnim(unitId, 8, 0);
+          state.tasks.delete(unitId);
+          uiChanged = true;
+          continue;
+        }
+      }
+      task.workTicks++;
+      // Advance building interior animation frame e[3030 + unitId] (13 frames for anim 115 glowing light / anim 116 breeding tent)
+      e[3030 + unitId] = Math.floor(task.workTicks / 2) % 13;
+
+      // If 1 adult male + 1 adult female are inside this Lều (state 2: e[1313] === 2) and housingCap has room, spawn newborn villager!
+      if (
+        e[1313 + unitId] === 2 &&
+        task.workTicks === 36 &&
+        state.population < state.housingCap
+      ) {
+        const newId = spawnNewbornVillager(d, hut.x + 1, hut.y + hut.h);
+        if (newId > 0) {
+          state.population = getVillagerIds().length;
+          syncResourcesToData();
+          const newName = getVillagerName(d, newId);
+          state.message = `${newName} vừa được sinh ra từ Lều! (Dân số: ${state.population}/${state.housingCap})`;
+          // Switch couple back to normal sleeping state 1 (glowing light only) after birth
+          let u = e[8993 + hut.bid];
+          let g = 0;
+          while (u > 0 && g++ < 16) {
+            if (e[1313 + u] === 2) e[1313 + u] = 1;
+            u = e[4545 + u];
+          }
+          uiChanged = true;
+        }
+      }
+
+      if (task.workTicks % 2 === 0) {
+        const nextEnergy = Math.min(100, (e[2020 + unitId] & 0xff) + 3);
+        const maxHp = e[6767 + unitId] & 0xff;
+        const nextHp = Math.min(maxHp, (e[1919 + unitId] & 0xff) + 1);
+        e[2020 + unitId] = nextEnergy;
+        e[1919 + unitId] = nextHp;
+        if (nextEnergy >= 96 && (e[1313 + unitId] !== 2 || task.workTicks > 38)) {
+          exitBuildingSlot(d, unitId);
+          setUnitAnim(unitId, 8, 0);
+          e[2222 + unitId] = 0;
+          e[3333 + unitId] = -1;
+          state.tasks.delete(unitId);
+          const info = getVillagerInfo(unitId);
+          state.message = `${info.role} đã ngủ dậy đầy năng lượng!`;
+          uiChanged = true;
+        }
+      }
+    } else if (task.kind === 'eat') {
+      const bld = task.target;
+      e[606 + unitId] = directionFromDelta(bld.x - ux, bld.y - uy);
+      setUnitAnim(unitId, 16, Math.floor(task.workTicks / 2) % 8);
+      task.workTicks++;
+      if (task.workTicks >= 16) {
+        if (state.food > 0) {
+          state.food = Math.max(0, state.food - 1);
+          syncResourcesToData();
+          e[2121 + unitId] = 100;
+          const maxHp = e[6767 + unitId] & 0xff;
+          e[1919 + unitId] = Math.min(maxHp, (e[1919 + unitId] & 0xff) + 6);
+          e[2222 + unitId] = 0;
+          e[3333 + unitId] = -1;
+          addPopup(ux, uy, 'Ăn no!', '#c5f285');
+        }
+        setUnitAnim(unitId, 8, 0);
+        state.tasks.delete(unitId);
+        uiChanged = true;
+      }
+    } else if (task.kind === 'workBuilding') {
+      const bld = task.target;
+      if (!task.insideSlot) {
+        const slot = enterBuildingWorkSlot(d, bld.bid, unitId);
+        if (slot) {
+          task.insideSlot = slot;
+          const info = getVillagerInfo(unitId);
+          state.message = `${info.role} đã vào làm việc tại ${bld.spec.name}!`;
+          uiChanged = true;
+        } else {
+          setUnitAnim(unitId, 8, 0);
+          state.tasks.delete(unitId);
+          uiChanged = true;
+          continue;
+        }
+      }
+      task.workTicks++;
+      setUnitAnim(unitId, 53, Math.floor(task.workTicks / 3) % 3);
+
+      // Authentic per-building production & training effects!
+      const bType = bld.targetType;
+      if (bType === 4 && task.workTicks % 60 === 0) {
+        // Bếp: Chef cooks meals (+2 food)
+        state.food += 2;
+        syncResourcesToData();
+        addPopup(bld.x + 1, bld.y, '🍳 +2 Thức ăn!', '#ffd84d');
+        uiChanged = true;
+      } else if ((bType === 1 || bType === 5) && task.workTicks >= 55) {
+        // Phòng tập / Khu tập ném: trains warrior (+8 maxHp) then exits!
+        const nextMax = Math.min(120, (e[6767 + unitId] & 0xff) + 8);
+        e[6767 + unitId] = nextMax;
+        e[1919 + unitId] = nextMax;
+        exitBuildingSlot(d, unitId);
+        setUnitAnim(unitId, 8, 0);
+        state.tasks.delete(unitId);
+        const info = getVillagerInfo(unitId);
+        addPopup(info.x, info.y, '💪 +8 HP tối đa!', '#9cff7b');
+        state.message = `${info.role} đã hoàn thành huấn luyện tại ${bld.spec.name} (HP tối đa ${nextMax})!`;
+        uiChanged = true;
+      } else if (bType === 7 && task.workTicks % 45 === 0) {
+        // Sàn Disco: DJ boosts tribe mood & energy!
+        for (const id of getVillagerIds()) {
+          e[2222 + id] = 0;
+          e[2020 + id] = Math.min(100, (e[2020 + id] & 0xff) + 8);
+          e[3333 + id] = -1;
+        }
+        addPopup(bld.x + 2, bld.y, '🎵 Disco +Vui vẻ!', '#ff9ee5');
+        uiChanged = true;
+      } else if (bType === 8 && task.workTicks % 70 === 0) {
+        // Khu thánh địa: Shaman meditates & generates +1 bone/mana
+        state.tools += 1;
+        syncResourcesToData();
+        addPopup(bld.x + 1, bld.y, '✨ +1 Phép/Xương', '#b79eff');
+        uiChanged = true;
+      } else if ((bType === 9 || bType === 11) && task.workTicks === 10) {
+        // Trung tâm PIA / Chòi canh: expands fog of war radius!
+        revealFog(d, bld.x + Math.floor(bld.w / 2), bld.y + Math.floor(bld.h / 2), bType === 11 ? 8 : 7);
+        addPopup(bld.x, bld.y, '👁 Mở rộng tầm nhìn!', '#6cc6f0');
+      }
+    }
+  }
+
+  // Wild animal movement & animation, flying projectiles, and Enemy Tribe AI
+  stepWildAnimals();
+  if (stepProjectiles()) uiChanged = true;
+  if (stepEnemyAI()) uiChanged = true;
+
+  // Periodic villager survival needs, thought bubbles, auto self-care & tribe births
+  if (state.animTick % 28 === 0) {
+    if (stepVillagerNeeds()) uiChanged = true;
+  }
+
+  // Periodic Tribe Auto-AI assignment
+  if (state.animTick % 18 === 0) {
+    runTribeAutoAI();
+  }
+
+  // Keep overhead job badges (e[2222]) strictly synced with each villager's actual current task
+  for (const id of getVillagerIds()) {
+    syncUnitJobBadge(id);
+  }
+
+  // Evaluate Victory / Defeat mission objectives periodically
+  if (!state.victoryDismissed && state.animTick % 12 === 0) {
+    const evalRes = getCurrentMissionEvaluation();
+    if (evalRes.status === 'victory' || evalRes.status === 'defeat') {
+      const score = computeMissionScore({
+        population: state.population,
+        buildingsBuilt: state.missionStats.buildingsBuilt,
+        enemyBuildingsDestroyed: state.missionStats.enemyBuildingsDestroyed,
+        enemiesKilled: state.missionStats.enemiesKilled,
+        food: state.food,
+        wood: state.wood,
+        stone: state.stone,
+        tools: state.tools,
+      });
+      const epilogue =
+        evalRes.status === 'victory' ? getMissionDialogue(state.storyLines, state.scenarioIndex, 'outro')?.[0]?.text || '' : '';
+      state.missionResult = { status: evalRes.status, reason: evalRes.reason, epilogue, score };
+      if (evalRes.status === 'victory' && state.music) midiSynth.playTrack(4);
+      state.message = evalRes.status === 'victory' ? `HURRAH! CHIẾN THẮNG! ${evalRes.reason}` : `THẤT BẠI! ${evalRes.reason}`;
+      uiChanged = true;
+    }
+  }
+
+  // Gentle idle animation tick for stationary villagers
+  if (state.animTick % 5 === 0 && fo) {
+    for (const id of getVillagerIds()) {
+      if (state.tasks.has(id)) continue;
+      const animId = e[fo[29] + id] & 0xff;
+      const frameCount = d.byteSpriteTables[4][animId] & 0xff;
+      if (frameCount > 1) {
+        e[fo[30] + id] = (e[fo[30] + id] + 1) % frameCount;
+      }
+    }
+  }
+
+  draw();
+  if (uiChanged) updatePanel();
+}
+
+function stepVillagerNeeds() {
+  const d = state.data;
+  if (!d) return false;
+  const e = d.entityData;
+  const ids = getVillagerIds();
+  const finishedHuts = getPlayerBuildings().filter((b) => !b.underConstruction && b.targetType === 2);
+  const foodSpots = getPlayerBuildings().filter((b) => !b.underConstruction && (b.targetType === 4 || b.targetType === 3));
+  let changed = false;
+
+  for (const id of ids) {
+    const task = state.tasks.get(id);
+    if (task?.kind === 'rest' || task?.kind === 'eat') continue;
+
+    const working = Boolean(task);
+    let satiety = Math.max(0, (e[2121 + id] & 0xff) - (working ? 2 : 1));
+    let energy = Math.max(0, (e[2020 + id] & 0xff) - (working ? 2 : 1));
+    e[2121 + id] = satiety;
+    e[2020 + id] = energy;
+    e[505 + id] = Math.max(10, Math.min(100, Math.round((satiety + energy) / 2))); // sync Panel 4 mood face
+
+    // Authentic thought bubble (b.java:1998-2003): only show when genuinely exhausted or starving!
+    if (energy <= 20) e[3333 + id] = 0; // exhausted/sleepy thought bubble
+    else if (satiety <= 20) e[3333 + id] = 2; // starving thought bubble
+    else e[3333 + id] = -1; // none when content/idle
+
+    // Auto self-care when idle
+    if (!task) {
+      if (satiety <= 38 && state.food > 0 && foodSpots.length > 0) {
+        if (assignEatTask(id, foodSpots[0])) changed = true;
+      } else if (energy <= 38 && finishedHuts.length > 0) {
+        if (assignRestTask(id, finishedHuts[0])) changed = true;
+      }
+    }
+    if (id === state.selectedUnit) changed = true;
+  }
+
+  // Authentic berry bush & mushroom gradual regrowth (b.java:4660-4675)
+  if (state.animTick % 112 === 0) {
+    for (let idx = 0; idx < 50; idx++) {
+      const kind = e[9833 + idx] & 0xff;
+      if (kind >= 1 && kind <= 4) {
+        const maxCap = (d.mapTableData?.[d.mapTableOffsets?.[110] + kind] & 0xff) || 20;
+        const cur = e[9883 + idx] & 0xff;
+        if (cur < maxCap) {
+          const next = Math.min(maxCap, cur + 2);
+          e[9883 + idx] = next;
+          const ratio = next / Math.max(1, maxCap);
+          e[9933 + idx] = next <= 0 ? 0 : ratio <= 0.35 ? 1 : ratio <= 0.7 ? 2 : 3;
+        }
+      }
+    }
+  }
+
+  return changed;
+}
+
+function getCurrentMissionEvaluation() {
+  return evaluateMissionObjectives(state.scenarioIndex, {
+    population: state.population,
+    food: state.food,
+    playerBuildings: getPlayerBuildings(),
+    enemyCount: getEnemyIds().length,
+    enemyBuildingCount: getEnemyBuildings().length,
+    isCustomGame: state.isCustomGame,
+    initialEnemies: state.missionStats.initialEnemies,
+    initialEnemyBuildings: state.missionStats.initialEnemyBuildings,
+  });
+}
+
+function openMissionStory(scenarioIdx, kind = 'intro') {
+  const pages = getMissionDialogue(state.storyLines, scenarioIdx, kind);
+  if (pages.length === 0) return false;
+  const sc = SCENARIOS[scenarioIdx] || SCENARIOS[0];
+  state.storyDialog = {
+    title: kind === 'outro' ? `KẾT THÚC MÀN ${scenarioIdx + 1}` : `MÀN ${scenarioIdx + 1}: ${sc.name.toUpperCase()}`,
+    pages,
+    index: 0,
+  };
+  return true;
+}
+
+function advanceStoryDialog() {
+  if (!state.storyDialog) return;
+  if (state.storyDialog.index + 1 < state.storyDialog.pages.length) {
+    state.storyDialog.index++;
+  } else {
+    state.storyDialog = null;
+  }
+  render();
+}
+
+function proceedToNextMission() {
+  if (!state.data) return;
+  const nextIdx = state.scenarioIndex + 1;
+  if (nextIdx >= SCENARIOS.length) {
+    state.carryoverTribe = null;
+    loadScenario(0, { useCarryover: false, isCustomGame: false, showStory: true });
+    return;
+  }
+  state.carryoverTribe = captureTribeCarryover(state.data, state);
+  loadScenario(nextIdx, { useCarryover: true, isCustomGame: false, showStory: true });
+}
+
+async function applyLanguage(langIdx) {
+  const id = Math.max(0, Math.min(4, langIdx | 0));
+  state.language = id;
+  const pack = await loadLanguagePack(id);
+  state.langPack = pack;
+  if (pack.d0?.length > 0) state.storyLines = pack.d0;
+  if (state.storyDialog) {
+    openMissionStory(state.scenarioIndex, 'intro');
+  }
+  state.message = `${pack.meta.label} (${pack.s.length} UI / ${pack.d0.length} /d0)`;
+  render();
+}
+
+function saveCurrentGame() {
+  const ui = getUiStrings(state.language);
+  const ok = saveGameToStorage(state);
+  if (ok) {
+    state.message = ui.savedOk;
+    addPopup(state.cursor.x, state.cursor.y, '💾 Saved!', '#9cff7b');
+  } else {
+    state.message = 'Không thể lưu vào localStorage.';
+  }
+  render();
+}
+
+function resumeSavedGame() {
+  const ui = getUiStrings(state.language);
+  const saved = loadGameFromStorage(state.baseData);
+  if (!saved) {
+    state.message = ui.noSave;
+    render();
+    return false;
+  }
+  state.scenarioIndex = saved.scenarioIndex ?? 0;
+  state.difficultyIndex = saved.difficultyIndex ?? 0;
+  state.isCustomGame = Boolean(saved.isCustomGame);
+  state.data = saved.hydratedData;
+  state.cameraX = saved.cameraX ?? 0;
+  state.cameraY = saved.cameraY ?? 0;
+  state.cursor = saved.cursor || { x: 5, y: 5 };
+  state.selectedUnit = saved.selectedUnit || getVillagerIds()[0] || 0;
+  state.selectedUnits = new Set(state.selectedUnit ? [state.selectedUnit] : []);
+  state.groups = { 7: new Set(), 9: new Set() };
+  state.activeGroupId = 0;
+  state.selectionBox = null;
+  state.showMinimap = false;
+  state.storyDialog = null;
+  state.missionResult = null;
+  state.victoryDismissed = false;
+  state.paused = false;
+  state.panelMode = 'main';
+  state.tasks.clear();
+  state.enemyTasks.clear();
+  state.projectiles = [];
+  state.activePath = [];
+  state.dustEffects = [];
+  state.popups = [];
+  cancelBuildPlacement();
+
+  state.food = saved.food ?? 0;
+  state.wood = saved.wood ?? 0;
+  state.stone = saved.stone ?? 0;
+  state.tools = saved.tools ?? 0;
+  state.population = getVillagerIds().length || saved.population || 1;
+  state.housingCap = saved.housingCap ?? 1;
+  state.missionStats = saved.missionStats || {
+    buildingsBuilt: 0,
+    enemiesKilled: 0,
+    enemyBuildingsDestroyed: 0,
+    initialEnemies: getEnemyIds().length,
+    initialEnemyBuildings: getEnemyBuildings().length,
+  };
+  state.carryoverTribe = saved.carryoverTribe || null;
+  syncResourcesToData();
+  if (saved.language !== undefined && saved.language !== state.language) {
+    applyLanguage(saved.language);
+  }
+  state.message = `${ui.loadedOk} (Màn ${state.scenarioIndex + 1} · ${state.population} dân)`;
+  setPhase('game');
+  return true;
+}
+
+function toggleMinimap() {
+  if (!state.data || state.phase !== 'game') return;
+  cancelBuildPlacement();
+  state.showMinimap = !state.showMinimap;
+  if (state.showMinimap) {
+    state.message = getUiStrings(state.language).minimapLegend;
+  }
+  render();
+}
+
+function jumpCameraFromMinimap(sx, sy) {
+  const d = state.data;
+  if (!d) return false;
+  const mm = getMinimapRect(d);
+  if (sx < mm.boxX || sx > mm.boxX + mm.boxW || sy < mm.boxY || sy > mm.boxY + mm.boxH) {
+    state.showMinimap = false;
+    render();
+    return false;
+  }
+  if (sx >= mm.mapX && sx <= mm.mapX + mm.mapW && sy >= mm.mapY && sy <= mm.mapY + mm.mapH) {
+    const wx = Math.max(0, Math.min(d.width - 1, Math.floor((sx - mm.mapX) / mm.scale)));
+    const wy = Math.max(0, Math.min(d.height - 1, Math.floor((sy - mm.mapY) / mm.scale)));
+    state.cursor = { x: wx, y: wy };
+    state.cameraX = Math.round(wx - (d.viewportColumns || 11) / 2);
+    state.cameraY = Math.round(wy - (d.viewportRows || 18) / 2);
+    clampCamera();
+    state.message = `Camera nhảy tới (${wx}, ${wy}) trên bản đồ.`;
+    render();
+    return true;
+  }
+  return true;
+}
+
+function toggleMusic() {
+  state.music = !state.music;
+  const trackIdx = state.phase === 'game' ? (state.scenarioIndex % 3) + 1 : 0;
+  midiSynth.setEnabled(state.music, trackIdx);
+  const trackName = SA_TRACK_NAMES[midiSynth.currentTrackIndex] || 'MIDI';
+  state.message = state.music ? `🎵 Đã bật nhạc nền MIDI (/sa): ${trackName}` : '🔇 Đã tắt nhạc nền MIDI.';
+  render();
+}
+
+function cycleMidiTrack() {
+  state.music = true;
+  const next = midiSynth.cycleTrack();
+  const track = midiSynth.tracks[next];
+  state.message = `🎼 Đang phát /sa ${SA_TRACK_NAMES[next]} (${track ? track.notes.length : 0} nốt MIDI)!`;
+  render();
+}
+
+function openPauseMenu() {
+  if (state.phase !== 'game') return;
+  cancelBuildPlacement();
+  state.showMinimap = false;
+  state.paused = true;
+  state.panelMode = 'pause';
+  render();
+}
+
+function closePauseMenu() {
+  if (state.phase !== 'game') return;
+  state.paused = false;
+  if (state.panelMode === 'pause') state.panelMode = 'main';
+  render();
+}
+
+function startCustomGame() {
+  state.difficultyIndex = state.customConfig.difficultyIndex;
+  state.carryoverTribe = null;
+  loadScenario(state.customConfig.scenarioIndex, {
+    useCarryover: false,
+    isCustomGame: true,
+    abundantResources: state.customConfig.abundantResources,
+    showStory: false,
+  });
+}
+
+function loadScenario(index, opts = {}) {
+  if (!state.baseData) return;
+  const {
+    useCarryover = false,
+    isCustomGame = false,
+    abundantResources = false,
+    showStory = false,
+  } = opts;
+  const clamped = Math.max(0, Math.min(SCENARIOS.length - 1, index));
+  state.scenarioIndex = clamped;
+  state.isCustomGame = isCustomGame;
+  const diff = getCurrentDifficulty();
+  state.data = loadScenarioFromMa(state.baseData, state.maBytes, clamped, {
+    carryoverTribe: useCarryover ? state.carryoverTribe : null,
+    difficulty: diff,
+    abundantResources,
+  });
+  state.cameraX = state.data.cameraX ?? 0;
+  state.cameraY = state.data.cameraY ?? 0;
+  state.cursor = { x: state.data.cursorX ?? 5, y: state.data.cursorY ?? 9 };
+  state.selectedUnit = state.data.hoverUnit || getVillagerIds()[0] || 0;
+  state.selectedUnits = new Set(state.selectedUnit ? [state.selectedUnit] : []);
+  state.groups = { 7: new Set(), 9: new Set() };
+  state.activeGroupId = 0;
+  state.selectionBox = null;
+  state.showMinimap = false;
+  state.storyDialog = null;
+  state.missionResult = null;
+  state.victoryDismissed = false;
+  state.lastAlertTick = -999;
+  state.tasks.clear();
+  state.enemyTasks.clear();
+  state.projectiles = [];
+  state.treeWood.clear();
+  state.activePath = [];
+  state.dustEffects = [];
+  state.popups = [];
+  cancelBuildPlacement();
+  state.panelMode = 'main';
+  state.compareOriginal = false;
+
+  const res = state.data.resources?.[0] || [];
+  state.food = res[0] ?? 0;
+  state.wood = res[1] ?? 0;
+  state.stone = res[2] ?? 0;
+  state.tools = res[3] ?? 0;
+  state.population = getVillagerIds().length || res[11] || 9;
+  state.housingCap = res[16] ?? 1;
+
+  const sc = SCENARIOS[clamped];
+  const enemyCount = getEnemyIds().length;
+  const enemyBldCount = getEnemyBuildings().length;
+  state.missionStats = {
+    buildingsBuilt: 0,
+    enemiesKilled: 0,
+    enemyBuildingsDestroyed: 0,
+    initialEnemies: enemyCount,
+    initialEnemyBuildings: enemyBldCount,
+  };
+  const carryNote = useCarryover && state.carryoverTribe?.villagers?.length
+    ? ` · Mang theo ${state.carryoverTribe.villagers.length} chiến binh từ màn trước!`
+    : '';
+  const modeTag = isCustomGame ? `Trận tuỳ chỉnh (${diff.label})` : `Chiến dịch (${diff.label})`;
+  const enemyNote =
+    enemyCount > 0 || enemyBldCount > 0 ? `, ${enemyCount} địch & ${enemyBldCount} nhà địch` : '';
+  state.message = `${modeTag} · Màn ${clamped + 1}: ${sc.name} — ${state.population} dân, ${getPlayerBuildings().length} nhà${enemyNote}.${carryNote}`;
+  if (showStory && !isCustomGame) {
+    openMissionStory(clamped, 'intro');
+  }
+  if (state.music && midiSynth.tracks.length > 0) {
+    midiSynth.playTrack((clamped % 3) + 1);
+  }
+  setPhase('game');
+}
+
+function drawOpeningScreen() {
+  const phaseDef = PHASES[state.phase];
+  const img = getCaptureImage(phaseDef.capture);
+  if (img.complete && img.naturalWidth) {
+    ctx.drawImage(img, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+  } else {
+    ctx.fillStyle = '#75b7dc';
+    ctx.fillRect(0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+  }
+  if (state.phase !== 'music') {
+    const top = state.phase === 'language' ? 92 : state.phase === 'campaignMenu' ? 124 : 144;
+    ctx.save();
+    ctx.fillStyle = '#fff16b';
+    ctx.strokeStyle = '#33250c';
+    ctx.lineWidth = 2.5;
+    ctx.font = 'bold 11px monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const y = top + state.selected * 20;
+    ctx.strokeText('▶', 28, y);
+    ctx.fillText('▶', 28, y);
+    ctx.strokeText('◀', 212, y);
+    ctx.fillText('◀', 212, y);
+    ctx.restore();
+  }
+}
+
+function drawCampaignWalkthrough() {
+  const img = getCaptureImage(state.campaignFrame);
+  if (img.complete && img.naturalWidth) {
+    ctx.drawImage(img, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+  } else {
+    ctx.fillStyle = '#c4b856';
+    ctx.fillRect(0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+  }
+}
+
+function draw() {
+  ctx.clearRect(0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+  if (state.phase === 'game') {
+    if (state.compareOriginal && state.scenarioIndex === 0) {
+      const refImg = getCaptureImage(CAPTURED_FLOW.gameplay);
+      if (refImg.complete && refImg.naturalWidth) {
+        ctx.drawImage(refImg, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+        return;
+      }
+    }
+    if (state.data) {
+      state.selectedUnitName = state.selectedUnit ? getVillagerName(state.data, state.selectedUnit) : '';
+      renderOriginalMap(ctx, state.data, state, spriteCache);
+    } else {
+      ctx.fillStyle = '#18241b';
+      ctx.fillRect(0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+      ctx.fillStyle = '#e8df8a';
+      ctx.font = 'bold 11px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('Đang tải bản đồ gốc...', 120, 160);
+    }
+    return;
+  }
+  if (state.phase === 'campaign') {
+    drawCampaignWalkthrough();
+    return;
+  }
+  if (state.phase === 'customSetup') {
+    const img = getCaptureImage(3);
+    if (img.complete && img.naturalWidth) ctx.drawImage(img, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+    ctx.save();
+    ctx.fillStyle = 'rgba(18, 16, 8, 0.72)';
+    ctx.fillRect(14, 90, 212, 140);
+    ctx.strokeStyle = '#d2c268';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(16, 92, 208, 136);
+    ctx.fillStyle = '#fff16b';
+    ctx.font = 'bold 12px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('TRÒ CHƠI TUỲ CHỈNH', 120, 112);
+    const sc = SCENARIOS[state.customConfig.scenarioIndex] || SCENARIOS[0];
+    const diff = DIFFICULTIES[state.customConfig.difficultyIndex] || DIFFICULTIES[0];
+    ctx.fillStyle = '#eef1df';
+    ctx.font = '10px monospace';
+    ctx.fillText(`Bản đồ: Màn ${state.customConfig.scenarioIndex + 1} (${sc.name})`, 120, 140);
+    ctx.fillText(`Độ khó: ${diff.label}`, 120, 162);
+    ctx.fillText(`Tài nguyên: ${state.customConfig.abundantResources ? 'DỒI DÀO (+60)' : 'TIÊU CHUẨN'}`, 120, 184);
+    ctx.fillStyle = '#9cff7b';
+    ctx.font = 'bold 9px monospace';
+    ctx.fillText('CHỌN BẮT ĐẦU Ở BẢNG BÊN PHẢI', 120, 212);
+    ctx.restore();
+    return;
+  }
+  drawOpeningScreen();
+}
+
+function addChoiceButton(label, index, selected, onClick, metaText = '', disabled = false) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = `choice${selected ? ' selected' : ''}${disabled ? ' disabled' : ''}`;
+  btn.setAttribute('aria-pressed', String(selected));
+  btn.innerHTML =
+    `<span class="index">${String(index + 1).padStart(2, '0')}</span>` +
+    `<span class="label"></span>` +
+    (metaText ? `<span class="meta"></span>` : '') +
+    `<span class="arrow">${selected ? '▶' : ''}</span>`;
+  btn.querySelector('.label').textContent = label;
+  if (metaText) btn.querySelector('.meta').textContent = metaText;
+  btn.addEventListener('click', onClick);
+  choicesNode.append(btn);
+}
+
+function updatePanel() {
+  choicesNode.replaceChildren();
+  choicesNode.classList.remove('scrollable');
+
+  if (state.phase === 'game') {
+    const sc = SCENARIOS[state.scenarioIndex] || SCENARIOS[0];
+    const diff = getCurrentDifficulty();
+
+    // Story dialogue modal (/0/d0)
+    if (state.storyDialog) {
+      const dlg = state.storyDialog;
+      const page = dlg.pages[dlg.index] || dlg.pages[0];
+      panelTitle.textContent = `📖 ${dlg.title} (${dlg.index + 1}/${dlg.pages.length})`;
+      panelCopy.textContent = page?.text || '';
+      addChoiceButton(
+        dlg.index + 1 < dlg.pages.length ? 'TRANG TIẾP THEO (ENTER)' : 'BẮT ĐẦU MÀN CHƠI (ENTER)',
+        0,
+        true,
+        () => advanceStoryDialog()
+      );
+      if (dlg.index > 0) {
+        addChoiceButton('TRANG TRƯỚC', 1, false, () => {
+          state.storyDialog.index = Math.max(0, state.storyDialog.index - 1);
+          render();
+        });
+      }
+      addChoiceButton('BỎ QUA CỐT TRUYỆN (ESC)', dlg.index > 0 ? 2 : 1, false, () => {
+        state.storyDialog = null;
+        render();
+      });
+      helpNode.innerHTML =
+        '<strong>Cốt truyện nguyên bản (/0/d0)</strong>' +
+        '<span>Giải mã trực tiếp từ file nhị phân /0/d0 trong bản gốc tiếng Việt</span>' +
+        '<span>Click màn hình hoặc nhấn Enter để sang đoạn thoại tiếp theo</span>';
+      hintNode.textContent = 'ENTER / CLICK: TIẾP TỤC CỐT TRUYỆN · ESC: BỎ QUA';
+      return;
+    }
+
+    // Victory / Defeat result modal & scoreboard
+    if (state.missionResult) {
+      const res = state.missionResult;
+      const isWin = res.status === 'victory';
+      const s = res.score;
+      panelTitle.textContent = isWin ? `🏆 CHIẾN THẮNG — Màn ${state.scenarioIndex + 1}` : `💀 THẤT BẠI — Màn ${state.scenarioIndex + 1}`;
+      panelCopy.textContent = res.epilogue ? `${res.reason} — "${res.epilogue}"` : res.reason;
+
+      const board = document.createElement('div');
+      board.className = 'villager-card';
+      board.innerHTML =
+        `<div class="villager-head"><strong>📊 Bảng tổng kết (Chuẩn /0/d0)</strong><span>Độ khó: ${diff.label}</span></div>` +
+        `<div class="strategy-stats" style="margin:6px 0 0">` +
+        `<span>👥 Dân số <b>${s.population}</b></span>` +
+        `<span>🏠 Nhà đã xây <b>${s.buildingsBuilt}</b></span>` +
+        `<span>⚔ Địch tiêu diệt <b>${s.enemiesKilled}</b></span>` +
+        `<span>🔥 Nhà địch phá <b>${s.enemyBuildingsDestroyed}</b></span>` +
+        `<span>📦 Tài nguyên <b>${s.resourcesTotal}</b></span>` +
+        `<span>⭐ Tổng điểm <b style="color:#9cff7b">${s.totalScore}</b></span>` +
+        `</div>`;
+      choicesNode.append(board);
+
+      let bi = 0;
+      if (isWin && !state.isCustomGame && state.scenarioIndex < SCENARIOS.length - 1) {
+        addChoiceButton(`SANG MÀN ${state.scenarioIndex + 2} (MANG THEO BỘ LẠC)`, bi++, true, () => proceedToNextMission());
+      } else if (isWin && !state.isCustomGame && state.scenarioIndex === SCENARIOS.length - 1) {
+        addChoiceButton('🏆 HOÀN THÀNH CHIẾN DỊCH — CHƠI LẠI MÀN 1', bi++, true, () => proceedToNextMission());
+      }
+      if (isWin) {
+        addChoiceButton('CHƠI TIẾP MÀN NÀY', bi++, false, () => {
+          state.missionResult = null;
+          state.victoryDismissed = true;
+          render();
+        });
+      }
+      addChoiceButton('CHƠI LẠI MÀN NÀY', bi++, !isWin, () => {
+        loadScenario(state.scenarioIndex, { useCarryover: false, isCustomGame: state.isCustomGame, showStory: false });
+      });
+      addChoiceButton('QUAY VỀ MENU CHẾ ĐỘ', bi++, false, () => {
+        state.missionResult = null;
+        setPhase('mode');
+      });
+      helpNode.innerHTML =
+        '<strong>Chuyển màn chiến dịch (void_b)</strong>' +
+        '<span>Khi sang màn tiếp theo, toàn bộ dân sống sót cùng vũ khí &amp; HP đã rèn sẽ đi cùng bộ lạc!</span>';
+      hintNode.textContent = isWin ? 'CHIẾN THẮNG! SANG MÀN TIẾP THEO' : 'THẤT BẠI! CHỌN CHƠI LẠI';
+      return;
+    }
+
+    if (state.panelMode === 'pause') {
+      const ui = getUiStrings(state.language);
+      const saveMeta = loadSaveMetadata();
+      const langMeta = LANGUAGES[state.language] || LANGUAGES[0];
+      panelTitle.textContent = ui.pauseTitle;
+      panelCopy.textContent = state.message || `Màn ${state.scenarioIndex + 1}: ${getLocalizedScenarioName(state.langPack, state.scenarioIndex, sc.name)} [${diff.label}]`;
+      choicesNode.classList.add('scrollable');
+      let bi = 0;
+      addChoiceButton(ui.resume, bi++, true, () => closePauseMenu());
+      addChoiceButton(ui.saveGame, bi++, false, () => saveCurrentGame());
+      addChoiceButton(
+        saveMeta ? `${ui.loadGame} (M${saveMeta.scenarioIndex + 1} · ${saveMeta.population})` : ui.loadGame,
+        bi++,
+        false,
+        () => resumeSavedGame(),
+        saveMeta ? 'OK' : 'Trống',
+        !saveMeta
+      );
+      addChoiceButton(ui.toggleMinimap, bi++, false, () => {
+        state.panelMode = 'main';
+        state.paused = false;
+        toggleMinimap();
+      });
+      addChoiceButton(
+        `${ui.switchLang}: ${langMeta.label}`,
+        bi++,
+        false,
+        () => applyLanguage((state.language + 1) % LANGUAGES.length),
+        `${state.language + 1}/5`
+      );
+      addChoiceButton(
+        state.music ? '🎵 NHẠC MIDI (/SA): ĐANG BẬT (N)' : '🔇 NHẠC MIDI (/SA): ĐANG TẮT (N)',
+        bi++,
+        false,
+        () => toggleMusic(),
+        `${midiSynth.tracks.length || 5} bài`
+      );
+      if (midiSynth.tracks.length > 0) {
+        addChoiceButton(
+          `🎼 ${SA_TRACK_NAMES[midiSynth.currentTrackIndex]}`,
+          bi++,
+          false,
+          () => cycleMidiTrack(),
+          'Đổi bài'
+        );
+      }
+      if (state.storyLines.length > 0) {
+        addChoiceButton(ui.viewStory, bi++, false, () => {
+          state.panelMode = 'main';
+          state.paused = false;
+          openMissionStory(state.scenarioIndex, 'intro');
+          render();
+        });
+      }
+      addChoiceButton(ui.exportSave, bi++, false, () => {
+        if (exportSaveJson(state)) {
+          state.message = 'Đã tải xuống file backup save (.json)!';
+          render();
+        }
+      });
+      addChoiceButton(ui.exitToMenu, bi++, false, () => {
+        state.paused = false;
+        state.panelMode = 'main';
+        setPhase('mode');
+      });
+      helpNode.innerHTML =
+        '<strong>Menu Tạm dừng &amp; Lưu tiến độ</strong>' +
+        '<span>Tiến độ lưu trực tiếp vào trình duyệt (localStorage) để nút TIẾP TỤC mở lại ngay</span>' +
+        '<span>Hỗ trợ đủ 5 gói ngôn ngữ gốc: VI / FR / IT / DE / ES (/0..4/{s,t,d0})</span>';
+      hintNode.textContent = 'MENU TẠM DỪNG · P HOẶC ESC ĐỂ TIẾP TỤC';
+      return;
+    }
+
+    if (state.panelMode === 'build') {
+      panelTitle.textContent = 'Xây dựng công trình';
+      panelCopy.textContent = `Tài nguyên hiện có: 🪵 ${state.wood} gỗ · 🪨 ${state.stone} đá · ⚒ ${state.tools} công cụ. Chọn công trình để đặt lên bản đồ.`;
+      choicesNode.classList.add('scrollable');
+      BUILDINGS.forEach((b, idx) => {
+        const spec = getBuildingSpec(state.data, b.type);
+        const canAfford = state.wood >= spec.woodCost && state.stone >= spec.stoneCost && state.tools >= spec.toolsCost;
+        const costStr = `${spec.width}×${spec.height} · 🪵${spec.woodCost} 🪨${spec.stoneCost}${spec.toolsCost ? ` ⚒${spec.toolsCost}` : ''}`;
+        addChoiceButton(
+          spec.name,
+          idx,
+          state.buildType === b.type,
+          () => startBuildPlacement(b.type),
+          costStr,
+          !canAfford
+        );
+      });
+      addChoiceButton('+25 GỖ & +20 ĐÁ (THỬ XÂY NHANH)', BUILDINGS.length, false, () => {
+        state.wood += 25;
+        state.stone += 20;
+        syncResourcesToData();
+        state.message = 'Đã tiếp thêm +25 gỗ và +20 đá để thử nghiệm xây dựng!';
+        render();
+      });
+      addChoiceButton('QUAY LẠI ĐIỀU KHIỂN (ESC)', BUILDINGS.length + 1, false, () => {
+        state.panelMode = 'main';
+        render();
+      });
+      helpNode.innerHTML =
+        '<strong>Hướng dẫn xây dựng</strong>' +
+        '<span>Chọn công trình → di chuột tới vùng đất xanh → Click để đặt móng</span>' +
+        '<span>Dân làng sẽ tự chạy tới xây và tăng giới hạn dân (+4 cho mỗi Lều)</span>';
+      hintNode.textContent = 'CHỌN CÔNG TRÌNH · CLICK ĐẤT TRỐNG ĐỂ XÂY';
+      return;
+    }
+
+    if (state.panelMode === 'scenarios') {
+      panelTitle.textContent = '10 Màn chiến dịch (/ma)';
+      panelCopy.textContent = 'Giải mã trực tiếp toàn bộ 10 bản đồ chiến dịch từ file /ma và bảng /a gốc ngay trên trình duyệt.';
+      choicesNode.classList.add('scrollable');
+      SCENARIOS.forEach((item, idx) => {
+        addChoiceButton(
+          `Màn ${idx + 1}: ${item.name}`,
+          idx,
+          state.scenarioIndex === idx,
+          () => loadScenario(idx),
+          item.subtitle
+        );
+      });
+      addChoiceButton('QUAY LẠI (ESC)', SCENARIOS.length, false, () => {
+        state.panelMode = 'main';
+        render();
+      });
+      helpNode.innerHTML =
+        '<strong>Chuyển màn trực tiếp</strong>' +
+        '<span>Màn 1 dùng snapshot đã đối chiếu 1:1; Màn 2–10 giải mã RLE trực tiếp từ /ma</span>' +
+        '<span>Dùng WASD / mũi tên để cuộn khắp bản đồ 64×48 đến 96×96</span>';
+      hintNode.textContent = 'CHỌN MÀN CHIẾN DỊCH TỪ /MA GỐC';
+      return;
+    }
+
+    if (state.panelMode === 'building') {
+      const bld = getPlayerBuildings().find((b) => b.bid === state.selectedBuildingBid);
+      if (!bld) {
+        state.panelMode = 'main';
+      } else {
+        const level = state.data.entityData[9115 + bld.bid] & 0xff;
+        panelTitle.textContent = `${bld.spec.name} (Cấp ${Math.max(1, level)})`;
+        panelCopy.textContent = `${bld.spec.desc} · HP ${bld.hp}/${bld.maxHp} · 🪵${state.wood} 🪨${state.stone} 🦴${state.tools}`;
+        choicesNode.classList.add('scrollable');
+        let btnIdx = 0;
+
+        if (bld.targetType === 0) {
+          // Kho vũ khí: craft & equip all 6 authentic weapons!
+          for (const w of WEAPONS) {
+            const ok = state.wood >= w.wood && state.stone >= w.stone && state.tools >= w.bones;
+            const cost = `🪵${w.wood} 🪨${w.stone}${w.bones ? ` 🦴${w.bones}` : ''} · +${w.atk}`;
+            addChoiceButton(`Chế & đeo: ${w.name}`, btnIdx++, false, () => craftAndEquipWeapon(w), cost, !ok);
+          }
+        } else if (bld.targetType === 8) {
+          // Khu thánh địa: cast all 4 authentic Shaman spells!
+          for (const sp of SPELLS) {
+            const ok = state.tools >= sp.bones;
+            addChoiceButton(`Phép: ${sp.name}`, btnIdx++, false, () => castShamanSpell(sp), `🦴${sp.bones}`, !ok);
+          }
+        }
+
+        if (bld.targetType === 2) {
+          addChoiceButton('CỬ DÂN VÀO NGỦ HỒI SỨC (Zzz)', btnIdx++, false, () => {
+            const uid = state.selectedUnit || findNearestVillager(bld.x, bld.y, true);
+            if (uid && assignRestTask(uid, bld)) {
+              state.panelMode = 'main';
+              state.message = `${getVillagerInfo(uid).role} đang vào Lều nghỉ ngủ!`;
+              render();
+            }
+          });
+        } else if ([1, 4, 5, 7, 8, 9, 11].includes(bld.targetType)) {
+          const jobLabels = {
+            1: 'CỬ DÂN VÀO LUYỆN CẬN CHIẾN (+8 HP)',
+            4: 'CỬ ĐẦU BẾP VÀO NẤU ĂN (+2 ĂN)',
+            5: 'CỬ DÂN VÀO LUYỆN NÉM (+8 HP)',
+            7: 'CỬ DJ MỞ TIỆC DISCO (+VUI VẺ)',
+            8: 'CỬ PHÁP SƯ TÍCH TỤ PHÉP (+XƯƠNG)',
+            9: 'CỬ TRINH SÁT MỞ SƯƠNG MÙ (R=7)',
+            11: 'CỬ LÍNH GÁC LÊN CHÒI (R=8)',
+          };
+          addChoiceButton(jobLabels[bld.targetType], btnIdx++, false, () => {
+            const uid = state.selectedUnit || findNearestVillager(bld.x, bld.y, true);
+            if (uid && assignWorkAtBuilding(uid, bld)) {
+              state.panelMode = 'main';
+              state.message = `${getVillagerInfo(uid).role} đang vào làm việc tại ${bld.spec.name}!`;
+              render();
+            }
+          });
+        }
+
+        if (level < 3) {
+          const canUp = state.wood >= 15 && state.stone >= 10;
+          addChoiceButton(`NÂNG CẤP LÊN CẤP ${level + 1}`, btnIdx++, false, () => performUpgradeBuilding(bld), '🪵15 🪨10', !canUp);
+        }
+        if (bld.hp < bld.maxHp) {
+          addChoiceButton('SỬA CHỮA CÔNG TRÌNH', btnIdx++, false, () => {
+            state.data.entityData[8505 + bld.bid] = bld.maxHp;
+            addPopup(bld.x + 1, bld.y, 'Đã sửa đầy HP!', '#9cff7b');
+            state.message = `Đã sửa chữa ${bld.spec.name} đầy HP!`;
+            render();
+          });
+        }
+        if (bld.targetType !== 3) {
+          addChoiceButton('PHÁ HỦY CÔNG TRÌNH (HOÀN 30%)', btnIdx++, false, () => performDemolishBuilding(bld));
+        }
+        addChoiceButton('QUAY LẠI (ESC)', btnIdx++, false, () => {
+          state.panelMode = 'main';
+          render();
+        });
+        helpNode.innerHTML =
+          '<strong>Quản lý công trình</strong>' +
+          '<span>Cử dân vào làm việc / luyện tập / nấu ăn / mở tiệc / chế vũ khí</span>' +
+          '<span>Nâng cấp tăng HP &amp; sức chứa; Phá hủy hoàn lại 30% gỗ đá</span>';
+        hintNode.textContent = 'QUẢN LÝ CÔNG TRÌNH · ESC QUAY LẠI';
+        return;
+      }
+    }
+
+    const ui = getUiStrings(state.language);
+    const localScName = getLocalizedScenarioName(state.langPack, state.scenarioIndex, sc.name);
+    panelTitle.textContent = state.compareOriginal
+      ? 'Ảnh chụp JAR gốc (đối chiếu)'
+      : `${state.isCustomGame ? 'Tuỳ chỉnh' : `Màn ${state.scenarioIndex + 1}`}: ${localScName} [${diff.label}]`;
+    panelCopy.textContent = state.message;
+
+    const enemyCount = getEnemyIds().length;
+    const enemyBldCount = getEnemyBuildings().length;
+    const stats = document.createElement('div');
+    stats.className = 'strategy-stats';
+    stats.innerHTML =
+      `<span>👥 Dân <b>${state.population}/${state.housingCap}</b></span>` +
+      (enemyCount > 0 || enemyBldCount > 0
+        ? `<span>⚔ Địch <b style="color:#ff8a80">${enemyCount} (${enemyBldCount} nhà)</b></span>`
+        : `<span>🧭 Con trỏ <b>${state.cursor.x},${state.cursor.y}</b></span>`) +
+      `<span>🍖 Ăn <b>${state.food}</b></span>` +
+      `<span>🪵 Gỗ <b>${state.wood}</b></span>` +
+      `<span>🪨 Đá <b>${state.stone}</b></span>` +
+      `<span>🦴 Xương <b>${state.tools}</b></span>`;
+    choicesNode.append(stats);
+
+    // Compact live Mission Objectives card
+    const evalObj = getCurrentMissionEvaluation();
+    if (evalObj.items?.length > 0) {
+      const objCard = document.createElement('div');
+      objCard.className = 'villager-card';
+      objCard.style.padding = '7px 10px';
+      objCard.innerHTML =
+        `<div class="villager-head" style="margin-bottom:4px"><strong>🎯 Mục tiêu ${state.isCustomGame ? 'Trận tuỳ chỉnh' : `Màn ${state.scenarioIndex + 1}`}</strong><span>Độ khó: ${diff.label}</span></div>` +
+        evalObj.items
+          .map(
+            (it) =>
+              `<div style="font-size:10px;line-height:1.45;color:${it.done ? '#9cff7b' : '#d3dcc9'}">${it.done ? '☑' : '☐'} ${it.label}</div>`
+          )
+          .join('');
+      choicesNode.append(objCard);
+    }
+
+    const activeIds = getActiveSelectionIds();
+    if (activeIds.length > 1) {
+      const infos = activeIds.map((id) => getVillagerInfo(id));
+      const totalAtk = activeIds.reduce((sum, id) => sum + getUnitDamage(id), 0);
+      const avgHpPct = Math.round(
+        (infos.reduce((sum, u) => sum + u.hp / u.maxHp, 0) / Math.max(1, infos.length)) * 100
+      );
+      const armedCount = infos.filter((u) => u.weaponId !== 9).length;
+      const names = infos.slice(0, 4).map((u) => u.role).join(', ') + (infos.length > 4 ? ` +${infos.length - 4}` : '');
+      const grpBadge = state.activeGroupId ? ` · NHÓM ${state.activeGroupId}` : '';
+      const card = document.createElement('div');
+      card.className = 'villager-card';
+      card.innerHTML =
+        `<div class="villager-head"><strong>⚔ Đội hình (${activeIds.length} người${grpBadge})</strong><span>Tổng ATK ${totalAtk} · ${armedCount} có vũ khí</span></div>` +
+        `<div class="need-bars">` +
+        `<div class="need-bar"><span>❤️ Máu TB ${avgHpPct}%</span><div class="need-track"><div class="need-fill" style="width:${avgHpPct}%;background:#63d957"></div></div></div>` +
+        `</div>` +
+        `<div style="margin-top:5px;font-size:10px;color:#9eb092">Thành viên: <b style="color:#e6eadf">${names}</b></div>`;
+      choicesNode.append(card);
+    } else if (state.selectedUnit) {
+      const u = getVillagerInfo(state.selectedUnit);
+      const taskLabel = describeTask(state.tasks.get(state.selectedUnit));
+      const moodLabels = ['Vui vẻ', 'Bình thường', 'Buồn', 'Kiệt sức'];
+      const card = document.createElement('div');
+      card.className = 'villager-card';
+      const hpPct = Math.round((u.hp / u.maxHp) * 100);
+      card.innerHTML =
+        `<div class="villager-head"><strong>${u.role}</strong><span>${u.sex} · ${u.age}t · ${moodLabels[u.moodIdx]} · ${u.weaponName} (ATK ${getUnitDamage(state.selectedUnit)})</span></div>` +
+        `<div class="need-bars">` +
+        `<div class="need-bar"><span>❤️ Máu ${u.hp}/${u.maxHp}</span><div class="need-track"><div class="need-fill" style="width:${hpPct}%;background:#63d957"></div></div></div>` +
+        `<div class="need-bar"><span>🍖 No ${u.satiety}%</span><div class="need-track"><div class="need-fill" style="width:${u.satiety}%;background:#f0b84b"></div></div></div>` +
+        `<div class="need-bar"><span>⚡ Sức ${u.energy}%</span><div class="need-track"><div class="need-fill" style="width:${u.energy}%;background:#6cc6f0"></div></div></div>` +
+        `</div>` +
+        `<div style="margin-top:5px;font-size:10px;color:#9eb092">Nhiệm vụ: <b style="color:#e6eadf">${taskLabel}</b></div>`;
+      choicesNode.append(card);
+    }
+
+    choicesNode.classList.add('scrollable');
+    const g7Count = state.groups[7].size;
+    const g9Count = state.groups[9].size;
+    const actions = [
+      { label: ui.buildBtn, fn: () => { cancelBuildPlacement(); state.panelMode = 'build'; render(); } },
+      { label: `${ui.scenariosBtn} (${state.scenarioIndex + 1}/10) (M)`, fn: () => { cancelBuildPlacement(); state.panelMode = 'scenarios'; render(); } },
+      { label: state.showMinimap ? '🗺 ĐÓNG BẢN ĐỒ NHỎ (3)' : ui.toggleMinimap, fn: () => toggleMinimap() },
+      { label: ui.pauseBtn, fn: () => openPauseMenu() },
+      ...(state.storyLines.length > 0 ? [{ label: ui.viewStory, fn: () => { openMissionStory(state.scenarioIndex, 'intro'); render(); } }] : []),
+      ...(!state.isCustomGame && state.scenarioIndex < SCENARIOS.length - 1
+        ? [{ label: `⏭ CHUYỂN SANG MÀN ${state.scenarioIndex + 2} (MANG BỘ LẠC)`, fn: () => proceedToNextMission() }]
+        : []),
+      { label: activeIds.length > 1 ? `GÁN NHÓM 7 (${activeIds.length} NGƯỜI)` : g7Count > 0 ? `GỌI NHÓM 7 (${g7Count} CHIẾN BINH)` : 'GÁN NHÓM 7 (SHIFT+7)', fn: () => (activeIds.length > 1 ? assignGroup(7) : recallGroup(7)) },
+      { label: activeIds.length > 1 ? `GÁN NHÓM 9 (${activeIds.length} NGƯỜI)` : g9Count > 0 ? `GỌI NHÓM 9 (${g9Count} CHIẾN BINH)` : 'GÁN NHÓM 9 (SHIFT+9)', fn: () => (activeIds.length > 1 ? assignGroup(9) : recallGroup(9)) },
+      ...(enemyCount > 0 || enemyBldCount > 0 ? [{ label: '⚔ TIẾN CÔNG ĐỊCH GẦN NHẤT (F)', fn: () => attackNearestEnemy() }] : []),
+      { label: 'TẬP HỢP TOÀN BỘ LẠC! (R)', fn: () => rallyAllVillagers() },
+      ...(activeIds.length > 1 ? [{ label: 'GIẢI TÁN ĐỘI HÌNH / LÀM VIỆC', fn: () => disbandGroupToWork() }] : []),
+      { label: state.autoAI ? 'AI BỘ LẠC TỰ ĐỘNG: ĐANG BẬT (Q)' : 'AI BỘ LẠC TỰ ĐỘNG: TẮT (Q)', fn: () => { state.autoAI = !state.autoAI; if (state.autoAI) runTribeAutoAI(); state.message = state.autoAI ? 'Đã bật AI tự động: dân rảnh sẽ tự đi thu thập và xây nhà.' : 'Đã tắt AI tự động.'; render(); } },
+      { label: 'THU THẬP & MANG VỀ TRẠI (G)', fn: () => gatherNearest() },
+      { label: 'CHUYỂN DÂN LÀNG (TAB)', fn: () => cycleUnit() },
+      { label: state.music ? '🎵 NHẠC MIDI (/SA): BẬT (N)' : '🔇 NHẠC MIDI (/SA): TẮT (N)', fn: () => toggleMusic() },
+      { label: ui.saveGame, fn: () => saveCurrentGame() },
+    ];
+    if (state.scenarioIndex === 0) {
+      actions.push({
+        label: state.compareOriginal ? 'QUAY LẠI LIVE RENDER (V)' : 'SO SÁNH ẢNH JAR GỐC (V)',
+        fn: () => { state.compareOriginal = !state.compareOriginal; render(); },
+      });
+    }
+    actions.forEach((act, idx) => addChoiceButton(act.label, idx, false, act.fn));
+
+    helpNode.innerHTML =
+      '<strong>Điều khiển chiến đấu &amp; đội hình</strong>' +
+      '<span>Kéo chuột trên map: khoanh khung chọn nhiều chiến binh (Box-select)</span>' +
+      '<span>Click quân/nhà địch: tấn công · Shift+7/9: lưu nhóm · 7/9: gọi nhóm · R: tập hợp</span>' +
+      '<span>B: xây nhà · M: đổi màn 1–10 (/ma) · Q: AI tự động · Tab: đổi dân · Esc: hủy</span>';
+    noteNode.innerHTML =
+      '<span>ⓘ</span> Render live bằng sprite sheets gốc (pi0/pi9), giải mã trực tiếp 10 bản đồ từ /ma, kèm hệ thống chiến đấu cận chiến/tầm xa (ném đá/giáo), nhóm 7 &amp; 9 và AI bộ lạc địch.';
+    hintNode.textContent =
+      state.buildType !== null
+        ? 'CLICK VÙNG XANH ĐỂ ĐẶT NHÀ · ESC HỦY'
+        : 'KÉO KHUNG CHỌN NHÓM · CLICK ĐỊCH ĐỂ ĐÁNH · 7/9: NHÓM · R: TẬP HỢP';
+    return;
+  }
+
+  if (state.phase === 'campaign') {
+    const progress = state.campaignFrame - CAPTURED_FLOW.newGame + 1;
+    const total = CAPTURED_FLOW.gameplay - CAPTURED_FLOW.newGame + 1;
+    panelTitle.textContent = `Intro chiến dịch (${progress}/${total})`;
+    panelCopy.textContent =
+      'Khung hình gốc 240×320 từ chiến dịch mở đầu. Nhấn Tiếp tục để qua các trang truyện hoặc vào thẳng màn chơi render trực tiếp.';
+    addChoiceButton('TIẾP TỤC', 0, true, () => confirm());
+    addChoiceButton('VÀO THẲNG MÀN CHƠI LIVE', 1, false, () => loadScenario(0));
+    addChoiceButton('QUAY LẠI', 2, false, () => back());
+    helpNode.innerHTML =
+      '<strong>Điều khiển</strong>' +
+      '<span>Click màn hình / Enter: khung kế tiếp</span>' +
+      '<span>Esc: quay lại menu chiến dịch</span>';
+    noteNode.innerHTML =
+      '<span>ⓘ</span> Chuỗi intro là ảnh chụp nguyên bản từ JAR gốc; kết thúc intro sẽ chuyển sang màn đồ hoạ live trên canvas.';
+    hintNode.textContent = 'CLICK / ENTER ĐỂ TIẾP TỤC INTRO';
+    return;
+  }
+
+  if (state.phase === 'customSetup') {
+    const cfg = state.customConfig;
+    const sc = SCENARIOS[cfg.scenarioIndex] || SCENARIOS[0];
+    const diff = DIFFICULTIES[cfg.difficultyIndex] || DIFFICULTIES[0];
+    panelTitle.textContent = 'Trò chơi tuỳ chỉnh';
+    panelCopy.textContent = `Tuỳ chọn bản đồ chiến dịch từ /ma, độ khó (${diff.label}: ${diff.desc}) và tài nguyên khởi đầu.`;
+    addChoiceButton(
+      `BẢN ĐỒ: MÀN ${cfg.scenarioIndex + 1} — ${sc.name}`,
+      0,
+      false,
+      () => {
+        cfg.scenarioIndex = (cfg.scenarioIndex + 1) % SCENARIOS.length;
+        render();
+      },
+      'Đổi map'
+    );
+    addChoiceButton(
+      `ĐỘ KHÓ: ${diff.label}`,
+      1,
+      false,
+      () => {
+        cfg.difficultyIndex = (cfg.difficultyIndex + 1) % DIFFICULTIES.length;
+        render();
+      },
+      cfg.difficultyIndex === 0 ? 'Địch 80%' : 'Địch 135%'
+    );
+    addChoiceButton(
+      `TÀI NGUYÊN: ${cfg.abundantResources ? 'DỒI DÀO (+60)' : 'TIÊU CHUẨN'}`,
+      2,
+      false,
+      () => {
+        cfg.abundantResources = !cfg.abundantResources;
+        render();
+      }
+    );
+    addChoiceButton('▶ BẮT ĐẦU TRẬN TUỲ CHỈNH', 3, true, () => startCustomGame());
+    addChoiceButton('QUAY LẠI (ESC)', 4, false, () => setPhase('mode'));
+    helpNode.innerHTML =
+      '<strong>Trò chơi tuỳ chỉnh</strong>' +
+      '<span>Chọn bất kỳ bản đồ nào từ 1–10 (/ma) và độ khó Dễ / Khó</span>' +
+      '<span>Chiến thắng bằng cách tiêu diệt toàn bộ quân &amp; công trình địch</span>';
+    hintNode.textContent = 'CHỌN CẤU HÌNH · BẮT ĐẦU TRẬN TUỲ CHỈNH';
+    return;
+  }
+
+  const phaseDef = PHASES[state.phase];
+  if (state.phase === 'campaignMenu') {
+    const ui = getUiStrings(state.language);
+    const meta = loadSaveMetadata();
+    phaseDef.options[0] = meta
+      ? `${ui.continueSaved} (Màn ${meta.scenarioIndex + 1} · ${meta.population} dân)`
+      : `${ui.continueSaved} (chưa có save)`;
+    phaseDef.options[1] = ui.newCampaign;
+    phaseDef.options[2] = `${ui.difficulty}: ${getCurrentDifficulty().label}`;
+  }
+  panelTitle.textContent = phaseDef.title;
+  panelCopy.textContent = state.message || phaseDef.copy;
+  phaseDef.options.forEach((label, i) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = `choice${i === state.selected ? ' selected' : ''}`;
+    btn.setAttribute('aria-pressed', String(i === state.selected));
+    btn.innerHTML = `<span class="index">${String(i + 1).padStart(2, '0')}</span><span class="label"></span><span class="arrow">${i === state.selected ? '▶' : ''}</span>`;
+    btn.querySelector('.label').textContent = label;
+    btn.addEventListener('mouseenter', () => {
+      state.selected = i;
+      choicesNode.querySelectorAll('.choice').forEach((el, idx) => {
+        const isSel = idx === i;
+        el.classList.toggle('selected', isSel);
+        el.setAttribute('aria-pressed', String(isSel));
+        const arrow = el.querySelector('.arrow');
+        if (arrow) arrow.textContent = isSel ? '▶' : '';
+      });
+      draw();
+    });
+    btn.addEventListener('click', () => {
+      state.selected = i;
+      confirm();
+    });
+    choicesNode.append(btn);
+  });
+  helpNode.innerHTML =
+    '<strong>Điều khiển</strong>' +
+    '<span>↑ ↓ hoặc W S: chọn mục</span>' +
+    '<span>Enter / Space: xác nhận</span>' +
+    '<span>Click trực tiếp vào màn hình hoặc danh sách bên cạnh</span>';
+  noteNode.innerHTML =
+    '<span>ⓘ</span> Menu mở đầu dùng ảnh chụp 240×320 của JAR gốc; 10 màn chiến dịch chạy live bằng tile/sprite (pi0/pi9) và /ma giải mã trực tiếp.';
+  hintNode.textContent = 'CLICK / CHẠM · ENTER XÁC NHẬN';
+}
+
+function render() {
+  draw();
+  updatePanel();
+}
+
+function setPhase(phase) {
+  state.phase = phase;
+  state.selected = 0;
+  state.compareOriginal = false;
+  if (phase === 'game') {
+    if (state.data && !state.selectedUnit) {
+      state.selectedUnit = state.data.hoverUnit || getVillagerIds()[0] || 0;
+    }
+  } else if (PHASES[phase]) {
+    state.message = PHASES[phase].copy;
+  }
+  render();
+}
+
+function confirm() {
+  if (state.phase === 'language') {
+    applyLanguage(state.selected);
+    setPhase('music');
+    return;
+  }
+  if (state.phase === 'music') {
+    state.music = state.selected === 0;
+    midiSynth.setEnabled(state.music, 0);
+    setPhase('mainMenu');
+    return;
+  }
+  if (state.phase === 'mainMenu') {
+    if (state.selected === 0) {
+      setPhase('mode');
+      return;
+    }
+    state.message = `${PHASES.mainMenu.options[state.selected]} — mục này chưa được dựng trong bản web.`;
+    render();
+    return;
+  }
+  if (state.phase === 'mode') {
+    if (state.selected === 0) {
+      setPhase('campaignMenu');
+      return;
+    }
+    if (state.selected === 1) {
+      setPhase('customSetup');
+      return;
+    }
+    if (state.selected === 2) {
+      if (!state.data) loadScenario(0);
+      state.panelMode = 'scenarios';
+      setPhase('game');
+      return;
+    }
+    setPhase('mainMenu');
+    return;
+  }
+  if (state.phase === 'campaignMenu') {
+    if (state.selected === 0) {
+      resumeSavedGame();
+      return;
+    }
+    if (state.selected === 1) {
+      state.carryoverTribe = null;
+      loadScenario(0, { useCarryover: false, isCustomGame: false, showStory: true });
+      return;
+    }
+    if (state.selected === 2) {
+      state.difficultyIndex = (state.difficultyIndex + 1) % DIFFICULTIES.length;
+      const diff = getCurrentDifficulty();
+      state.message = `Đã chọn Độ khó: ${diff.label} — ${diff.desc}`;
+      render();
+      return;
+    }
+    setPhase('mode');
+    return;
+  }
+  if (state.phase === 'campaign') {
+    if (state.campaignFrame < CAPTURED_FLOW.gameplay) {
+      state.campaignFrame++;
+      render();
+      return;
+    }
+    loadScenario(0, { showStory: true });
+    return;
+  }
+  if (state.phase === 'game' && state.data) {
+    if (state.storyDialog) {
+      advanceStoryDialog();
+      return;
+    }
+    if (state.missionResult) return;
+    if (state.buildType !== null) {
+      confirmBuildAtCursor();
+      return;
+    }
+    const { x, y } = state.cursor;
+    const occ = state.data.occupancy[y]?.[x] ?? 0;
+    if (occ >= 1 && occ <= 50) {
+      selectUnit(occ);
+      return;
+    }
+    if (occ <= -1 && occ >= -30) {
+      const bld = getPlayerBuildings().find((b) => b.bid === -occ);
+      if (bld && bld.underConstruction && getActiveSelectionIds().length > 0) {
+        commandUnitTo(x, y);
+        return;
+      }
+      if (bld) {
+        state.selectedBuildingBid = bld.bid;
+        state.panelMode = 'building';
+        state.message = `${bld.spec.name} (HP ${bld.hp}/${bld.maxHp}). ${bld.spec.desc}`;
+        render();
+        return;
+      }
+    }
+    if (getActiveSelectionIds().length > 0) {
+      commandUnitTo(x, y);
+    } else if (occ >= 51 && occ <= 100) {
+      const ehp = state.data.entityData[1919 + occ] & 0xff;
+      const emax = state.data.entityData[6767 + occ] & 0xff;
+      state.message = `Chiến binh địch (HP ${ehp}/${emax}) — hãy chọn chiến binh của bạn trước để tấn công!`;
+      render();
+    } else if (occ <= -31 && occ >= -60) {
+      const ebld = getEnemyBuildings().find((b) => b.bid === -occ);
+      state.message = ebld
+        ? `${ebld.spec.name} của địch (HP ${ebld.hp}/${ebld.maxHp}) — hãy chọn chiến binh để phá hủy!`
+        : 'Công trình của địch — hãy chọn chiến binh để tấn công!';
+      render();
+    } else {
+      state.message = 'Hãy chọn một dân làng trước (click vào dân, kéo khung chọn nhóm, hoặc nhấn Tab).';
+      render();
+    }
+  }
+}
+
+function back() {
+  if (state.phase === 'game') {
+    if (state.storyDialog) {
+      state.storyDialog = null;
+      render();
+      return;
+    }
+    if (state.missionResult) {
+      state.missionResult = null;
+      setPhase('mode');
+      return;
+    }
+    if (state.showMinimap) {
+      state.showMinimap = false;
+      render();
+      return;
+    }
+    if (state.panelMode === 'pause') {
+      closePauseMenu();
+      return;
+    }
+    if (state.buildType !== null) {
+      cancelBuildPlacement();
+      state.message = 'Đã hủy chế độ đặt công trình.';
+      render();
+      return;
+    }
+    if (state.panelMode !== 'main') {
+      state.panelMode = 'main';
+      render();
+      return;
+    }
+    if (state.selectedUnit || state.selectedUnits.size > 0) {
+      state.selectedUnit = 0;
+      state.selectedUnits.clear();
+      state.activeGroupId = 0;
+      state.activePath = [];
+      state.message = 'Đã bỏ chọn dân làng. Click dân khác hoặc nhấn Esc lần nữa để về menu.';
+      render();
+      return;
+    }
+    setPhase('mode');
+  } else if (state.phase === 'campaign') {
+    setPhase('campaignMenu');
+  } else if (state.phase === 'campaignMenu' || state.phase === 'customSetup') {
+    setPhase('mode');
+  } else if (state.phase === 'mode') {
+    setPhase('mainMenu');
+  } else if (state.phase === 'mainMenu') {
+    setPhase('music');
+  } else if (state.phase === 'music') {
+    setPhase('language');
+  }
+}
+
+function moveCursor(dx, dy) {
+  if (!state.data) return;
+  state.cursor.x = Math.max(0, Math.min(state.data.width - 1, state.cursor.x + dx));
+  state.cursor.y = Math.max(0, Math.min(state.data.height - 1, state.cursor.y + dy));
+  ensureCursorInView();
+  if (state.buildType !== null) updateBuildPreview();
+  render();
+}
+
+function canvasCoords(event) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: ((event.clientX - rect.left) * LOGICAL_WIDTH) / rect.width,
+    y: ((event.clientY - rect.top) * LOGICAL_HEIGHT) / rect.height,
+  };
+}
+
+function screenToMapCell(sx, sy) {
+  const d = state.data;
+  const originY = (d.mapTopUi ?? 22) - (d.verticalOffset ?? 6);
+  const col = Math.floor(sx / CELL_WIDTH);
+  const row = Math.floor((sy - originY) / CELL_HEIGHT);
+  return {
+    x: Math.max(0, Math.min(d.width - 1, state.cameraX + col)),
+    y: Math.max(0, Math.min(d.height - 1, state.cameraY + row)),
+  };
+}
+
+function toSignedByteLocal(v) {
+  const b = v & 0xff;
+  return b > 127 ? b - 256 : b;
+}
+
+window.addEventListener('keydown', (event) => {
+  const key = event.key.toLowerCase();
+  if (state.phase === 'game') {
+    if (event.key === 'ArrowLeft' || key === 'a') { event.preventDefault(); moveCursor(-1, 0); }
+    else if (event.key === 'ArrowRight' || key === 'd') { event.preventDefault(); moveCursor(1, 0); }
+    else if (event.key === 'ArrowUp' || key === 'w') { event.preventDefault(); moveCursor(0, -1); }
+    else if (event.key === 'ArrowDown' || key === 's') { event.preventDefault(); moveCursor(0, 1); }
+    else if (event.key === 'Tab') { event.preventDefault(); cycleUnit(); }
+    else if (event.key === '7' || event.key === '&') { event.preventDefault(); if (event.shiftKey) assignGroup(7); else recallGroup(7); }
+    else if (event.key === '9' || event.key === '(') { event.preventDefault(); if (event.shiftKey) assignGroup(9); else recallGroup(9); }
+    else if (key === 'r') { event.preventDefault(); rallyAllVillagers(); }
+    else if (key === 'f') { event.preventDefault(); attackNearestEnemy(); }
+    else if (key === 'b') { event.preventDefault(); cancelBuildPlacement(); state.panelMode = state.panelMode === 'build' ? 'main' : 'build'; render(); }
+    else if (key === 'm') { event.preventDefault(); cancelBuildPlacement(); state.panelMode = state.panelMode === 'scenarios' ? 'main' : 'scenarios'; render(); }
+    else if (key === 'q') { event.preventDefault(); state.autoAI = !state.autoAI; if (state.autoAI) runTribeAutoAI(); state.message = state.autoAI ? 'Đã bật AI bộ lạc tự động.' : 'Đã tắt AI bộ lạc tự động.'; render(); }
+    else if (key === 'g') { event.preventDefault(); gatherNearest(); }
+    else if (key === 'c') { event.preventDefault(); if (state.selectedUnit) { centerOnUnit(state.selectedUnit); render(); } }
+    else if (event.key === '3') { event.preventDefault(); toggleMinimap(); }
+    else if (key === 'n') { event.preventDefault(); toggleMusic(); }
+    else if (key === 'p') { event.preventDefault(); if (state.panelMode === 'pause') closePauseMenu(); else openPauseMenu(); }
+    else if (key === 'v' && state.scenarioIndex === 0) { event.preventDefault(); state.compareOriginal = !state.compareOriginal; render(); }
+    else if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); confirm(); }
+    else if (event.key === 'Escape' || event.key === 'Backspace') { event.preventDefault(); back(); }
+    return;
+  }
+
+  if (state.phase === 'campaign') {
+    if (event.key === 'Enter' || event.key === ' ' || event.key === 'ArrowRight') { event.preventDefault(); confirm(); }
+    else if (event.key === 'ArrowLeft' && state.campaignFrame > CAPTURED_FLOW.newGame) { event.preventDefault(); state.campaignFrame--; render(); }
+    else if (event.key === 'Escape' || event.key === 'Backspace') { event.preventDefault(); back(); }
+    return;
+  }
+
+  const options = PHASES[state.phase]?.options || [];
+  if (event.key === 'ArrowDown' || event.key === 'ArrowRight' || key === 's' || key === 'd') {
+    event.preventDefault();
+    state.selected = (state.selected + 1) % options.length;
+    render();
+  } else if (event.key === 'ArrowUp' || event.key === 'ArrowLeft' || key === 'w' || key === 'a') {
+    event.preventDefault();
+    state.selected = (state.selected + options.length - 1) % options.length;
+    render();
+  } else if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault();
+    confirm();
+  } else if (event.key === 'Escape' || event.key === 'Backspace') {
+    event.preventDefault();
+    back();
+  }
+});
+
+let dragStart = null;
+
+canvas.addEventListener('pointermove', (event) => {
+  if (state.phase !== 'game' || !state.data) return;
+  const { x, y } = canvasCoords(event);
+  if (dragStart && state.selectionBox) {
+    const topUi = state.data.mapTopUi ?? 22;
+    const bottomTop = LOGICAL_HEIGHT - (state.data.bottomUi ?? 22);
+    state.selectionBox.x1 = Math.max(0, Math.min(LOGICAL_WIDTH, x));
+    state.selectionBox.y1 = Math.max(topUi, Math.min(bottomTop, y));
+    state.cursor = screenToMapCell(state.selectionBox.x1, state.selectionBox.y1);
+    draw();
+    return;
+  }
+  const topHudHeight = state.selectedUnit > 0 && !state.storyDialog && !state.missionResult ? (state.data.mapTopUi ?? 22) + 48 : (state.data.mapTopUi ?? 22);
+  if (y < topHudHeight || y >= LOGICAL_HEIGHT - (state.data.bottomUi ?? 22)) return;
+  const cell = screenToMapCell(x, y);
+  if (cell.x !== state.cursor.x || cell.y !== state.cursor.y) {
+    state.cursor = cell;
+    if (state.buildType !== null) updateBuildPreview();
+    draw();
+  }
+});
+
+canvas.addEventListener('pointerdown', (event) => {
+  const { x, y } = canvasCoords(event);
+  if (state.phase === 'game' && state.data) {
+    if (state.storyDialog) {
+      advanceStoryDialog();
+      return;
+    }
+    if (state.missionResult) return;
+    const bottomTop = LOGICAL_HEIGHT - (state.data.bottomUi ?? 22);
+    if (y >= bottomTop) {
+      if (x <= 32) {
+        state.paused = !state.paused;
+        state.message = state.paused ? 'Đã tạm dừng mô phỏng.' : 'Tiếp tục mô phỏng.';
+        render();
+      } else if (x >= 92 && x <= 118) {
+        if (event.shiftKey) assignGroup(7);
+        else recallGroup(7);
+      } else if (x >= 122 && x <= 148) {
+        if (event.shiftKey) assignGroup(9);
+        else recallGroup(9);
+      } else if (x >= 165 && x <= 212) {
+        cancelBuildPlacement();
+        state.panelMode = state.panelMode === 'build' ? 'main' : 'build';
+        render();
+      } else if (x >= LOGICAL_WIDTH - 32) {
+        if (state.panelMode === 'pause') closePauseMenu();
+        else openPauseMenu();
+      }
+      return;
+    }
+    if (state.showMinimap) {
+      jumpCameraFromMinimap(x, y);
+      return;
+    }
+    const topBase = state.data.mapTopUi ?? 22;
+    const panel4Open = state.selectedUnit > 0 && !state.storyDialog && !state.missionResult;
+    if (y < topBase) return;
+    if (panel4Open && y < topBase + 48) {
+      // Clicking Panel 4 avatar centers on the villager; clicking Panel 4 does not click map underneath
+      if (x <= 38) {
+        centerOnUnit(state.selectedUnit);
+        render();
+      }
+      return;
+    }
+    if (state.buildType !== null) {
+      state.cursor = screenToMapCell(x, y);
+      updateBuildPreview();
+      confirm();
+      return;
+    }
+    dragStart = { x, y };
+    state.selectionBox = { x0: x, y0: y, x1: x, y1: y };
+    try { canvas.setPointerCapture(event.pointerId); } catch {}
+    return;
+  }
+
+  if (state.phase === 'campaign') {
+    confirm();
+    return;
+  }
+
+  if (state.phase === 'music') {
+    state.selected = x < LOGICAL_WIDTH / 2 ? 0 : 1;
+    confirm();
+    return;
+  }
+
+  if (state.phase === 'customSetup') return;
+
+  const phaseDef = PHASES[state.phase];
+  if (!phaseDef) return;
+  const top = state.phase === 'language' ? 92 : state.phase === 'campaignMenu' ? 124 : 144;
+  const row = Math.round((y - top) / 20);
+  if (row >= 0 && row < phaseDef.options.length && Math.abs(y - (top + row * 20)) <= 12) {
+    state.selected = row;
+    confirm();
+  }
+});
+
+function finishCanvasPointerDrag(event, cancelled = false) {
+  if (!dragStart) return;
+  const start = dragStart;
+  dragStart = null;
+  state.selectionBox = null;
+  if (cancelled || state.phase !== 'game' || !state.data) {
+    draw();
+    return;
+  }
+  const { x, y } = canvasCoords(event);
+  const w = Math.abs(x - start.x);
+  const h = Math.abs(y - start.y);
+  if (w > 8 || h > 8) {
+    const d = state.data;
+    const e = d.entityData;
+    const originY = (d.mapTopUi ?? 22) - (d.verticalOffset ?? 6);
+    const x0 = Math.min(start.x, x) - 6;
+    const x1 = Math.max(start.x, x) + 6;
+    const y0 = Math.min(start.y, y) - 6;
+    const y1 = Math.max(start.y, y) + 6;
+    const picked = [];
+    for (const id of getVillagerIds()) {
+      if (isUnitInsideBuilding(d, id)) continue;
+      const sx = ((e[id] & 0xff) - state.cameraX) * CELL_WIDTH + toSignedByteLocal(e[202 + id]) + 11;
+      const sy = originY + ((e[101 + id] & 0xff) - state.cameraY) * CELL_HEIGHT + toSignedByteLocal(e[303 + id]) + 7;
+      if (sx >= x0 && sx <= x1 && sy >= y0 && sy <= y1) picked.push(id);
+    }
+    if (picked.length > 0) {
+      state.selectedUnits = new Set(picked);
+      state.selectedUnit = picked[0];
+      state.activeGroupId = 0;
+      state.activePath = [];
+      state.message =
+        picked.length > 1
+          ? `Đã khoanh khung chọn ${picked.length} chiến binh! Click ô đất để hành quân, click địch để tấn công, hoặc nhấn Shift+7 / Shift+9 để lưu nhóm.`
+          : `Đã chọn ${getVillagerInfo(picked[0]).role}.`;
+      render();
+    } else {
+      draw();
+    }
+    return;
+  }
+  state.cursor = screenToMapCell(x, y);
+  confirm();
+}
+
+canvas.addEventListener('pointerup', (event) => finishCanvasPointerDrag(event, false));
+canvas.addEventListener('pointercancel', (event) => finishCanvasPointerDrag(event, true));
+
+document.querySelector('[data-action="confirm"]').addEventListener('click', confirm);
+document.querySelector('[data-action="back"]').addEventListener('click', back);
+
+spriteCache.preloadCoreSheets();
+for (let i = 0; i <= 4; i++) getCaptureImage(i);
+
+const initParams = new URLSearchParams(window.location.search);
+const startLangParam = Number.parseInt(initParams.get('lang') ?? '0', 10);
+const startLang = Number.isFinite(startLangParam) ? Math.max(0, Math.min(4, startLangParam)) : 0;
+
+Promise.all([
+  fetch('data-first-map.json').then((r) => {
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return r.json();
+  }),
+  fetch('assets/ma')
+    .then((r) => (r.ok ? r.arrayBuffer() : null))
+    .then((buf) => (buf ? new Uint8Array(buf) : null))
+    .catch(() => null),
+  fetch('assets/a')
+    .then((r) => (r.ok ? r.arrayBuffer() : null))
+    .then((buf) => (buf ? new Uint8Array(buf) : null))
+    .catch(() => null),
+  fetch('assets/pd0')
+    .then((r) => (r.ok ? r.arrayBuffer() : null))
+    .then((buf) => (buf ? new Uint8Array(buf) : null))
+    .catch(() => null),
+  fetch('assets/sa')
+    .then((r) => (r.ok ? r.arrayBuffer() : null))
+    .then((buf) => (buf ? new Uint8Array(buf) : null))
+    .catch(() => null),
+  loadLanguagePack(startLang),
+])
+  .then(([baseData, maBytes, aBytes, pd0Bytes, saBytes, langPack]) => {
+    // Phase 6: Hydrate sprite & lookup tables directly from original /pd0 and /a binaries!
+    const parsedPd0 = parseOriginalPd0(pd0Bytes);
+    if (parsedPd0) {
+      baseData.shortSpriteTables = parsedPd0.shortSpriteTables;
+      baseData.byteSpriteTables = parsedPd0.byteSpriteTables;
+    }
+    const parsedA = parseOriginalA(aBytes);
+    if (parsedA) {
+      baseData.mapTableData = parsedA.mapTableData;
+      baseData.mapTableOffsets = parsedA.mapTableOffsets;
+      baseData.entityFieldOffsets = parsedA.entityFieldOffsets;
+    }
+    if (saBytes) {
+      midiSynth.loadTracks(saBytes);
+    }
+
+    state.baseData = baseData;
+    state.maBytes = maBytes;
+    state.language = startLang;
+    state.langPack = langPack;
+    state.storyLines = langPack?.d0 || [];
+
+    const params = initParams;
+    const requested = params.get('screen');
+    const scenarioParam = Number.parseInt(params.get('scenario') ?? '0', 10);
+    const startScenario = Number.isFinite(scenarioParam) ? Math.max(0, Math.min(9, scenarioParam)) : 0;
+    const wantStory = params.get('story') === '1';
+
+    if (requested === 'game' || requested === 'strategy') {
+      loadScenario(startScenario, { showStory: wantStory });
+    } else if (requested === 'custom') {
+      state.data = loadScenarioFromMa(baseData, maBytes, 0);
+      setPhase('customSetup');
+    } else {
+      state.data = loadScenarioFromMa(baseData, maBytes, 0);
+      setPhase('language');
+    }
+    setInterval(stepSimulation, 120);
+
+    // 60 FPS smooth sub-tick visual interpolation for walking units (preserves exact 120ms/tick original speed)
+    function animateSmooth60Fps(now) {
+      if (
+        state.phase === 'game' &&
+        state.data &&
+        !state.paused &&
+        !state.storyDialog &&
+        !state.missionResult &&
+        state.lastSimTime
+      ) {
+        const subTick = Math.max(0, Math.min(0.98, (now - state.lastSimTime) / 120));
+        const e = state.data.entityData;
+        let anyMoving = false;
+        const interpUnit = (uid, task) => {
+          if (!task?.path || task.path.length === 0 || task.stepProgress <= 0) return;
+          const ux = e[uid] & 0xff;
+          const uy = e[101 + uid] & 0xff;
+          const target = task.path[0];
+          const dx = target.x - ux;
+          const dy = target.y - uy;
+          const stepsPerTile = getUnitStepTicks(uid, dx, dy);
+          const smoothStep = Math.min(stepsPerTile, task.stepProgress - 1 + subTick);
+          const frac = smoothStep / stepsPerTile;
+          e[202 + uid] = Math.round(dx * CELL_WIDTH * frac);
+          e[303 + uid] = Math.round(dy * CELL_HEIGHT * frac);
+          anyMoving = true;
+        };
+        for (const [uid, task] of state.tasks.entries()) interpUnit(uid, task);
+        for (const [eid, task] of state.enemyTasks.entries()) interpUnit(eid, task);
+        if (anyMoving) draw();
+      }
+      window.requestAnimationFrame(animateSmooth60Fps);
+    }
+    window.requestAnimationFrame(animateSmooth60Fps);
+  })
+  .catch((err) => {
+    panelCopy.textContent = `Không tải được dữ liệu bản đồ: ${err.message}`;
+  });

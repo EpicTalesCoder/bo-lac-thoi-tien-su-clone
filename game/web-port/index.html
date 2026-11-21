@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#202b1f" />
+    <title>Prehistoric Tribes — Web prototype</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">BẢN CHẠY TRÊN TRÌNH DUYỆT</p>
+          <h1>Prehistoric Tribes</h1>
+        </div>
+        <span class="runtime-badge"><span></span> Web · không cần J2ME</span>
+      </header>
+
+      <section class="layout" aria-label="Game browser prototype">
+        <div class="game-column">
+          <div class="screen-wrap">
+            <canvas id="game" width="240" height="320" aria-label="Màn hình game 240 nhân 320"></canvas>
+          </div>
+          <div class="touch-controls" aria-label="Điều khiển nhanh">
+            <button type="button" data-action="back" aria-label="Quay lại">←</button>
+            <span id="control-hint">CLICK / CHẠM · ENTER XÁC NHẬN</span>
+            <button type="button" data-action="confirm" aria-label="Xác nhận">✓</button>
+          </div>
+        </div>
+
+        <aside class="side-panel">
+          <div class="panel-heading">
+            <p class="eyebrow">BẢN DỰNG WEB ĐANG CHẠY</p>
+            <h2 id="screen-title">Chọn ngôn ngữ</h2>
+          </div>
+          <p id="screen-copy" class="screen-copy">Chọn một ngôn ngữ bằng chuột hoặc bàn phím. Bản thử nghiệm chạy trực tiếp trong canvas của trình duyệt.</p>
+          <div class="choice-list" id="choices" role="group" aria-label="Lựa chọn màn hình"></div>
+          <div class="help-card" id="help-card">
+            <strong>Điều khiển</strong>
+            <span>↑ ↓ hoặc W S để chọn</span>
+            <span>Enter / Space để xác nhận</span>
+            <span>Click để tiếp tục hoặc chọn mục</span>
+          </div>
+          <p class="scope-note" id="scope-note"><span>ⓘ</span> Prototype render dùng tile/sprite gốc và map scenario trích từ build tái dựng; cần đối chiếu thêm với JAR gốc.</p>
+        </aside>
+      </section>
+      <footer>Chạy cục bộ · 240×320 logic · lưu tiến độ trong phiên trình duyệt</footer>
+    </main>
+    <script type="module" src="game.js"></script>
+  </body>
+</html>
