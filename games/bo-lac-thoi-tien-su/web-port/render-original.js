@@ -1218,6 +1218,9 @@ function drawAuthenticBottomMenu(ctx, data, state, imageCache) {
     } else if (item.unitId !== undefined) {
       const av = data.entityData[2727 + item.unitId] & 0xff;
       drawComposite(ctx, data, 720 + av, sx + 1, sy - 2, imageCache);
+      if (item.rankBadge !== undefined) {
+        drawPanel4Text(ctx, `^${item.rankBadge}`, sx + 22, sy + 14, 'center', 8, '#fff55a');
+      }
     } else if (item.glyph) {
       ctx.fillStyle = isSel ? '#fff582' : '#2e1d08';
       ctx.font = 'bold 11px monospace';

@@ -2807,10 +2807,13 @@ function commandUnitTo(tx, ty, overrideIds = null, owner = state.localTribe ?? 0
       // Phòng tập (1) / Khu tập ném (5): auto-grab 1 Wood / 1 Stone from Storage if unarmed, then train!
       let sent = 0;
       for (const uid of adultIds) {
+        if ((d.entityData[4444 + uid] & 0xff) === bld.bid) continue;
         if (assignTrainOrFetchWeapon(uid, bld, owner, Boolean(overrideIds))) sent++;
       }
       if (sent > 0 && !overrideIds) {
         render();
+      } else if (sent === 0 && !overrideIds) {
+        openCanvasBuildingMenu(bld);
       }
       return;
     } else if (bld && [0, 8, 9, 11].includes(bld.targetType)) {
@@ -5959,6 +5962,37 @@ function openCanvasVillagersMenu() {
   render();
 }
 
+function getBuildingOccupants(bid) {
+  const e = state.data?.entityData;
+  if (!e || !bid) return [];
+  const list = [];
+  let cur = e[8993 + bid];
+  let guard = 0;
+  while (cur > 0 && guard++ < 16) {
+    list.push(cur);
+    cur = e[4545 + cur];
+  }
+  return list;
+}
+
+function evictUnitFromBuilding(uid, bld) {
+  if (!state.data || !uid) return false;
+  const ok = exitBuildingSlot(state.data, uid);
+  state.tasks.delete(uid);
+  state.savedJobs.delete(uid);
+  setUnitCarry(uid, 0, 0);
+  setUnitAnim(uid, 8, 0);
+  state.selectedUnit = uid;
+  state.selectedUnits.clear();
+  state.selectedUnits.add(uid);
+  state.activePath = [];
+  const info = getVillagerInfo(uid);
+  if (bld) {
+    state.message = `🚪 ${info.role} đã rời khỏi ${bld.spec.name}!`;
+  }
+  return ok;
+}
+
 function openCanvasBuildingMenu(bld) {
   if (!bld || !state.data) return;
   cancelBuildPlacement();
@@ -6156,6 +6190,53 @@ function openCanvasBuildingMenu(bld) {
       },
     });
   } else if ([1, 5, 9, 11].includes(bld.targetType)) {
+    const isTrainingHall = bld.targetType === 1 || bld.targetType === 5;
+    if (isTrainingHall) {
+      const e = state.data.entityData;
+      const occupants = getBuildingOccupants(bld.bid);
+      for (const uid of occupants) {
+        const info = getVillagerInfo(uid);
+        const rank = bld.targetType === 5 ? e[1717 + uid] & 0xff : e[1616 + uid] & 0xff;
+        const hp = e[1919 + uid] & 0xff;
+        const maxHp = Math.max(1, e[6767 + uid] & 0xff);
+        items.push({
+          label: `RỜI PHÒNG: ${info.role.toUpperCase()} (CẤP ${rank})`,
+          unitId: uid,
+          rankBadge: rank,
+          costText: `Click/Enter: Cho rời ${bld.spec.name} · HP ${hp}/${maxHp}`,
+          canAfford: true,
+          action: () => {
+            evictUnitFromBuilding(uid, bld);
+            if (getBuildingOccupants(bld.bid).length > 0) {
+              openCanvasBuildingMenu(bld);
+            } else {
+              state.canvasMenu = null;
+              render();
+            }
+          },
+        });
+      }
+      if (occupants.length >= 2) {
+        items.push({
+          label: `CHO TẤT CẢ RỜI PHÒNG (${occupants.length})`,
+          glyph: '🚪',
+          costText: `Đưa cả ${occupants.length} người ra ngoài ${bld.spec.name}`,
+          canAfford: true,
+          action: () => {
+            const list = getBuildingOccupants(bld.bid);
+            state.selectedUnits.clear();
+            for (const uid of list) {
+              evictUnitFromBuilding(uid, bld);
+            }
+            for (const uid of list) state.selectedUnits.add(uid);
+            state.selectedUnit = list[0] || 0;
+            state.message = `🚪 Đã cho ${list.length} người rời khỏi ${bld.spec.name}!`;
+            state.canvasMenu = null;
+            render();
+          },
+        });
+      }
+    }
     const workLabels = {
       1: 'LUYỆN CẬN CHIẾN (+8 HP)',
       5: 'LUYỆN NÉM (+8 HP)',
@@ -6929,6 +7010,47 @@ function updatePanel() {
             }
           });
         } else if ([1, 4, 5, 7, 8, 9, 11].includes(bld.targetType)) {
+          if (bld.targetType === 1 || bld.targetType === 5) {
+            const e = state.data.entityData;
+            const occupants = getBuildingOccupants(bld.bid);
+            for (const uid of occupants) {
+              const info = getVillagerInfo(uid);
+              const rank = bld.targetType === 5 ? e[1717 + uid] & 0xff : e[1616 + uid] & 0xff;
+              const hp = e[1919 + uid] & 0xff;
+              const maxHp = Math.max(1, e[6767 + uid] & 0xff);
+              addChoiceButton(
+                `RỜI PHÒNG: ${info.role} (Cấp ${rank})`,
+                btnIdx++,
+                false,
+                () => {
+                  evictUnitFromBuilding(uid, bld);
+                  if (state.canvasMenu?.kind === 'building') {
+                    if (getBuildingOccupants(bld.bid).length > 0) openCanvasBuildingMenu(bld);
+                    else state.canvasMenu = null;
+                  }
+                  render();
+                },
+                `HP ${hp}/${maxHp}`
+              );
+            }
+            if (occupants.length >= 2) {
+              addChoiceButton(
+                `CHO TẤT CẢ RỜI PHÒNG (${occupants.length})`,
+                btnIdx++,
+                false,
+                () => {
+                  const list = getBuildingOccupants(bld.bid);
+                  state.selectedUnits.clear();
+                  for (const uid of list) evictUnitFromBuilding(uid, bld);
+                  for (const uid of list) state.selectedUnits.add(uid);
+                  state.selectedUnit = list[0] || 0;
+                  state.message = `🚪 Đã cho ${list.length} người rời khỏi ${bld.spec.name}!`;
+                  state.canvasMenu = null;
+                  render();
+                }
+              );
+            }
+          }
           const jobLabels = {
             1: 'CỬ DÂN VÀO LUYỆN CẬN CHIẾN (+8 HP)',
             4: 'CỬ ĐẦU BẾP VÀO NẤU ĂN (+2 ĂN)',
