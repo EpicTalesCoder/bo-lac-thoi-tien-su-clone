@@ -2775,11 +2775,10 @@ function commandUnitTo(tx, ty, overrideIds = null, owner = state.localTribe ?? 0
       }
       return;
     } else if (bld && [0, 8, 9, 11].includes(bld.targetType)) {
-      // Kho vũ khí (bType 0) only has 1 Blacksmith slot (slot 0) — don't assign a 2nd villager if already staffed!
+      // Kho vũ khí (bType 0) only has 1 Blacksmith slot (slot 0) — if already staffed, open the weapon forge queue menu!
       if (bld.targetType === 0 && isBuildingSlot0Occupied(bld.bid)) {
         if (!overrideIds) {
-          state.message = '🔨 Kho vũ khí đã có Thợ rèn đang làm việc!';
-          render();
+          openCanvasBuildingMenu(bld);
         }
         return;
       }
@@ -4795,9 +4794,9 @@ function stepSimulation() {
           else setUnitAnim(unitId, 113, (signFrame - 13) % 12);
           continue;
         }
-        // No weapons queued: Blacksmith naps (anim 85, 19f) instead of hammering!
+        // No weapons queued: Blacksmith stands idle at the anvil (anim 8) waiting for forge orders — NEVER anim 85 (eating)!
         setUnitCarry(unitId, 0, 0);
-        setUnitAnim(unitId, 85, Math.floor(task.workTicks / 2) % 19);
+        setUnitAnim(unitId, 8, 0);
         continue;
       }
 
@@ -6176,9 +6175,21 @@ function handleCanvasMenuClick(x, y) {
   const slotIdx = Math.floor((x - startX) / slotStep);
   if (slotIdx >= 0 && slotIdx < visible) {
     const idx = scroll + slotIdx;
+    const wasSelected = m.selected === idx;
     m.selected = idx;
     if (m.kind === 'villagers' && items[idx]?.unitId) {
       state.selectedUnit = items[idx].unitId;
+    }
+    if (items[idx]?.decreaseAction) {
+      // Weapon forge queue slot: first click selects it, clicking top half (+1) or bottom half (-1) adjusts quantity!
+      if (!wasSelected) {
+        render();
+      } else if (y >= panelY + 34) {
+        items[idx].decreaseAction();
+      } else {
+        items[idx].action?.();
+      }
+      return true;
     }
     items[idx]?.action?.();
     return true;
@@ -7098,7 +7109,13 @@ function confirm() {
       const storageHasWeapons =
         bld?.targetType === 6 &&
         WEAPONS.some((w) => (state.data.resources?.[myTribe]?.[5 + w.id] || 0) > 0);
-      if (bld && hasSel && (bld.underConstruction || (bld.targetType !== 6 && bld.targetType !== 3) || (!storageHasWeapons && bld.targetType === 3))) {
+      const workshopAlreadyStaffed = bld?.targetType === 0 && !bld.underConstruction && isBuildingSlot0Occupied(bld.bid);
+      if (
+        bld &&
+        hasSel &&
+        !workshopAlreadyStaffed &&
+        (bld.underConstruction || (bld.targetType !== 6 && bld.targetType !== 3) || (!storageHasWeapons && bld.targetType === 3))
+      ) {
         commandUnitTo(x, y);
         return;
       }
