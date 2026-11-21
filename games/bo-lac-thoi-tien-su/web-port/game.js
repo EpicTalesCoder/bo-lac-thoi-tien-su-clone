@@ -1,6 +1,7 @@
 import {
   LOGICAL_WIDTH,
   LOGICAL_HEIGHT,
+  setLogicalViewport,
   CELL_WIDTH,
   CELL_HEIGHT,
   createImageCache,
@@ -938,11 +939,22 @@ function directionFromDelta(dx, dy) {
   return found ? found.dir : 2;
 }
 
+function getViewportCols() {
+  return Math.max(1, Math.floor(LOGICAL_WIDTH / CELL_WIDTH));
+}
+
+function getViewportRows() {
+  const d = state.data;
+  const topUi = d?.mapTopUi ?? 22;
+  const botUi = d?.bottomUi ?? 22;
+  return Math.max(1, Math.floor((LOGICAL_HEIGHT - topUi - botUi) / CELL_HEIGHT));
+}
+
 function clampCamera() {
   const d = state.data;
   if (!d) return;
-  const maxCamX = Math.max(0, d.width - (d.viewportColumns || 11));
-  const maxCamY = Math.max(0, d.height - (d.viewportRows || 18));
+  const maxCamX = Math.max(0, d.width - getViewportCols());
+  const maxCamY = Math.max(0, d.height - getViewportRows());
   state.cameraX = Math.max(0, Math.min(maxCamX, state.cameraX));
   state.cameraY = Math.max(0, Math.min(maxCamY, state.cameraY));
 }
@@ -950,8 +962,8 @@ function clampCamera() {
 function ensureCursorInView() {
   const d = state.data;
   if (!d) return;
-  const cols = d.viewportColumns || 11;
-  const rows = d.viewportRows || 18;
+  const cols = getViewportCols();
+  const rows = getViewportRows();
   const marginX = 2;
   const marginY = 3;
   if (state.cursor.x < state.cameraX + marginX) state.cameraX = state.cursor.x - marginX;
@@ -966,8 +978,8 @@ function centerOnUnit(unitId) {
   if (!d || !unitId) return;
   const info = getVillagerInfo(unitId);
   state.cursor = { x: info.x, y: info.y };
-  state.cameraX = Math.round(info.x - (d.viewportColumns || 11) / 2);
-  state.cameraY = Math.round(info.y - (d.viewportRows || 18) / 2);
+  state.cameraX = Math.round(info.x - getViewportCols() / 2);
+  state.cameraY = Math.round(info.y - getViewportRows() / 2);
   clampCamera();
 }
 
@@ -3331,8 +3343,8 @@ function jumpCameraFromMinimap(sx, sy) {
     const wx = Math.max(0, Math.min(d.width - 1, Math.floor((sx - mm.mapX) / mm.scale)));
     const wy = Math.max(0, Math.min(d.height - 1, Math.floor((sy - mm.mapY) / mm.scale)));
     state.cursor = { x: wx, y: wy };
-    state.cameraX = Math.round(wx - (d.viewportColumns || 11) / 2);
-    state.cameraY = Math.round(wy - (d.viewportRows || 18) / 2);
+    state.cameraX = Math.round(wx - getViewportCols() / 2);
+    state.cameraY = Math.round(wy - getViewportRows() / 2);
     clampCamera();
     state.message = `Camera nhảy tới (${wx}, ${wy}) trên bản đồ.`;
     render();
@@ -3819,8 +3831,11 @@ function handleCanvasMenuClick(x, y) {
     const visibleCount = Math.min(7, items.length);
     const scroll = m.scroll || 0;
     const rowH = 22;
-    const listTop = 64 + 38;
-    if (x >= 36 && x <= 204 && y >= listTop && y <= listTop + visibleCount * rowH) {
+    const boardY = Math.max(64, Math.floor((LOGICAL_HEIGHT - 220) / 2));
+    const listTop = boardY + 38;
+    const selLeft = Math.floor(LOGICAL_WIDTH / 2) - 84;
+    const selRight = Math.floor(LOGICAL_WIDTH / 2) + 84;
+    if (x >= selLeft && x <= selRight && y >= listTop && y <= listTop + visibleCount * rowH) {
       const row = Math.floor((y - listTop) / rowH);
       const idx = scroll + row;
       if (idx >= 0 && idx < items.length) {
@@ -3831,7 +3846,7 @@ function handleCanvasMenuClick(x, y) {
     }
     // Click scroll footer or above list to scroll
     if (items.length > visibleCount) {
-      if (y < listTop && y >= 64) {
+      if (y < listTop && y >= boardY) {
         moveCanvasMenuSelection(-1);
         return true;
       }
@@ -3844,18 +3859,20 @@ function handleCanvasMenuClick(x, y) {
   }
 
   if (m.kind === 'build') {
-    const panelY = 234;
+    const panelY = LOGICAL_HEIGHT - 86;
+    const ox = Math.floor((LOGICAL_WIDTH - 240) / 2);
+    const lx = x - ox;
     if (y < panelY) {
       closeCanvasMenu();
       return true;
     }
-    // Left arrow area (x < 34, y >= panelY + 50)
-    if (x < 36 && y >= panelY + 46 && y < LOGICAL_HEIGHT - 22) {
+    // Left arrow area (lx < 36, y >= panelY + 46)
+    if (lx >= 0 && lx < 36 && y >= panelY + 46 && y < LOGICAL_HEIGHT - 22) {
       moveCanvasMenuSelection(-1);
       return true;
     }
-    // Right arrow area (x 36..64, y >= panelY + 46)
-    if (x >= 36 && x <= 64 && y >= panelY + 46 && y < LOGICAL_HEIGHT - 22) {
+    // Right arrow area (lx 36..64, y >= panelY + 46)
+    if (lx >= 36 && lx <= 64 && y >= panelY + 46 && y < LOGICAL_HEIGHT - 22) {
       moveCanvasMenuSelection(1);
       return true;
     }
@@ -3867,8 +3884,8 @@ function handleCanvasMenuClick(x, y) {
     return true;
   }
 
-  // Panel 2 / Panel 5 horizontal 5-icon bar (y = 272..320)
-  const panelY = 272;
+  // Panel 2 / Panel 5 horizontal 5-icon bar (height = 48px, pinned to bottom)
+  const panelY = LOGICAL_HEIGHT - 48;
   if (y < panelY) {
     closeCanvasMenu();
     return true;
@@ -5191,6 +5208,51 @@ Promise.all([
     const startScenario = Number.isFinite(scenarioParam) ? Math.max(0, Math.min(9, scenarioParam)) : 0;
     const wantStory = params.get('story') === '1';
 
+    // Dynamic full-window logical viewport (scales cleanly to any browser window size, no 240x320 lock!)
+    let pixelScale = 2;
+    const viewportBadgeEl = document.getElementById('viewport-badge');
+    const zoomBtnEl = document.getElementById('btn-zoom');
+    const fullscreenBtnEl = document.getElementById('btn-fullscreen');
+    const drawerEl = document.getElementById('side-drawer');
+    const toggleDrawerBtnEl = document.getElementById('btn-toggle-drawer');
+    const closeDrawerBtnEl = document.getElementById('btn-close-drawer');
+
+    const computeWindowViewport = () => {
+      const vw = Math.max(240, window.innerWidth || 640);
+      const vh = Math.max(320, window.innerHeight || 360);
+      const effScale = vw < 480 ? 1 : pixelScale;
+      const w = Math.max(240, Math.floor(vw / effScale));
+      const h = Math.max(320, Math.floor(vh / effScale));
+      return { w, h, effScale };
+    };
+
+    const syncViewportToWindow = () => {
+      const { w, h, effScale } = computeWindowViewport();
+      setLogicalViewport(w, h);
+      if (phaserRuntime?.resize) {
+        phaserRuntime.resize(w, h);
+        ctx = phaserRuntime.ctx;
+      } else {
+        canvas.width = w;
+        canvas.height = h;
+      }
+      if (state.data) {
+        clampCamera();
+        state.smoothCamX = state.cameraX;
+        state.smoothCamY = state.cameraY;
+      }
+      if (viewportBadgeEl) {
+        viewportBadgeEl.innerHTML = `<span></span> ${w}×${h} · ${effScale}x WebGL`;
+      }
+      if (zoomBtnEl) {
+        zoomBtnEl.textContent = `🔍 ${effScale}x`;
+      }
+      draw();
+    };
+
+    const initVp = computeWindowViewport();
+    setLogicalViewport(initVp.w, initVp.h);
+
     phaserRuntime = mountPhaserRuntime({
       canvas,
       width: LOGICAL_WIDTH,
@@ -5244,6 +5306,28 @@ Promise.all([
       },
     });
     ctx = phaserRuntime.ctx;
+
+    window.addEventListener('resize', () => syncViewportToWindow());
+    zoomBtnEl?.addEventListener('click', () => {
+      pixelScale = pixelScale === 2 ? 1 : pixelScale === 1 ? 3 : 2;
+      syncViewportToWindow();
+    });
+    fullscreenBtnEl?.addEventListener('click', () => {
+      if (!document.fullscreenElement) {
+        document.documentElement.requestFullscreen?.().catch(() => {});
+      } else {
+        document.exitFullscreen?.().catch(() => {});
+      }
+    });
+    toggleDrawerBtnEl?.addEventListener('click', () => {
+      const open = drawerEl?.classList.toggle('open');
+      drawerEl?.setAttribute('aria-hidden', open ? 'false' : 'true');
+    });
+    closeDrawerBtnEl?.addEventListener('click', () => {
+      drawerEl?.classList.remove('open');
+      drawerEl?.setAttribute('aria-hidden', 'true');
+    });
+    syncViewportToWindow();
 
     if (requested === 'game' || requested === 'strategy') {
       loadScenario(startScenario, { showStory: wantStory });

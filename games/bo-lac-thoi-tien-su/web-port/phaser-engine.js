@@ -18,9 +18,11 @@ export function mountPhaserRuntime({
   onFrameInterpolate,
   onRenderFrame,
 }) {
+  let curWidth = width;
+  let curHeight = height;
   const offscreen = document.createElement('canvas');
-  offscreen.width = width;
-  offscreen.height = height;
+  offscreen.width = curWidth;
+  offscreen.height = curHeight;
   const offCtx = offscreen.getContext('2d');
   offCtx.imageSmoothingEnabled = false;
 
@@ -28,6 +30,8 @@ export function mountPhaserRuntime({
 
   if (!PhaserGlobal) {
     // Fallback to native 2D canvas + requestAnimationFrame if offline
+    canvas.width = curWidth;
+    canvas.height = curHeight;
     const directCtx = canvas.getContext('2d');
     directCtx.imageSmoothingEnabled = false;
     let lastTime = performance.now();
@@ -51,6 +55,14 @@ export function mountPhaserRuntime({
     return {
       mode: 'Canvas2D',
       ctx: directCtx,
+      resize(newW, newH) {
+        curWidth = Math.max(240, Math.round(newW));
+        curHeight = Math.max(320, Math.round(newH));
+        canvas.width = curWidth;
+        canvas.height = curHeight;
+        directCtx.imageSmoothingEnabled = false;
+        onRenderFrame(directCtx);
+      },
       requestRedraw() {
         onRenderFrame(directCtx);
       },
@@ -58,6 +70,7 @@ export function mountPhaserRuntime({
   }
 
   let phaserTexture = null;
+  let displayImg = null;
   let dirty = true;
   let acc = 0;
 
@@ -67,14 +80,29 @@ export function mountPhaserRuntime({
     }
 
     create() {
-      phaserTexture = this.textures.createCanvas('j2me_framebuffer', width, height);
-      // Force nearest-neighbor pixel art filtering in WebGL
+      this.rebuildTexture(curWidth, curHeight);
+      this.flushToGpu();
+    }
+
+    rebuildTexture(w, h) {
+      if (this.textures.exists('j2me_framebuffer')) {
+        this.textures.remove('j2me_framebuffer');
+      }
+      phaserTexture = this.textures.createCanvas('j2me_framebuffer', w, h);
       if (phaserTexture.setFilter && PhaserGlobal.Textures?.FilterMode) {
         phaserTexture.setFilter(PhaserGlobal.Textures.FilterMode.NEAREST);
       }
-      const displayImg = this.add.image(0, 0, 'j2me_framebuffer').setOrigin(0, 0);
-      displayImg.setDisplaySize(width, height);
-      this.flushToGpu();
+      if (displayImg) {
+        displayImg.setTexture('j2me_framebuffer');
+        displayImg.setPosition(0, 0);
+        displayImg.setDisplaySize(w, h);
+      } else {
+        displayImg = this.add.image(0, 0, 'j2me_framebuffer').setOrigin(0, 0);
+        displayImg.setDisplaySize(w, h);
+      }
+      if (this.cameras?.main) {
+        this.cameras.main.setViewport(0, 0, w, h);
+      }
     }
 
     flushToGpu() {
@@ -82,7 +110,7 @@ export function mountPhaserRuntime({
       onRenderFrame(offCtx);
       const texCtx = phaserTexture.getContext();
       texCtx.imageSmoothingEnabled = false;
-      texCtx.clearRect(0, 0, width, height);
+      texCtx.clearRect(0, 0, curWidth, curHeight);
       texCtx.drawImage(offscreen, 0, 0);
       phaserTexture.refresh();
       dirty = false;
@@ -108,8 +136,8 @@ export function mountPhaserRuntime({
   const game = new PhaserGlobal.Game({
     type: PhaserGlobal.WEBGL,
     canvas,
-    width,
-    height,
+    width: curWidth,
+    height: curHeight,
     pixelArt: true,
     antialias: false,
     roundPixels: true,
@@ -124,6 +152,23 @@ export function mountPhaserRuntime({
     mode: 'Phaser 3 WebGL',
     game,
     ctx: offCtx,
+    resize(newW, newH) {
+      const nextW = Math.max(240, Math.round(newW));
+      const nextH = Math.max(320, Math.round(newH));
+      if (nextW === curWidth && nextH === curHeight) return;
+      curWidth = nextW;
+      curHeight = nextH;
+      offscreen.width = curWidth;
+      offscreen.height = curHeight;
+      offCtx.imageSmoothingEnabled = false;
+      game.scale.resize(curWidth, curHeight);
+      const scene = game.scene?.getScene?.('J2MEPhaserScene');
+      if (scene && scene.textures) {
+        scene.rebuildTexture(curWidth, curHeight);
+        dirty = true;
+        scene.flushToGpu();
+      }
+    },
     requestRedraw() {
       dirty = true;
       const scene = game.scene?.getScene?.('J2MEPhaserScene');

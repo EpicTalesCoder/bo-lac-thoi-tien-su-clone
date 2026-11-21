@@ -1,7 +1,12 @@
-export const LOGICAL_WIDTH = 240;
-export const LOGICAL_HEIGHT = 320;
+export let LOGICAL_WIDTH = 240;
+export let LOGICAL_HEIGHT = 320;
 export const CELL_WIDTH = 22;
 export const CELL_HEIGHT = 16;
+
+export function setLogicalViewport(w, h) {
+  LOGICAL_WIDTH = Math.max(240, Math.round(w));
+  LOGICAL_HEIGHT = Math.max(320, Math.round(h));
+}
 
 const HP_BAR_COLORS = ['#ef2b1d', '#f5c724', '#22d422', '#22d422'];
 
@@ -623,10 +628,16 @@ export function drawOriginalVillagerHud(ctx, data, state, imageCache) {
   const mo = data.mapTableOffsets;
   const fo = data.entityFieldOffsets;
 
-  // Panel 4 background + authentic frame (composite 523 at y0+32 & composite 616 at y0)
+  // Panel 4 background + authentic frame tiled across full viewport, content centered in 240px strip
   ctx.fillStyle = '#c5b85a';
   ctx.fillRect(0, y0, LOGICAL_WIDTH, 48);
-  drawComposite(ctx, data, 523, 0, y0 + 32, imageCache);
+  for (let tx = 0; tx < LOGICAL_WIDTH; tx += 240) {
+    drawComposite(ctx, data, 523, tx, y0 + 32, imageCache);
+    drawComposite(ctx, data, 524, tx, y0 + 48, imageCache);
+  }
+  const ox = Math.floor((LOGICAL_WIDTH - 240) / 2);
+  ctx.save();
+  ctx.translate(ox, 0);
   drawComposite(ctx, data, 616, 0, y0, imageCache);
 
   // 1. Avatar portrait (composite 720 + e[2727+uid] at pos (1, 5))
@@ -740,8 +751,8 @@ export function drawOriginalVillagerHud(ctx, data, state, imageCache) {
     if (v !== null) drawPanel4Text(ctx, String(v), 230, y0 + 27, 'center', 7, '#fff55a');
   }
 
-  // Bottom stone trim separating Panel 4 from the map viewport (f.java:758)
-  drawComposite(ctx, data, 524, 0, y0 + 48, imageCache);
+  // Restore centered Panel 4 translation
+  ctx.restore();
 }
 
 export function drawOriginalHud(ctx, data, state, imageCache) {
@@ -752,19 +763,22 @@ export function drawOriginalHud(ctx, data, state, imageCache) {
   const wood = state.wood ?? res[1] ?? 0;
   const stone = state.stone ?? res[2] ?? 0;
   const tools = state.tools ?? res[3] ?? 0;
+  const ox = Math.floor((LOGICAL_WIDTH - 240) / 2);
 
-  // Top HUD bar (panel 0 from mapTableOffsets[195])
+  // Top HUD bar (panel 0 from mapTableOffsets[195]) — tiled full-width, resource strip centered
   ctx.fillStyle = '#c5b85a';
   ctx.fillRect(0, 0, LOGICAL_WIDTH, 22);
-  drawComposite(ctx, data, 523, 0, 6, imageCache);
-  drawComposite(ctx, data, 669, 0, 0, imageCache);
-  drawComposite(ctx, data, 524, 0, data.mapTopUi, imageCache);
+  for (let tx = 0; tx < LOGICAL_WIDTH; tx += 240) {
+    drawComposite(ctx, data, 523, tx, 6, imageCache);
+    drawComposite(ctx, data, 524, tx, data.mapTopUi, imageCache);
+  }
+  drawComposite(ctx, data, 669, ox, 0, imageCache);
 
-  drawOutlinedNumber(ctx, `${pop}/${cap}`, 15, 4);
-  drawOutlinedNumber(ctx, String(food), 84, 4);
-  drawOutlinedNumber(ctx, String(wood), 129, 4);
-  drawOutlinedNumber(ctx, String(stone), 172, 4);
-  drawOutlinedNumber(ctx, String(tools), 213, 4);
+  drawOutlinedNumber(ctx, `${pop}/${cap}`, ox + 15, 4);
+  drawOutlinedNumber(ctx, String(food), ox + 84, 4);
+  drawOutlinedNumber(ctx, String(wood), ox + 129, 4);
+  drawOutlinedNumber(ctx, String(stone), ox + 172, 4);
+  drawOutlinedNumber(ctx, String(tools), ox + 213, 4);
 
   // Panel 4: Authentic Villager Status Bar directly below top resource bar (y=22..70)
   if (state.selectedUnit > 0 && !state.storyDialog && !state.missionResult) {
@@ -779,26 +793,27 @@ export function drawOriginalHud(ctx, data, state, imageCache) {
   } else {
     ctx.fillStyle = '#c5b85a';
     ctx.fillRect(0, bottomTop, LOGICAL_WIDTH, data.bottomUi);
-    drawComposite(ctx, data, 525, 0, bottomTop, imageCache);
-    drawComposite(ctx, data, 541, 172, bottomTop + 12, imageCache);
-    drawComposite(ctx, data, 542, 97, bottomTop + 8, imageCache);
-    drawComposite(ctx, data, 545, 126, bottomTop + 8, imageCache);
+    for (let tx = 0; tx < LOGICAL_WIDTH; tx += 240) {
+      drawComposite(ctx, data, 525, tx, bottomTop, imageCache);
+      drawComposite(ctx, data, 528, tx, bottomTop, imageCache);
+    }
+    drawComposite(ctx, data, 541, ox + 172, bottomTop + 12, imageCache);
+    drawComposite(ctx, data, 542, ox + 97, bottomTop + 8, imageCache);
+    drawComposite(ctx, data, 545, ox + 126, bottomTop + 8, imageCache);
     // Highlight assigned combat groups 7 and 9 on bottom HUD bar
     if (state.groups?.[7]?.size > 0) {
       ctx.fillStyle = state.activeGroupId === 7 ? '#fff36b' : '#7ae665';
-      ctx.fillRect(99, LOGICAL_HEIGHT - 3, 14, 2);
+      ctx.fillRect(ox + 99, LOGICAL_HEIGHT - 3, 14, 2);
     }
     if (state.groups?.[9]?.size > 0) {
       ctx.fillStyle = state.activeGroupId === 9 ? '#fff36b' : '#7ae665';
-      ctx.fillRect(128, LOGICAL_HEIGHT - 3, 14, 2);
+      ctx.fillRect(ox + 128, LOGICAL_HEIGHT - 3, 14, 2);
     }
-    // Authentic Panel 17 softkey icons: Left green = 530 (Action/Build/Tribe menu) or 529 (Confirm ✓ when placing building),
-    // Right red = 535 (Pause Menu) or 534 (Cancel ✕ when placing building)
+    // Authentic Panel 17 softkey icons pinned to bottom-left and bottom-right corners
     const leftSoftkey = state.buildType !== null ? 529 : 530;
     const rightSoftkey = state.buildType !== null ? 534 : 535;
     drawComposite(ctx, data, leftSoftkey, 0, LOGICAL_HEIGHT - 18, imageCache);
-    drawComposite(ctx, data, rightSoftkey, 220, LOGICAL_HEIGHT - 18, imageCache);
-    drawComposite(ctx, data, 528, 0, bottomTop, imageCache);
+    drawComposite(ctx, data, rightSoftkey, LOGICAL_WIDTH - 20, LOGICAL_HEIGHT - 18, imageCache);
   }
 }
 
@@ -823,18 +838,19 @@ function drawAuthenticBottomMenu(ctx, data, state, imageCache) {
     ctx.fillStyle = '#0e5b27';
     ctx.fillRect(0, LOGICAL_HEIGHT - 64, LOGICAL_WIDTH, 64);
 
-    // Drifting clouds (composites 1667..1670)
-    const cloudShift = (animTick * 2) % 300;
-    drawComposite(ctx, data, 1667, ((cloudShift + 10) % 300) - 60, 12, imageCache);
-    drawComposite(ctx, data, 1668, ((cloudShift * 1.3 + 120) % 300) - 60, 32, imageCache);
-    drawComposite(ctx, data, 1669, ((cloudShift * 0.8 + 210) % 300) - 60, 20, imageCache);
+    // Drifting clouds (composites 1667..1670) across full viewport
+    const cloudSpan = LOGICAL_WIDTH + 120;
+    const cloudShift = (animTick * 2) % cloudSpan;
+    drawComposite(ctx, data, 1667, ((cloudShift + 10) % cloudSpan) - 60, 12, imageCache);
+    drawComposite(ctx, data, 1668, ((cloudShift * 1.3 + 120) % cloudSpan) - 60, 32, imageCache);
+    drawComposite(ctx, data, 1669, ((cloudShift * 0.8 + 210) % cloudSpan) - 60, 20, imageCache);
 
     // Original Game Logo banner at top center (composite 1665)
-    drawComposite(ctx, data, 1665, 120, 0, imageCache);
+    drawComposite(ctx, data, 1665, Math.floor(LOGICAL_WIDTH / 2), 0, imageCache);
 
-    // Authentic Panel 10 wooden/stone menu board (composite 1656 at x=25+5=30, y=64+2=66)
-    const boardX = 25;
-    const boardY = 64;
+    // Authentic Panel 10 wooden/stone menu board centered in viewport
+    const boardX = Math.floor((LOGICAL_WIDTH - 190) / 2);
+    const boardY = Math.max(64, Math.floor((LOGICAL_HEIGHT - 220) / 2));
     drawComposite(ctx, data, 1656, boardX + 5, boardY + 2, imageCache);
 
     const items = menu.items || [];
@@ -850,6 +866,7 @@ function drawAuthenticBottomMenu(ctx, data, state, imageCache) {
     ctx.fillText(menu.title || 'MENU TẠM DỪNG', LOGICAL_WIDTH / 2, boardY + 18);
 
     const listTop = boardY + 38;
+    const selX = Math.floor(LOGICAL_WIDTH / 2) - 72;
     for (let i = 0; i < visibleCount; i++) {
       const idx = scroll + i;
       const item = items[idx];
@@ -858,10 +875,10 @@ function drawAuthenticBottomMenu(ctx, data, state, imageCache) {
       const isSel = idx === menu.selected;
       if (isSel) {
         ctx.fillStyle = 'rgba(139, 90, 20, 0.28)';
-        ctx.fillRect(48, ry, 144, rowH - 3);
+        ctx.fillRect(selX, ry, 144, rowH - 3);
         // Authentic animated side arrows (f.java:2552-2553 d(2) and d(1))
-        drawAnimation(ctx, data, 2, 46, ry + 5, Math.floor(animTick / 2), imageCache);
-        drawAnimation(ctx, data, 1, 186, ry + 5, Math.floor(animTick / 2), imageCache);
+        drawAnimation(ctx, data, 2, selX - 2, ry + 5, Math.floor(animTick / 2), imageCache);
+        drawAnimation(ctx, data, 1, selX + 138, ry + 5, Math.floor(animTick / 2), imageCache);
       }
       ctx.font = isSel ? 'bold 10px monospace' : 'bold 9px monospace';
       ctx.textAlign = 'center';
@@ -886,15 +903,16 @@ function drawAuthenticBottomMenu(ctx, data, state, imageCache) {
 
     // Bottom Panel 17 softkeys: Left green ✓ (529), Right red ✕ (534)
     drawComposite(ctx, data, 529, 0, LOGICAL_HEIGHT - 18, imageCache);
-    drawComposite(ctx, data, 534, 220, LOGICAL_HEIGHT - 18, imageCache);
+    drawComposite(ctx, data, 534, LOGICAL_WIDTH - 20, LOGICAL_HEIGHT - 18, imageCache);
     ctx.restore();
     return;
   }
 
   if (menu.kind === 'build') {
-    // Authentic Panel 6 (y = 234..320, height = 86px) + Cost Box (Panel 8) above right
-    const panelY = 234;
+    // Authentic Panel 6 (height = 86px, pinned to bottom) + Cost Box (Panel 8) above right
     const panelH = 86;
+    const panelY = LOGICAL_HEIGHT - panelH;
+    const ox = Math.floor((LOGICAL_WIDTH - 240) / 2);
     const items = menu.items || [];
     const item = items[menu.selected] || items[0];
 
@@ -903,7 +921,7 @@ function drawAuthenticBottomMenu(ctx, data, state, imageCache) {
       const sp = item.spec;
       const costW = 68;
       const costH = 44;
-      const costX = LOGICAL_WIDTH - costW - 4;
+      const costX = ox + 240 - costW - 4;
       const costY = panelY - costH - 2;
       ctx.save();
       ctx.fillStyle = '#473010';
@@ -934,8 +952,14 @@ function drawAuthenticBottomMenu(ctx, data, state, imageCache) {
     ctx.save();
     ctx.fillStyle = '#c5b85a';
     ctx.fillRect(0, panelY, LOGICAL_WIDTH, panelH);
-    drawComposite(ctx, data, 526, 0, panelY, imageCache);
-    drawComposite(ctx, data, 528, 0, panelY, imageCache);
+    for (let tx = 0; tx < LOGICAL_WIDTH; tx += 240) {
+      drawComposite(ctx, data, 526, tx, panelY, imageCache);
+      drawComposite(ctx, data, 528, tx, panelY, imageCache);
+    }
+
+    // Center the 240px build card content cleanly
+    ctx.save();
+    ctx.translate(ox, 0);
 
     // Building portrait frame (composite 617) + building icon (680 + bType)
     drawComposite(ctx, data, 617, 8, panelY + 13, imageCache);
@@ -986,17 +1010,18 @@ function drawAuthenticBottomMenu(ctx, data, state, imageCache) {
       }
       if (line && ly <= panelY + 66) ctx.fillText(line, 68, ly);
     }
+    ctx.restore();
 
     // Bottom softkeys: Left green ✓ (529 = place building), Right red ✕ (534 = back)
     drawComposite(ctx, data, 529, 0, LOGICAL_HEIGHT - 18, imageCache);
-    drawComposite(ctx, data, 534, 220, LOGICAL_HEIGHT - 18, imageCache);
+    drawComposite(ctx, data, 534, LOGICAL_WIDTH - 20, LOGICAL_HEIGHT - 18, imageCache);
     ctx.restore();
     return;
   }
 
-  // Authentic Panel 2 / Panel 5 Icon Bar (y = 272..320, height = 48px)
-  const panelY = 272;
+  // Authentic Panel 2 / Panel 5 Icon Bar (height = 48px, pinned to bottom)
   const panelH = 48;
+  const panelY = LOGICAL_HEIGHT - panelH;
   const items = menu.items || [];
   const visible = Math.min(5, items.length);
   const scroll = menu.scroll || 0;
@@ -1027,9 +1052,11 @@ function drawAuthenticBottomMenu(ctx, data, state, imageCache) {
   ctx.save();
   ctx.fillStyle = '#c5b85a';
   ctx.fillRect(0, panelY, LOGICAL_WIDTH, panelH);
-  drawComposite(ctx, data, 525, 0, panelY, imageCache);
-  drawComposite(ctx, data, 527, 0, panelY, imageCache);
-  drawComposite(ctx, data, 528, 0, panelY, imageCache);
+  for (let tx = 0; tx < LOGICAL_WIDTH; tx += 240) {
+    drawComposite(ctx, data, 525, tx, panelY, imageCache);
+    drawComposite(ctx, data, 527, tx, panelY, imageCache);
+    drawComposite(ctx, data, 528, tx, panelY, imageCache);
+  }
 
   // Selected item label centered at top of Panel 2/5 (y = panelY + 7)
   if (selItem) {
@@ -1079,7 +1106,7 @@ function drawAuthenticBottomMenu(ctx, data, state, imageCache) {
 
   // Bottom softkeys: Left green ✓ (529 = execute), Right red ✕ (534 = back/close)
   drawComposite(ctx, data, 529, 0, LOGICAL_HEIGHT - 18, imageCache);
-  drawComposite(ctx, data, 534, 220, LOGICAL_HEIGHT - 18, imageCache);
+  drawComposite(ctx, data, 534, LOGICAL_WIDTH - 20, LOGICAL_HEIGHT - 18, imageCache);
   ctx.restore();
 }
 
@@ -1090,8 +1117,9 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
   const camY = Math.floor(camYFull);
   const fracX = Math.round((camXFull - camX) * CELL_WIDTH);
   const fracY = Math.round((camYFull - camY) * CELL_HEIGHT);
-  const cols = (data.viewportColumns || 11) + (fracX > 0 ? 1 : 0);
-  const rows = (data.viewportRows || 18) + (fracY > 0 ? 1 : 0);
+  const mapViewH = Math.max(120, LOGICAL_HEIGHT - (data.mapTopUi ?? 22) - (data.bottomUi ?? 22));
+  const cols = Math.ceil(LOGICAL_WIDTH / CELL_WIDTH) + 1 + (fracX > 0 ? 1 : 0);
+  const rows = Math.ceil(mapViewH / CELL_HEIGHT) + 2 + (fracY > 0 ? 1 : 0);
   const originY = (data.mapTopUi ?? 22) - (data.verticalOffset ?? 6);
   const animTick = state.animTick || 0;
 
@@ -1428,10 +1456,10 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
     ctx.save();
     ctx.fillStyle = 'rgba(18, 12, 5, 0.52)';
     ctx.fillRect(0, 22, LOGICAL_WIDTH, LOGICAL_HEIGHT - 44);
-    const bx = 10;
-    const by = 148;
-    const bw = 220;
+    const bw = Math.min(340, LOGICAL_WIDTH - 20);
     const bh = 144;
+    const bx = Math.floor((LOGICAL_WIDTH - bw) / 2);
+    const by = Math.max(76, LOGICAL_HEIGHT - bh - 34);
     ctx.fillStyle = '#473010';
     ctx.fillRect(bx - 2, by - 2, bw + 4, bh + 4);
     ctx.fillStyle = '#e5d58e';
@@ -1477,10 +1505,10 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
     ctx.save();
     ctx.fillStyle = 'rgba(12, 10, 6, 0.68)';
     ctx.fillRect(0, 22, LOGICAL_WIDTH, LOGICAL_HEIGHT - 44);
-    const bx = 14;
-    const by = 68;
     const bw = 212;
     const bh = 180;
+    const bx = Math.floor((LOGICAL_WIDTH - bw) / 2);
+    const by = Math.max(40, Math.floor((LOGICAL_HEIGHT - bh) / 2));
     ctx.fillStyle = isWin ? '#2d4a1e' : '#571b16';
     ctx.fillRect(bx - 2, by - 2, bw + 4, bh + 4);
     ctx.fillStyle = '#efe2a2';
@@ -1525,15 +1553,15 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
 export function getMinimapRect(data) {
   const w = data?.width || 40;
   const h = data?.height || 32;
-  const maxW = 192;
-  const maxH = 162;
+  const boxW = Math.min(280, LOGICAL_WIDTH - 32);
+  const boxH = Math.min(240, LOGICAL_HEIGHT - 108);
+  const maxW = boxW - 16;
+  const maxH = boxH - 42;
   const scale = Math.min(maxW / w, maxH / h);
   const mapW = Math.max(40, Math.floor(w * scale));
   const mapH = Math.max(40, Math.floor(h * scale));
-  const boxX = 16;
-  const boxY = 74;
-  const boxW = 208;
-  const boxH = 212;
+  const boxX = Math.floor((LOGICAL_WIDTH - boxW) / 2);
+  const boxY = Math.max(74, Math.floor((LOGICAL_HEIGHT - boxH) / 2));
   const mapX = boxX + Math.floor((boxW - mapW) / 2);
   const mapY = boxY + 20 + Math.floor((maxH - mapH) / 2);
   return { boxX, boxY, boxW, boxH, mapX, mapY, mapW, mapH, scale, w, h };
@@ -1611,8 +1639,8 @@ function drawMinimapOverlay(ctx, data, state) {
   // Live camera viewport rectangle
   const camX = state.cameraX ?? 0;
   const camY = state.cameraY ?? 0;
-  const cols = data.viewportColumns || 11;
-  const rows = data.viewportRows || 18;
+  const cols = Math.max(1, Math.floor(LOGICAL_WIDTH / CELL_WIDTH));
+  const rows = Math.max(1, Math.floor((LOGICAL_HEIGHT - (data.mapTopUi ?? 22) - (data.bottomUi ?? 22)) / CELL_HEIGHT));
   ctx.strokeStyle = '#ffffff';
   ctx.lineWidth = 1;
   ctx.strokeRect(
