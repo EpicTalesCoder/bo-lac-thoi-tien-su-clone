@@ -1830,6 +1830,22 @@ function classifyGatherable(x, y) {
     // kind 1, 2, 3 -> job 10: berries/fruit bushes (mo[40][10]=5, mo[41][10]=1)
     return { x, y, type: 'food', label: 'hoa quả', carrySprite: 5, occ, propIdx: idx };
   }
+  // Fallback if a mushroom/berry terrain tile (175..178) lost its occupancy prop link
+  if (tile >= 175 && tile <= 178) {
+    const e = d.entityData;
+    for (let i = 0; i < 50; i++) {
+      if ((e[9833 + i] & 0xff) > 0 && (e[9733 + i] & 0xff) === x && (e[9783 + i] & 0xff) === y) {
+        const k = e[9833 + i] & 0xff;
+        const rem = e[9883 + i] & 0xff;
+        if (rem <= 0) return null;
+        d.occupancy[y][x] = -61 - i;
+        if (k === 4) return { x, y, type: 'food', label: 'nấm', carrySprite: 6, occ: -61 - i, propIdx: i };
+        return { x, y, type: 'food', label: 'hoa quả', carrySprite: 5, occ: -61 - i, propIdx: i };
+      }
+    }
+    if (tile === 178) return { x, y, type: 'food', label: 'nấm', carrySprite: 6, occ, tile };
+    return { x, y, type: 'food', label: 'hoa quả', carrySprite: 5, occ, tile };
+  }
   // occ === -125 is stone cliff/quarry (f.java:6229, mo[16][31]=14 -> carrySprite 3, badge 5)
   if (occ === -125) {
     return { x, y, type: 'stone', label: 'đá', carrySprite: 3, occ };
@@ -1887,8 +1903,8 @@ function depleteGatherTarget(gt, amount) {
         d.occupancy[gt.y][gt.x] = 0;
         if ((d.terrain[gt.y][gt.x] & 0xff) >= 175) d.terrain[gt.y][gt.x] = 0;
       } else {
-        // Berry bushes & mushrooms (kind 1..4) stay as bare bushes (stage 0) on grass and regrow over time!
-        addPopup(gt.x, gt.y, 'Bụi cây đã hết quả!', '#ffd84d');
+        // Berry bushes & mushrooms (kind 1..4) stay as bare patches (stage 0) on grass and regrow over time!
+        addPopup(gt.x, gt.y, kind === 4 ? '🍄 Đám nấm đã hái hết!' : 'Bụi cây đã hết quả!', '#ffd84d');
       }
       return true;
     }
@@ -2740,6 +2756,23 @@ function commandUnitTo(tx, ty, overrideIds = null, owner = state.localTribe ?? 0
     }
   }
 
+  // Click a depleted berry bush / mushroom patch -> inform the player it is regrowing
+  if (occ <= -61 && occ >= -110) {
+    const pIdx = -occ - 61;
+    const pKind = d.entityData[9833 + pIdx] & 0xff;
+    const pRem = d.entityData[9883 + pIdx] & 0xff;
+    if (pKind >= 1 && pKind <= 4 && pRem <= 0) {
+      if (!overrideIds) {
+        state.message =
+          pKind === 4
+            ? '🍄 Đám nấm này đã hái hết, đang chờ mọc lại!'
+            : '🫐 Bụi cây này đã hái hết quả, đang chờ mọc lại!';
+        render();
+      }
+      return;
+    }
+  }
+
   // Click a tree or resource item to gather & haul back to camp
   const gatherTarget = classifyGatherable(tx, ty);
   if (gatherTarget) {
@@ -2753,10 +2786,20 @@ function commandUnitTo(tx, ty, overrideIds = null, owner = state.localTribe ?? 0
       return;
     }
     const info = getVillagerInfo(unitId);
+    const verb =
+      gatherTarget.label === 'nấm'
+        ? 'hái nấm'
+        : gatherTarget.label === 'hoa quả'
+          ? 'hái quả'
+          : gatherTarget.label === 'cá'
+            ? 'câu cá'
+            : gatherTarget.label === 'đá'
+              ? 'đập đá'
+              : `chặt/thu thập ${gatherTarget.label}`;
     state.message =
       gatherers > 1
-        ? `${gatherers} dân làng đang đi thu thập ${gatherTarget.label} và vác về trại.`
-        : `${info.role} đang đi chặt/thu thập ${gatherTarget.label} và vác về trại.`;
+        ? `${gatherers} dân làng đang đi ${verb} và vác về trại.`
+        : `${info.role} đang đi ${verb} và vác về trại.`;
     render();
     return;
   }
@@ -3711,11 +3754,11 @@ function stepSimulation() {
       e[606 + unitId] = directionFromDelta(gt.x - ux, gt.y - uy);
 
       if (task.workTicks < harvestTicks) {
-        // Authentic work animation: fishing uses anim 142 (10-frame cast/reel); wood/stone/berries use anim 21 — NO dust cloud
+        // Authentic work animation: fishing uses anim 142 (10-frame cast/reel); wood/stone/berries/mushrooms use anim 21 — NO dust cloud
         if (gt.type === 'fish') {
           setUnitAnim(unitId, 142, Math.floor(task.workTicks / 2) % 10);
         } else {
-          setUnitAnim(unitId, 21, Math.floor(task.workTicks / 4) % 2);
+          setUnitAnim(unitId, 21, Math.floor(task.workTicks / 2) % 2);
         }
         task.workTicks++;
         continue;

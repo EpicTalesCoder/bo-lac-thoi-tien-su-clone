@@ -1796,8 +1796,12 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
       const targetTile = curWY >= 0 && curWY < data.height && curWX >= 0 && curWX < data.width ? data.terrain[curWY][curWX] & 0xff : 0;
       const isEnemyUnit = myTribe === 1 ? (targetOcc >= 1 && targetOcc <= 50) : (targetOcc >= 51 && targetOcc <= 100);
       const isEnemyBld = buildingOwner(targetOcc) === (myTribe === 1 ? 0 : 1);
+      const isActiveItemProp =
+        isItemProp(targetOcc) &&
+        ((data.entityData[9833 + (-targetOcc - 61)] & 0xff) === 5 ||
+          (data.entityData[9883 + (-targetOcc - 61)] & 0xff) > 0);
       const isHostileOrGatherable =
-        isItemProp(targetOcc) ||
+        isActiveItemProp ||
         targetOcc === -124 ||
         targetOcc === -125 ||
         targetOcc === -127 ||
