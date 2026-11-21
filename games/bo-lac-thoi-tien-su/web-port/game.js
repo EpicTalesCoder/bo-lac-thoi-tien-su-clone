@@ -508,8 +508,8 @@ function applyUnitDamage(attackerId, targetId, dmg) {
   const e = d.entityData;
   const curHp = e[1919 + targetId] & 0xff;
   if (curHp <= 0) return true;
-  // In the original game (b.java:827), children (age < 12) are NEVER attacked or damaged — only lured (job 107, anim 159)!
-  if ((e[1414 + targetId] & 0xff) < 12) return false;
+  // Children (age < 12) are never attacked by humans (only lured, job 107, anim 159) but wild animals (attackerId 0) CAN hurt them!
+  if ((e[1414 + targetId] & 0xff) < 12 && attackerId > 0) return false;
   const nextHp = Math.max(0, curHp - dmg);
   e[1919 + targetId] = nextHp;
 
@@ -5683,7 +5683,6 @@ function stepWildAnimals() {
     let nearest = null;
     let bestDist = Infinity;
     for (const p of people) {
-      if (kind !== 2 && p.age < 12) continue; // Predators only attack adults (children are invulnerable)
       const dist = Math.max(Math.abs(p.x - ax), Math.abs(p.y - ay)) - (hunterSet.has(p.uid) ? 0.5 : 0);
       if (dist < bestDist) {
         bestDist = dist;
@@ -5907,9 +5906,11 @@ function stepVillagerNeeds() {
         e[2020 + id] = 100;
         e[505 + id] = 100;
         e[3333 + id] = -1;
+        if (state.animTick % 28 === 0) syncUnitMaxHp(id);
         if (state.animTick % 140 === 0) {
           const nextAge = age + 1;
           e[1414 + id] = nextAge;
+          syncUnitMaxHp(id);
           if (nextAge >= 12) {
             if (isUnitInsideBuilding(d, id)) {
               exitBuildingSlot(d, id);

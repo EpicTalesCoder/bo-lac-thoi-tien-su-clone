@@ -663,7 +663,7 @@ function drawEntitySprite(ctx, data, entityId, screenX, screenY, dir, fieldOffse
 
     const hp = e[1919 + entityId] & 0xff;
     const maxHp = Math.max(1, e[6767 + entityId] & 0xff);
-    if (hp > 0 && (e[1414 + entityId] & 0xff) >= 12 && (isSelected || isHovered || hp < maxHp)) {
+    if (hp > 0 && (isSelected || isHovered || hp < maxHp)) {
       const tier = Math.floor(maxHp / 20);
       drawComposite(ctx, data, 607 + tier, hx, hy, imageCache);
       const barMaxW = m[mo[128] + tier] || 12;
@@ -765,19 +765,12 @@ export function drawOriginalVillagerHud(ctx, data, state, imageCache) {
   const satiety = Math.min(99, e[2121 + uid] & 0xff);
 
   drawComposite(ctx, data, 551, 91, y0 + 3, imageCache);
-  if (age >= 12) {
-    const hpW = Math.max(0, Math.min(16, Math.round((16 * hp) / maxHp)));
-    if (hpW < 16) {
-      ctx.fillStyle = '#000000';
-      ctx.fillRect(100 + hpW + 1, y0 + 6, 16 - hpW, 4);
-    }
-    drawPanel4Text(ctx, String(maxHp), 119, y0 + 10, 'center', 7, '#fff55a');
-  } else {
-    // Children (< 12) have no HP stat: empty bar & dash
+  const hpW = Math.max(0, Math.min(16, Math.round((16 * hp) / maxHp)));
+  if (hpW < 16) {
     ctx.fillStyle = '#000000';
-    ctx.fillRect(101, y0 + 6, 16, 4);
-    drawPanel4Text(ctx, '-', 119, y0 + 10, 'center', 7, '#fff55a');
+    ctx.fillRect(100 + hpW + 1, y0 + 6, 16 - hpW, 4);
   }
+  drawPanel4Text(ctx, String(maxHp), 119, y0 + 10, 'center', 7, '#fff55a');
 
   // Middle bar (comp 552 at y0+21): Food / Satiety bar (e[2121 + uid], restored by eating in Bếp!)
   drawComposite(ctx, data, 552, 92, y0 + 21, imageCache);
