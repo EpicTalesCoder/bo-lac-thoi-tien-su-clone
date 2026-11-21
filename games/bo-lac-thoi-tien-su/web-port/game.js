@@ -346,6 +346,65 @@ function alertCombat(msg, color = '#ff7b6b') {
   addPopup(state.cameraX + 5, state.cameraY + 4, msg, color);
 }
 
+function stepChildLuring(lurerId, childId, lurerTask, newOwner) {
+  const d = state.data;
+  if (!d) return 'cancel';
+  const e = d.entityData;
+  if ((e[1919 + childId] & 0xff) <= 0 || isUnitInsideBuilding(d, childId)) {
+    return 'cancel';
+  }
+  const lx = e[lurerId] & 0xff;
+  const ly = e[101 + lurerId] & 0xff;
+  const cx = e[childId] & 0xff;
+  const cy = e[101 + childId] & 0xff;
+
+  // Lurer stands still at range <= 3 and waves the balloon/toy (anim 159, 2 frames) facing the child
+  e[202 + lurerId] = 0;
+  e[303 + lurerId] = 0;
+  lurerTask.path = [];
+  lurerTask.stepProgress = 0;
+  e[606 + lurerId] = directionFromDelta(cx - lx, cy - ly);
+  setUnitAnim(lurerId, 159, Math.floor((lurerTask.workTicks || 0) / 3) % 2);
+  lurerTask.workTicks = (lurerTask.workTicks || 0) + 1;
+
+  // Exact port of b.java:2636-2642 & 3101-3105:
+  // While child is > 1 tile away from the lurer, the lured child runs toward the lurer (anim 6)!
+  const distNow = Math.max(Math.abs(cx - lx), Math.abs(cy - ly));
+  if (distNow > 1) {
+    let childTask = state.tasks.get(childId);
+    if (!childTask || childTask.kind !== 'luredByEnemy' || childTask.lurerId !== lurerId || childTask.path.length === 0) {
+      const toLurer = findPath(cx, cy, lx, ly, childId, true);
+      if (!toLurer || toLurer.length === 0) {
+        return 'cancel';
+      }
+      childTask = {
+        kind: 'luredByEnemy',
+        lurerId,
+        path: toLurer,
+        stepProgress: 0,
+        workTicks: 0,
+      };
+      state.tasks.set(childId, childTask);
+    }
+    return 'luring';
+  }
+
+  // Child has physically run up to the lurer (distNow <= 1)!
+  if (state.tasks.get(childId)?.kind === 'luredByEnemy') {
+    state.tasks.delete(childId);
+  }
+  e[202 + childId] = 0;
+  e[303 + childId] = 0;
+  e[606 + childId] = (e[606 + lurerId] + 4) & 7;
+  setUnitAnim(childId, 45, Math.floor((lurerTask.lureTicks || 0) / 2) % 5);
+  lurerTask.lureTicks = (lurerTask.lureTicks || 0) + 1;
+  if (lurerTask.lureTicks >= 16) {
+    convertChildToTribe(childId, newOwner);
+    return 'converted';
+  }
+  return 'luring';
+}
+
 function convertChildToTribe(childId, newOwner) {
   const d = state.data;
   if (!d) return 0;
@@ -840,7 +899,7 @@ function assignAttackTask(unitId, targetType, targetId, skipArmFetch = false) {
     }
   }
 
-  const range = isChildTarget ? 1 : getUnitRange(unitId);
+  const range = isChildTarget ? 3 : getUnitRange(unitId);
 
   if (targetType === 'unit') {
     if ((e[1919 + targetId] & 0xff) <= 0) return false;
@@ -858,6 +917,7 @@ function assignAttackTask(unitId, targetType, targetId, skipArmFetch = false) {
       target: null,
       workTicks: 0,
       cooldown: 0,
+      lureTicks: 0,
     });
     if (state.selectedUnit === unitId) state.activePath = planned.path;
     return true;
@@ -892,11 +952,13 @@ function assignEnemyAttack(enemyId, targetType, targetId) {
   if ((e[1919 + enemyId] & 0xff) <= 0) return false;
   const ex = e[enemyId] & 0xff;
   const ey = e[101 + enemyId] & 0xff;
-  const range = getUnitRange(enemyId);
+  const isChildTarget = targetType === 'unit' && (e[1414 + targetId] & 0xff) < 12;
+  const range = isChildTarget ? 3 : getUnitRange(enemyId);
 
   if (targetType === 'unit') {
     if ((e[1919 + targetId] & 0xff) <= 0) return false;
     if (isUnitInsideBuilding(d, targetId)) {
+      if (isChildTarget) return false; // Children inside Nhà trẻ / buildings cannot be lured!
       const bid = e[4444 + targetId] & 0xff;
       if (bid >= 1 && bid <= 30) return assignEnemyAttack(enemyId, 'building', bid);
       return false;
@@ -914,6 +976,7 @@ function assignEnemyAttack(enemyId, targetType, targetId) {
       target: null,
       workTicks: 0,
       cooldown: 0,
+      lureTicks: 0,
     });
     return true;
   }
@@ -2385,6 +2448,24 @@ function commandUnitTo(tx, ty, overrideIds = null, owner = state.localTribe ?? 0
   const isEnemyBldOcc = owner === 1 ? occ <= -1 && occ >= -30 : occ <= -31 && occ >= -60;
   const isOwnBldOcc = owner === 1 ? occ <= -31 && occ >= -60 : occ <= -1 && occ >= -30;
   const adultIds = activeIds.filter((id) => (d.entityData[1414 + id] & 0xff) >= 12);
+  const childIds = activeIds.filter((id) => (d.entityData[1414 + id] & 0xff) < 12);
+
+  // If player clicks a finished Nhà trẻ (bType 10) with a child selected, send the child inside Nhà trẻ for safety!
+  if (isOwnBldOcc && childIds.length > 0 && adultIds.length === 0) {
+    const bid = -occ;
+    const bld = getPlayerBuildings(owner).find((b) => b.bid === bid);
+    if (bld && !bld.underConstruction && bld.targetType === 10) {
+      let sent = 0;
+      for (const cid of childIds) {
+        if (assignWorkAtBuilding(cid, bld)) sent++;
+      }
+      if (sent > 0 && !overrideIds) {
+        state.message = `${getVillagerInfo(childIds[0]).role} đang đi vào Nhà trẻ để được bảo vệ an toàn!`;
+        render();
+      }
+      return;
+    }
+  }
 
   // Children (age < 12) cannot build, work, gather, hunt, or fight — warn the player clearly!
   const isWorkOrCombatTarget =
@@ -2945,13 +3026,14 @@ function stepEnemyAI() {
         if (isUnitInsideBuilding(d, tid)) {
           const bid = e[4444 + tid] & 0xff;
           state.enemyTasks.delete(eid);
-          if (bid >= 1 && bid <= 30) assignEnemyAttack(eid, 'building', bid);
+          // Children inside Nhà trẻ / buildings are protected and cannot be lured!
+          if ((e[1414 + tid] & 0xff) >= 12 && bid >= 1 && bid <= 30) assignEnemyAttack(eid, 'building', bid);
           continue;
         }
         const tx = e[tid] & 0xff;
         const ty = e[101 + tid] & 0xff;
         const isChildTarget = (e[1414 + tid] & 0xff) < 12;
-        const range = isChildTarget ? 1 : getUnitRange(eid);
+        const range = isChildTarget ? 3 : getUnitRange(eid);
         const dist = Math.max(Math.abs(tx - ex), Math.abs(ty - ey));
         if (dist > range) {
           if (task.path.length === 0 || (task.stepProgress === 0 && task.workTicks % 5 === 0)) {
@@ -2967,21 +3049,15 @@ function stepEnemyAI() {
           if (task.path.length > 0) stepUnitMovement(eid, task, true);
           continue;
         }
-        // In range: if target is a child (< 12), play authentic Child Luring animation (job 107 -> anim 159, 2f) and convert!
+        // In range: if target is a child (< 12), wave balloon (anim 159) at range <= 3 so child runs over to the lurer before converting!
         e[202 + eid] = 0;
         e[303 + eid] = 0;
         task.path = [];
         task.stepProgress = 0;
         e[606 + eid] = directionFromDelta(tx - ex, ty - ey);
         if (isChildTarget) {
-          e[202 + tid] = 0;
-          e[303 + tid] = 0;
-          e[606 + tid] = (e[606 + eid] + 4) & 7;
-          setUnitAnim(eid, 159, Math.floor((task.workTicks || 0) / 3) % 2);
-          setUnitAnim(tid, 45, Math.floor((task.workTicks || 0) / 2) % 5);
-          task.workTicks = (task.workTicks || 0) + 1;
-          if (task.workTicks >= 18) {
-            convertChildToTribe(tid, 1);
+          const lureStatus = stepChildLuring(eid, tid, task, 1);
+          if (lureStatus === 'converted' || lureStatus === 'cancel') {
             state.enemyTasks.delete(eid);
             setUnitAnim(eid, 8, 0);
             changed = true;
@@ -3394,7 +3470,16 @@ function stepSimulation() {
       const tx = e[tid] & 0xff;
       const ty = e[101 + tid] & 0xff;
       const isChildTarget = (e[1414 + tid] & 0xff) < 12;
-      const range = isChildTarget ? 1 : getUnitRange(unitId);
+      if (isChildTarget && isUnitInsideBuilding(d, tid)) {
+        // Children inside Nhà trẻ / buildings are safe from being lured!
+        e[7777 + unitId] = 0;
+        state.tasks.delete(unitId);
+        setUnitAnim(unitId, 8, 0);
+        if (state.selectedUnit === unitId) state.activePath = [];
+        uiChanged = true;
+        continue;
+      }
+      const range = isChildTarget ? 3 : getUnitRange(unitId);
       const dist = Math.max(Math.abs(tx - ux), Math.abs(ty - uy));
       if (dist > range) {
         if (task.path.length === 0 || (task.stepProgress === 0 && task.workTicks % 4 === 0)) {
@@ -3419,16 +3504,11 @@ function stepSimulation() {
       task.stepProgress = 0;
       if (state.selectedUnit === unitId) state.activePath = [];
       e[606 + unitId] = directionFromDelta(tx - ux, ty - uy);
-      // If target is an enemy child (age < 12), play authentic Child Luring animation (job 107 -> anim 159, 2f) and convert to our tribe!
+      // If target is an enemy child (age < 12), wave balloon (anim 159) at range <= 3 so child runs over to the lurer before converting!
       if (isChildTarget) {
-        e[202 + tid] = 0;
-        e[303 + tid] = 0;
-        e[606 + tid] = (e[606 + unitId] + 4) & 7;
-        setUnitAnim(unitId, 159, Math.floor((task.workTicks || 0) / 3) % 2);
-        setUnitAnim(tid, 45, Math.floor((task.workTicks || 0) / 2) % 5);
-        task.workTicks = (task.workTicks || 0) + 1;
-        if (task.workTicks >= 18) {
-          convertChildToTribe(tid, unitOwner);
+        const lureStatus = stepChildLuring(unitId, tid, task, unitOwner);
+        if (lureStatus === 'converted' || lureStatus === 'cancel') {
+          e[7777 + unitId] = 0;
           state.tasks.delete(unitId);
           setUnitAnim(unitId, 8, 0);
           uiChanged = true;
@@ -3521,6 +3601,15 @@ function stepSimulation() {
       state.tasks.delete(unitId);
       if (state.selectedUnit === unitId) state.activePath = [];
       uiChanged = true;
+    } else if (task.kind === 'luredByEnemy') {
+      const lurerId = task.lurerId;
+      const lurerTask = state.tasks.get(lurerId) || state.enemyTasks.get(lurerId);
+      if (!lurerTask || lurerTask.kind !== 'attackUnit' || lurerTask.targetId !== unitId || (e[1919 + lurerId] & 0xff) <= 0) {
+        setUnitAnim(unitId, 14, 0);
+        state.tasks.delete(unitId);
+        uiChanged = true;
+      }
+      continue;
     } else if (task.kind === 'gather') {
       const gt = task.target;
       const cap = getUnitCarryCap(unitId); // authentic e[3737+uid]: 2..3 units per trip
@@ -4845,13 +4934,14 @@ function stepVillagerNeeds() {
     const finishedHuts = tribeBlds.filter((b) => !b.underConstruction && b.targetType === 2);
     const finishedKitchens = tribeBlds.filter((b) => !b.underConstruction && b.targetType === 4);
     const finishedDiscos = tribeBlds.filter((b) => !b.underConstruction && b.targetType === 7);
+    const finishedKindergartens = tribeBlds.filter((b) => !b.underConstruction && b.targetType === 10);
     const tribeFood = tribe === (state.localTribe ?? 0) ? state.food : (d.resources?.[tribe]?.[0] || 0);
 
     for (const id of ids) {
       const task = state.tasks.get(id);
       const age = e[1414 + id] & 0xff;
 
-      // Children (age < 12) grow up gradually and play around the village
+      // Children (age < 12) grow up gradually, play around the village, or enter Nhà trẻ (bType 10, b.java:2716) for safety!
       if (age < 12) {
         e[2121 + id] = 100;
         e[2020 + id] = 100;
@@ -4861,6 +4951,10 @@ function stepVillagerNeeds() {
           const nextAge = age + 1;
           e[1414 + id] = nextAge;
           if (nextAge >= 12) {
+            if (isUnitInsideBuilding(d, id)) {
+              exitBuildingSlot(d, id);
+              state.tasks.delete(id);
+            }
             e[6767 + id] = 42;
             e[1919 + id] = 42;
             setUnitAnim(id, 8, 0);
@@ -4869,7 +4963,14 @@ function stepVillagerNeeds() {
             }
             changed = true;
           }
-        } else if (!task) {
+        } else if (!task && !isUnitInsideBuilding(d, id)) {
+          if (finishedKindergartens.length > 0 && age < 11) {
+            const kg = pickNearestBld(finishedKindergartens, e[id] & 0xff, e[101 + id] & 0xff);
+            if (kg && assignWorkAtBuilding(id, kg)) {
+              changed = true;
+              continue;
+            }
+          }
           setUnitAnim(id, Math.random() < 0.45 ? 46 : 14, 0);
         }
         continue;
