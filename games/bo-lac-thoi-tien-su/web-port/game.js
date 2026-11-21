@@ -3932,10 +3932,9 @@ function stepSimulation() {
           }
         }
 
-        // Authentic b.java:4264: ONLY 1 builder inside an under-construction site (slotIdx === 0, or the lowest-slot
-        // builder currently inside) holds up the missing-resource protest sign (anim 115 -> 113, carrySprite 2/3/4)!
-        const hasDeliveredAny =
-          (need.deliveredWood || 0) > 0 || (need.deliveredStone || 0) > 0 || (need.deliveredTools || 0) > 0;
+        // Authentic b.java:4264: When required construction materials are missing from Storage (and nobody is fetching them),
+        // STOP hammering completely until new materials arrive! ONLY 1 builder inside the site (slotIdx === 0, or the
+        // lowest-slot builder inside) raises the missing-resource sign ONCE (anim 115, 13f) and holds it continuously (anim 113, 12f).
         if (!canFetchNow && !otherFetching) {
           let leadBuilderId = unitId;
           let minSlot = task.insideSlot?.slotIdx ?? 99;
@@ -3952,33 +3951,35 @@ function stepSimulation() {
           const isLeadSignHolder = unitId === leadBuilderId;
           const missingSprite = need.wood > 0 ? 2 : need.stone > 0 ? 3 : 4;
           const missingLabel = need.wood > 0 ? 'Gỗ' : need.stone > 0 ? 'Đá' : 'Xương';
-          // Switch between hammering already-delivered materials and raising the missing-material sign!
-          if (!hasDeliveredAny || (Math.floor(task.workTicks / 24) % 2 === 0)) {
-            if (isLeadSignHolder) {
-              setUnitCarry(unitId, missingSprite, 0);
-              if (task.insideSlot && task.insideSlot.slotIdx >= 0) {
-                const signFrame = task.workTicks % 25;
-                if (signFrame < 13) {
-                  setUnitAnim(unitId, 115, signFrame);
-                } else {
-                  setUnitAnim(unitId, 113, (signFrame - 13) % 12);
-                }
+          if (isLeadSignHolder) {
+            task.signTicks = (task.signTicks || 0) + 1;
+            setUnitCarry(unitId, missingSprite, 0);
+            if (task.insideSlot && task.insideSlot.slotIdx >= 0) {
+              const st = task.signTicks - 1;
+              if (st < 13) {
+                setUnitAnim(unitId, 115, st);
               } else {
-                setUnitAnim(unitId, 40, Math.floor(task.workTicks / 4) % 2);
-              }
-              if (task.workTicks % 60 === 0 && bldOwner === (state.localTribe ?? 0)) {
-                state.message = `🪧 Thợ xây tại ${bld.spec.name} đang giơ bảng báo thiếu ${missingLabel} trong kho!`;
+                setUnitAnim(unitId, 113, (st - 13) % 12);
               }
             } else {
-              // Secondary builders at the same unfinished site wait quietly without holding a second protest sign!
-              setUnitCarry(unitId, 0, 0);
-              setUnitAnim(unitId, 8, 0);
+              setUnitAnim(unitId, 40, Math.floor(task.signTicks / 4) % 2);
             }
-            task.workTicks++;
-            uiChanged = true;
-            continue;
+            if ((task.signTicks - 1) % 60 === 0 && bldOwner === (state.localTribe ?? 0)) {
+              state.message = `🪧 Thợ xây tại ${bld.spec.name} đang giơ bảng báo thiếu ${missingLabel} trong kho!`;
+            }
+          } else {
+            // Secondary builders at the same unfinished site wait quietly without hammering or holding a second protest sign!
+            task.signTicks = 0;
+            setUnitCarry(unitId, 0, 0);
+            setUnitAnim(unitId, 8, 0);
           }
+          task.workTicks++;
+          uiChanged = true;
+          continue;
         }
+        task.signTicks = 0;
+      } else {
+        task.signTicks = 0;
       }
 
       // Clear any protest sign when actively hammering/sawing
