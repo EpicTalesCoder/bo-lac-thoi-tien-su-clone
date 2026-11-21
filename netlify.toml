@@ -1,0 +1,10 @@
+[build]
+  base = "game/web-port"
+  publish = "."
+  command = "echo 'Static HTML5 Canvas build ready'"
+
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"
+    Access-Control-Allow-Origin = "*"
