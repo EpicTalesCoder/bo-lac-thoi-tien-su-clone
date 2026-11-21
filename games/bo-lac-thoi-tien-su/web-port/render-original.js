@@ -530,6 +530,7 @@ function drawEntitySprite(ctx, data, entityId, screenX, screenY, dir, fieldOffse
         } else if (aw === 0 && partKind >= 5 && partKind <= 8) {
           const job = e[6565 + entityId];
           if (dir < 0 && job === 1) skip = true;
+          else if (partKind === 8 && job === 1 && baseSprite !== 1184) skip = true;
           else if ((partKind === 5 && job === 4) || (partKind === 6 && job === 5)) spriteOffset = 1;
           else if (m[mo[145] + job] !== partKind) skip = true;
         } else if (aw === 2) {
@@ -1598,36 +1599,41 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
     }
   }
 
-  // Pass 4c3: Flying combat projectiles (spears & thrown stones with parabolic arc, f.java:1667 i())
+  // Pass 4c3: Authentic flying combat projectiles (Giáo, Đá ném, Rìu nhỏ — exact port of f.java:1668-1686 i())
   if (state.projectiles && state.projectiles.length > 0) {
-    ctx.save();
+    const m = data.mapTableData;
+    const mo = data.mapTableOffsets;
     for (const p of state.projectiles) {
-      const t = p.age / Math.max(1, p.duration);
+      const t = Math.max(0, Math.min(1, p.age / Math.max(1, p.duration)));
       const wx = p.x0 + (p.x1 - p.x0) * t;
       const wy = p.y0 + (p.y1 - p.y0) * t;
-      const arc = Math.sin(t * Math.PI) * 14;
-      const px = (wx - camX) * CELL_WIDTH + 11;
-      const py = originY + (wy - camY) * CELL_HEIGHT + 4 - arc;
-      if (p.weaponId === 2) {
-        // Thrown spear
-        const ang = Math.atan2((p.y1 - p.y0) * CELL_HEIGHT, (p.x1 - p.x0) * CELL_WIDTH);
-        ctx.strokeStyle = '#4e2f12';
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.moveTo(px - Math.cos(ang) * 6, py - Math.sin(ang) * 6);
-        ctx.lineTo(px + Math.cos(ang) * 5, py + Math.sin(ang) * 5);
-        ctx.stroke();
-        ctx.fillStyle = '#e5eef5';
-        ctx.fillRect(px + Math.cos(ang) * 5 - 1, py + Math.sin(ang) * 5 - 1, 3, 3);
-      } else {
-        // Thrown stone
-        ctx.fillStyle = '#262420';
-        ctx.fillRect(px - 2, py - 2, 5, 5);
-        ctx.fillStyle = '#a8a59c';
-        ctx.fillRect(px - 1, py - 1, 3, 3);
-      }
+      const arc = Math.round(Math.sin(t * Math.PI) * 14);
+      const px = Math.round((wx - camX) * CELL_WIDTH + 11);
+      const py = Math.round(originY + (wy - camY) * CELL_HEIGHT + 8 - arc - 10);
+      const wId = p.weaponId === 2 ? 2 : p.weaponId === 5 ? 5 : 1;
+      const dx = p.x1 - p.x0;
+      const dy = p.y1 - p.y0;
+      const dir =
+        p.dir !== undefined
+          ? p.dir & 7
+          : Math.abs(dx) * 2 < Math.abs(dy)
+            ? dy < 0 ? 0 : 4
+            : Math.abs(dy) * 2 < Math.abs(dx)
+              ? dx > 0 ? 2 : 6
+              : dx > 0
+                ? dy < 0 ? 1 : 3
+                : dy < 0 ? 7 : 5;
+      const grp = m[mo[77] + wId]; // 0=Đá ném (mo[190]), 1=Giáo (mo[191]), 2=Rìu nhỏ (mo[192])
+      const baseOff = m[mo[193] + wId]; // 83, 0, 115
+      const stride = m[mo[193] + 6 + wId]; // 17, 17, 2
+      const step =
+        wId === 5
+          ? Math.floor(p.age || 0) & 1
+          : Math.max(0, Math.min(stride - 1, Math.floor(t * stride)));
+      const tblOff = m[mo[190 + grp] + dir * stride + step] & 0xff;
+      const compId = 292 + tblOff + baseOff;
+      drawComposite(ctx, data, compId, px, py, imageCache);
     }
-    ctx.restore();
   }
 
   ctx.restore();

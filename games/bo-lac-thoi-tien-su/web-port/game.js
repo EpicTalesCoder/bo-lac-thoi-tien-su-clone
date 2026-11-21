@@ -307,12 +307,13 @@ function getUnitDamage(unitId) {
 }
 
 function getWeaponAttackAnim(wId, swingIdx = 0) {
-  // Exact per-weapon combat animations from /a (mo[77]/mo[158]):
-  // 1=Đá ném -> anim 35 (6f stone throw)
-  // 2=Giáo   -> anim 36 (5f spear throw)
-  // 0=Dùi cui, 3=Búa đá, 4=Chùy xương, 5=Rìu nhỏ, 9=Tay không -> authentic melee combos
+  // Exact per-weapon combat animations from /a (mo[77]/mo[158]/mo[18]):
+  // 1=Đá ném  -> anim 35 (6f stone throw, partKind 8 = baseSprite 1184)
+  // 2=Giáo    -> anim 36 (5f spear throw, partKind 8 = baseSprite 319)
+  // 5=Rìu nhỏ -> anim 36 (5f axe throw, partKind 6 + offset 1 = baseSprite 426)
+  // 0=Dùi cui, 3=Búa đá, 4=Chùy xương, 9=Tay không -> authentic melee combos
   if (wId === 1) return { animId: 35, frames: 6, hitFrame: 3 };
-  if (wId === 2) return { animId: 36, frames: 5, hitFrame: 2 };
+  if (wId === 2 || wId === 5) return { animId: 36, frames: 5, hitFrame: 2 };
   if (wId === 3) {
     const a = swingIdx % 2 === 0 ? 29 : 31;
     return { animId: a, frames: a === 31 ? 9 : 6, hitFrame: 3 };
@@ -320,10 +321,6 @@ function getWeaponAttackAnim(wId, swingIdx = 0) {
   if (wId === 4) {
     const a = swingIdx % 2 === 0 ? 27 : 33;
     return { animId: a, frames: a === 27 ? 4 : 6, hitFrame: 2 };
-  }
-  if (wId === 5) {
-    const a = swingIdx % 2 === 0 ? 31 : 33;
-    return { animId: a, frames: a === 31 ? 9 : 6, hitFrame: 3 };
   }
   if (wId === 0) {
     const a = swingIdx % 2 === 0 ? 25 : 29;
@@ -336,8 +333,8 @@ function getWeaponAttackAnim(wId, swingIdx = 0) {
 
 function getUnitRange(unitId) {
   const wId = state.data.entityData[6565 + unitId] & 0xff;
-  if (wId === 2) return 4; // Giáo (spear throw)
-  if (wId === 1) return 3; // Đá ném (thrown stone)
+  if (wId === 2 || wId === 5) return 4; // Giáo (spear throw) & Rìu nhỏ (throwing axe — mo[18][5]=5)
+  if (wId === 1) return 3; // Đá ném (thrown stone — mo[18][1]=5)
   return 1; // Melee
 }
 
@@ -472,6 +469,7 @@ function launchProjectile(attackerId, targetType, targetId, x0, y0, x1, y1, weap
     y0,
     x1,
     y1,
+    dir: directionFromDelta(x1 - x0, y1 - y0),
     weaponId,
     dmg,
     age: 0,
@@ -1291,10 +1289,19 @@ function centerOnUnit(unitId) {
 
 function setUnitAnim(unitId, animId, frame = 0) {
   const d = state.data;
-  const fo = d.entityFieldOffsets;
+  const fo = d?.entityFieldOffsets;
   if (!fo) return;
-  d.entityData[fo[29] + unitId] = animId;
-  d.entityData[fo[30] + unitId] = frame;
+  const e = d.entityData;
+  // Exact port of b.java:1749: when holding Đá ném (wId === 1) or carrying a resource (e[3535] !== 0),
+  // walking (0) uses anim 1 (stone/carry walk, partKind 8 = baseSprite 1184) and standing (8) uses anim 9 (stone/carry stand)!
+  let resolvedAnim = animId;
+  if ((e[1414 + unitId] & 0xff) >= 12 && ((e[3535 + unitId] & 0xff) !== 0 || (e[6565 + unitId] & 0xff) === 1)) {
+    if (animId === 0) resolvedAnim = 1;
+    else if (animId === 8) resolvedAnim = 9;
+  }
+  const maxFrames = Math.max(1, (d.byteSpriteTables?.[4]?.[resolvedAnim] ?? 1) & 0xff);
+  e[fo[29] + unitId] = resolvedAnim;
+  e[fo[30] + unitId] = ((frame % maxFrames) + maxFrames) % maxFrames;
 }
 
 function updateBuildPreview() {
@@ -1875,11 +1882,54 @@ function assignTrainOrFetchWeapon(unitId, bld, owner = state.localTribe ?? 0, si
   if (curWeapon !== 9) {
     return assignWorkAtBuilding(unitId, bld);
   }
+  const r = d.resources?.[owner];
+  const storage = findNearestDropoff(e[unitId] & 0xff, e[101 + unitId] & 0xff, owner);
+
+  // First check if Storage already has a crafted weapon matching the training building type!
+  const craftedOrder = isThrowing ? [2, 5, 1] : [4, 3, 0];
+  let craftedWId = -1;
+  if (r) {
+    for (const wid of craftedOrder) {
+      if ((r[5 + wid] || 0) > 0) {
+        craftedWId = wid;
+        break;
+      }
+    }
+  }
+  if (craftedWId >= 0) {
+    if (!storage) {
+      r[5 + craftedWId] = Math.max(0, (r[5 + craftedWId] || 0) - 1);
+      e[6565 + unitId] = craftedWId;
+      return assignWorkAtBuilding(unitId, bld);
+    }
+    ensureUnitOutside(unitId);
+    setUnitCarry(unitId, 0, 0);
+    const planned = planUnitPath(unitId, storage.x, storage.y, false, storage);
+    if (planned === null) return false;
+    state.tasks.set(unitId, {
+      kind: 'fetchWeaponAndTrain',
+      path: planned.path,
+      stepProgress: planned.stepProgress,
+      target: storage,
+      trainBld: bld,
+      weaponId: craftedWId,
+      fromStock: true,
+      owner,
+      workTicks: 0,
+    });
+    if (state.selectedUnit === unitId) state.activePath = planned.path;
+    if (!silent) {
+      const info = getVillagerInfo(unitId);
+      const wName = WEAPONS[craftedWId]?.name || 'Vũ khí';
+      state.message = `${info.role} đang vào kho lấy ${wName} trước khi vào ${bld.spec.name}!`;
+    }
+    return true;
+  }
+
   // Unarmed: if tribe disabled raw Stone/Wood weapons, enter training unarmed; otherwise take 1 Stone/Wood from Storage
   if (state.tribeUseRawWeapon[owner] === false) {
     return assignWorkAtBuilding(unitId, bld);
   }
-  const r = d.resources?.[owner];
   const needResIdx = isThrowing ? 2 : 1; // 2=Stone, 1=Wood
   const curRes = owner === (state.localTribe ?? 0) ? (isThrowing ? state.stone : state.wood) : (r?.[needResIdx] || 0);
   if (curRes < 1) {
@@ -1892,7 +1942,6 @@ function assignTrainOrFetchWeapon(unitId, bld, owner = state.localTribe ?? 0, si
     }
     return false;
   }
-  const storage = findNearestDropoff(e[unitId] & 0xff, e[101 + unitId] & 0xff, owner);
   if (!storage) {
     // Fallback equip directly if no storage building exists
     if (owner === (state.localTribe ?? 0)) {
@@ -2696,8 +2745,9 @@ function stepAiCommander() {
               path: p.path,
               stepProgress: p.stepProgress,
               target: storage,
-              flagX: tx,
-              flagY: ty,
+              battleX: tx,
+              battleY: ty,
+              owner: 1,
               workTicks: 0,
             });
             changed = true;
@@ -2766,20 +2816,19 @@ function stepEnemyAI() {
         e[606 + eid] = directionFromDelta(tx - ex, ty - ey);
         const dmg = getUnitDamage(eid);
         const wId = e[6565 + eid] & 0xff;
-        if (range > 1) {
-          setUnitAnim(eid, 35, Math.floor(task.cooldown / 2) % 6);
-          if (task.cooldown === 8) {
+        const swingIdx = Math.floor((task.workTicks || 0) / 6);
+        const atkAnim = getWeaponAttackAnim(wId, swingIdx);
+        setUnitAnim(eid, atkAnim.animId, task.cooldown % atkAnim.frames);
+        if (task.cooldown === atkAnim.hitFrame) {
+          if (range > 1) {
             launchProjectile(eid, 'unit', tid, ex, ey, tx, ty, wId, dmg);
-            changed = true;
-          }
-        } else {
-          setUnitAnim(eid, 25, Math.floor(task.cooldown / 2) % 6);
-          if (task.cooldown === 8) {
+          } else {
             applyUnitDamage(eid, tid, dmg);
-            changed = true;
           }
+          changed = true;
         }
-        task.cooldown = (task.cooldown + 1) % 14;
+        task.workTicks = (task.workTicks || 0) + 1;
+        task.cooldown = (task.cooldown + 1) % (atkAnim.frames + (range > 1 ? 1 : 0));
         continue;
       }
 
@@ -2814,20 +2863,19 @@ function stepEnemyAI() {
         e[606 + eid] = directionFromDelta(cx - ex, cy - ey);
         const dmg = getUnitDamage(eid);
         const wId = e[6565 + eid] & 0xff;
-        if (range > 1) {
-          setUnitAnim(eid, 35, Math.floor(task.cooldown / 2) % 6);
-          if (task.cooldown === 8) {
+        const swingIdx = Math.floor((task.workTicks || 0) / 6);
+        const atkAnim = getWeaponAttackAnim(wId, swingIdx);
+        setUnitAnim(eid, atkAnim.animId, task.cooldown % atkAnim.frames);
+        if (task.cooldown === atkAnim.hitFrame) {
+          if (range > 1) {
             launchProjectile(eid, 'building', bld.bid, ex, ey, cx, cy, wId, dmg);
-            changed = true;
-          }
-        } else {
-          setUnitAnim(eid, 25, Math.floor(task.cooldown / 2) % 6);
-          if (task.cooldown === 8) {
+          } else {
             applyBuildingDamage(eid, bld.bid, dmg);
-            changed = true;
           }
+          changed = true;
         }
-        task.cooldown = (task.cooldown + 1) % 14;
+        task.workTicks = (task.workTicks || 0) + 1;
+        task.cooldown = (task.cooldown + 1) % (atkAnim.frames + (range > 1 ? 1 : 0));
         continue;
       }
 
@@ -3671,12 +3719,24 @@ function stepSimulation() {
       }
       e[7777 + unitId] = 0;
       state.tasks.delete(unitId);
-      dispatchUnitToBattleFlag(unitId, task.battleX, task.battleY, owner);
+      dispatchUnitToBattleFlag(unitId, task.battleX ?? task.flagX, task.battleY ?? task.flagY, owner);
       uiChanged = true;
     } else if (task.kind === 'fetchWeaponAndTrain') {
-      // Arrived at Storage: take 1 Wood (Dùi cui) or 1 Stone (Đá ném), equip weapon, and head to training building!
+      // Arrived at Storage: take crafted weapon (or 1 Wood / 1 Stone), equip weapon, and head to training building!
       const owner = task.owner ?? (unitId > 50 ? 1 : 0);
       const r = d.resources?.[owner];
+      if (task.fromStock && r && (r[5 + task.weaponId] || 0) >= 1) {
+        r[5 + task.weaponId] = Math.max(0, (r[5 + task.weaponId] || 0) - 1);
+        e[6565 + unitId] = task.weaponId;
+        state.tasks.delete(unitId);
+        assignWorkAtBuilding(unitId, task.trainBld);
+        if (owner === (state.localTribe ?? 0)) {
+          const wName = WEAPONS[task.weaponId]?.name || 'Vũ khí';
+          state.message = `${getVillagerInfo(unitId).role} đã lấy ${wName} và đang tiến vào ${task.trainBld.spec.name}!`;
+        }
+        uiChanged = true;
+        continue;
+      }
       const isStone = task.resType === 'stone';
       const curAmt = owner === (state.localTribe ?? 0) ? (isStone ? state.stone : state.wood) : (r?.[isStone ? 2 : 1] || 0);
       if (curAmt >= 1) {
