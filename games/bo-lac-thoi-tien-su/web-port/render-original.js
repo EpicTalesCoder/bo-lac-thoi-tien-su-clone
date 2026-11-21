@@ -397,14 +397,11 @@ function drawMapObject(ctx, data, n, layer, ah, ai, camX, camY, originY, animTic
         }
         resCounter++;
       } else if (n8 === 4 && resCounter < 1) {
-        if (n9 >= 31) {
-          drawComposite(ctx, data, (shorts[1][idx] & 0xfff) + 2, px, py, imageCache);
-        } else {
-          const food = data.resources?.[0]?.[0] || 0;
-          if (food >= 5) {
-            const lvl = food > 35 ? 2 : Math.floor((food - 5) / 15);
-            drawComposite(ctx, data, (shorts[1][idx] & 0xfff) + lvl, px, py, imageCache);
-          }
+        // Only draw cooked food platter on the Kitchen table after the Chef has actually cooked meals here (e[8871 + bid] > 0)!
+        const cooked = e[8871 + n9] & 0xff;
+        if (cooked > 0) {
+          const lvl = cooked >= 12 ? 2 : cooked >= 6 ? 1 : 0;
+          drawComposite(ctx, data, (shorts[1][idx] & 0xfff) + lvl, px, py, imageCache);
         }
         resCounter++;
       } else {

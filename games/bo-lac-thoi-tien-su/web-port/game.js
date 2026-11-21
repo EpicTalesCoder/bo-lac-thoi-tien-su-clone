@@ -4297,7 +4297,6 @@ function stepSimulation() {
         continue;
       }
       // Enter Bếp (bType 4) dining slots 1..6 (strictPreferred=true so diners NEVER fall back into Chef slot 0!)
-      // to play authentic sitting & eating animations (anim 85 / 86, 19 frames)
       if (bld.targetType === 4 && !task.insideSlot && !task.eatOutside) {
         const slot = enterBuildingWorkSlot(d, bld.bid, unitId, [1, 2, 3, 4, 5, 6], true);
         if (slot) {
@@ -4306,21 +4305,53 @@ function stepSimulation() {
           task.eatOutside = true;
         }
       }
-      if (task.insideSlot && task.insideSlot.anims?.length) {
-        const animEntry = task.insideSlot.anims.find((a) => a.animId !== 0) || task.insideSlot.anims[0];
-        setUnitAnim(unitId, animEntry.animId, task.workTicks % animEntry.frames);
-        // Smoothly refill satiety bar while visibly eating inside Nhà ăn
-        if (task.workTicks % 4 === 0) {
+      task.workTicks++;
+      if (bld.targetType === 4 && task.insideSlot) {
+        const isLeftSide = [1, 3, 6].includes(task.insideSlot.slotIdx);
+        const cooked = e[8871 + bld.bid] & 0xff;
+        if (cooked <= 0) {
+          // No cooked food on the Kitchen table yet -> sit & wait (banging table anim 83/84) until Chef finishes cooking!
+          setUnitAnim(unitId, isLeftSide ? 83 : 84, Math.floor(task.workTicks / 2) % 12);
+          continue;
+        }
+        // Cooked food is on the table -> play authentic eating animation WITH food bowl s1138 (anim 85/86, 19 frames)!
+        task.eatTicks = (task.eatTicks || 0) + 1;
+        setUnitAnim(unitId, isLeftSide ? 85 : 86, Math.floor((task.eatTicks - 1) / 2) % 19);
+        if (task.eatTicks % 4 === 0) {
           e[2121 + unitId] = Math.min(100, (e[2121 + unitId] & 0xff) + 10);
           if ((e[3333 + unitId] & 0xff) === 0) e[3333 + unitId] = -1;
           uiChanged = true;
         }
-      } else {
-        e[606 + unitId] = directionFromDelta(bld.x - ux, bld.y - uy);
-        setUnitAnim(unitId, 85, task.workTicks % 19);
+        if (task.eatTicks >= 38) {
+          e[8871 + bld.bid] = Math.max(0, cooked - 2);
+          const unitOwner = unitId > 50 ? 1 : 0;
+          const r = d.resources?.[unitOwner];
+          const curFood = unitOwner === (state.localTribe ?? 0) ? state.food : (r?.[0] || 0);
+          if (curFood > 0) {
+            if (unitOwner === (state.localTribe ?? 0)) {
+              state.food = Math.max(0, state.food - 1);
+              syncResourcesToData(unitOwner);
+            } else if (r) {
+              r[0] = Math.max(0, (r[0] || 0) - 1);
+            }
+          }
+          e[2121 + unitId] = 100;
+          const maxHp = e[6767 + unitId] & 0xff;
+          e[1919 + unitId] = Math.min(maxHp, (e[1919 + unitId] & 0xff) + 6);
+          e[2222 + unitId] = 0;
+          e[3333 + unitId] = -1;
+          exitBuildingSlot(d, unitId);
+          state.tasks.delete(unitId);
+          if (!resumeSavedJob(unitId)) {
+            setUnitAnim(unitId, 8, 0);
+          }
+          uiChanged = true;
+        }
+        continue;
       }
-      task.workTicks++;
-      const eatDuration = task.insideSlot ? 38 : 20;
+      e[606 + unitId] = directionFromDelta(bld.x - ux, bld.y - uy);
+      setUnitAnim(unitId, 85, Math.floor(task.workTicks / 2) % 19);
+      const eatDuration = 24;
       if (task.workTicks >= eatDuration) {
         const unitOwner = unitId > 50 ? 1 : 0;
         const r = d.resources?.[unitOwner];
@@ -4768,8 +4799,10 @@ function stepSimulation() {
             if ((e[3333 + unitId] & 0xff) === 0) e[3333 + unitId] = -1;
             uiChanged = true;
           }
-          if (task.workTicks % 60 === 0) {
-            // Bếp slot 0: Chef finishes cooking a batch (+4 food), then goes to Storage to fetch raw Meat (carrySprite=1) for the next pot!
+          if (task.workTicks % 40 === 0) {
+            // Bếp slot 0: Chef finishes cooking a batch -> serves cooked food onto THIS Kitchen's table (e[8871+bid]) & +4 food,
+            // then goes to Storage to fetch raw Meat (carrySprite=1) for the next pot!
+            e[8871 + bld.bid] = Math.min(40, (e[8871 + bld.bid] & 0xff) + 6);
             if (unitOwner === (state.localTribe ?? 0)) {
               state.food += 4;
               syncResourcesToData(unitOwner);
