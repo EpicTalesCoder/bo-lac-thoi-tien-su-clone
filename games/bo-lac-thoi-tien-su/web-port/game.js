@@ -170,6 +170,7 @@ const state = {
   compareOriginal: false,
   autoAI: false,
   panelMode: 'main', // 'main' | 'build' | 'scenarios' | 'building'
+  canvasMenu: null, // Authentic on-canvas J2ME menus: { kind: 'actions'|'build'|'building'|'villagers'|'pause'|'scenarios', items, selected, scroll, title }
   selectedBuildingBid: 0,
   buildType: null,
   buildPreview: null,
@@ -2849,6 +2850,7 @@ function resumeSavedGame() {
   state.groups = { 7: new Set(), 9: new Set() };
   state.activeGroupId = 0;
   state.selectionBox = null;
+  state.canvasMenu = null;
   state.showMinimap = false;
   state.storyDialog = null;
   state.missionResult = null;
@@ -2936,20 +2938,463 @@ function cycleMidiTrack() {
   render();
 }
 
+function closeCanvasMenu() {
+  const wasPause = state.canvasMenu?.kind === 'pause' || state.canvasMenu?.kind === 'scenarios';
+  state.canvasMenu = null;
+  if (wasPause) {
+    state.paused = false;
+    if (state.panelMode === 'pause') state.panelMode = 'main';
+  }
+  render();
+}
+
+function openCanvasActionsMenu() {
+  if (state.phase !== 'game' || !state.data) return;
+  cancelBuildPlacement();
+  state.showMinimap = false;
+  const items = [
+    {
+      label: 'XÂY DỰNG',
+      iconAnim: 10,
+      action: () => openCanvasBuildMenu(),
+    },
+    {
+      label: 'TẬP HỢP BỘ LẠC!',
+      iconAnim: 11,
+      action: () => {
+        state.canvasMenu = null;
+        rallyAllVillagers();
+      },
+    },
+    {
+      label: 'LỆNH CHIẾN ĐẤU!',
+      iconAnim: 12,
+      action: () => {
+        state.canvasMenu = null;
+        attackNearestEnemy();
+      },
+    },
+    {
+      label: 'DANH SÁCH DÂN LÀNG',
+      iconAnim: 13,
+      action: () => openCanvasVillagersMenu(),
+    },
+    {
+      label: state.autoAI ? 'AI TỰ ĐỘNG: ĐANG BẬT' : 'AI TỰ ĐỘNG: ĐANG TẮT',
+      iconAnim: state.autoAI ? 25 : 23,
+      action: () => {
+        state.autoAI = !state.autoAI;
+        if (state.autoAI) runTribeAutoAI();
+        state.message = state.autoAI ? 'Đã bật AI bộ lạc tự động.' : 'Đã tắt AI bộ lạc tự động.';
+        openCanvasActionsMenu();
+      },
+    },
+    {
+      label: 'BẢN ĐỒ NHỎ (3)',
+      iconAnim: 24,
+      action: () => {
+        state.canvasMenu = null;
+        toggleMinimap();
+      },
+    },
+  ];
+  state.canvasMenu = { kind: 'actions', items, selected: 0, scroll: 0 };
+  render();
+}
+
+function openCanvasBuildMenu() {
+  if (state.phase !== 'game' || !state.data) return;
+  cancelBuildPlacement();
+  state.showMinimap = false;
+  const items = BUILDINGS.map((b) => {
+    const spec = getBuildingSpec(state.data, b.bType);
+    return {
+      label: spec.name.toUpperCase(),
+      bType: b.bType,
+      spec,
+      desc: spec.desc,
+      action: () => {
+        state.canvasMenu = null;
+        startBuildPlacement(b.bType);
+      },
+    };
+  });
+  state.canvasMenu = { kind: 'build', items, selected: 0, scroll: 0 };
+  render();
+}
+
+function openCanvasVillagersMenu() {
+  if (state.phase !== 'game' || !state.data) return;
+  const ids = getVillagerIds();
+  if (ids.length === 0) return;
+  const items = ids.map((id) => {
+    const u = getVillagerInfo(id);
+    return {
+      label: `${u.role} (${u.sex}, ${u.age}t)`,
+      unitId: id,
+      action: () => {
+        state.canvasMenu = null;
+        selectUnit(id);
+        centerOnUnit(id);
+        render();
+      },
+    };
+  });
+  state.selectedUnit = ids[0];
+  state.canvasMenu = { kind: 'villagers', items, selected: 0, scroll: 0 };
+  render();
+}
+
+function openCanvasBuildingMenu(bld) {
+  if (!bld || !state.data) return;
+  cancelBuildPlacement();
+  state.showMinimap = false;
+  state.selectedBuildingBid = bld.bid;
+  const level = state.data.entityData[9115 + bld.bid] & 0xff;
+  const items = [];
+
+  if (bld.targetType === 0) {
+    // Ổ vũ khí: 6 weapons with authentic 659+id icons
+    for (const w of WEAPONS) {
+      const afford = state.wood >= w.wood && state.stone >= w.stone && state.tools >= w.bones;
+      const parts = [];
+      if (w.wood) parts.push(`Gỗ:${w.wood}`);
+      if (w.stone) parts.push(`Đá:${w.stone}`);
+      if (w.bones) parts.push(`Xương:${w.bones}`);
+      items.push({
+        label: `CHẾ ${w.name.toUpperCase()} (+${w.atk})`,
+        weaponId: w.id,
+        costText: parts.join(' · '),
+        canAfford: afford,
+        action: () => {
+          if (!state.selectedUnit) {
+            const ids = getVillagerIds();
+            if (ids.length) state.selectedUnit = ids[0];
+          }
+          craftAndEquipWeapon(w);
+        },
+      });
+    }
+  } else if (bld.targetType === 8) {
+    // Khu thánh địa: 4 spells with authentic animations 19..22
+    SPELLS.forEach((sp, idx) => {
+      items.push({
+        label: sp.name.toUpperCase(),
+        iconAnim: 19 + idx,
+        costText: `Cần ${sp.bones} Xương`,
+        canAfford: state.tools >= sp.bones,
+        action: () => {
+          castShamanSpell(sp);
+          state.canvasMenu = null;
+          render();
+        },
+      });
+    });
+  } else if (bld.targetType === 2) {
+    // Lều: rest/sleep
+    items.push({
+      label: 'VÀO LỀU NGỦ HỒI SỨC',
+      iconAnim: 13,
+      action: () => {
+        const uid = state.selectedUnit || findNearestVillager(bld.x, bld.y, true);
+        if (uid) assignRestTask(uid, bld);
+        state.canvasMenu = null;
+        render();
+      },
+    });
+  } else if ([1, 4, 5, 7, 9, 11].includes(bld.targetType)) {
+    const workLabels = {
+      1: 'LUYỆN CẬN CHIẾN (+8 HP)',
+      4: 'CỬ ĐẦU BẾP NẤU ĂN',
+      5: 'LUYỆN NÉM (+8 HP)',
+      7: 'CỬ DJ MỞ TIỆC DISCO',
+      9: 'CỬ TRINH SÁT (R=7)',
+      11: 'LÍNH GÁC CHÒI CANH',
+    };
+    items.push({
+      label: workLabels[bld.targetType] || 'VÀO LÀM VIỆC',
+      iconAnim: 13,
+      action: () => {
+        const uid = state.selectedUnit || findNearestVillager(bld.x, bld.y, true);
+        if (uid) assignWorkAtBuilding(uid, bld);
+        state.canvasMenu = null;
+        render();
+      },
+    });
+  }
+
+  // Upgrade building (anim 16)
+  if (level < 3) {
+    items.push({
+      label: `NÂNG CẤP CẤP ${level + 1}`,
+      iconAnim: 16,
+      costText: 'Gỗ:15 · Đá:10',
+      canAfford: state.wood >= 15 && state.stone >= 10,
+      action: () => {
+        performUpgradeBuilding(bld);
+        state.canvasMenu = null;
+        render();
+      },
+    });
+  }
+
+  // Repair building (anim 26)
+  if (bld.hp < bld.maxHp) {
+    items.push({
+      label: 'SỬA CHỮA CÔNG TRÌNH',
+      iconAnim: 26,
+      costText: 'Gỗ:5',
+      canAfford: state.wood >= 5,
+      action: () => {
+        if (state.wood >= 5) {
+          state.wood -= 5;
+          state.data.entityData[8505 + bld.bid] = bld.maxHp;
+          syncResourcesToData();
+          state.message = `Đã sửa đầy máu cho ${bld.spec.name}!`;
+        } else {
+          state.message = 'Cần 5 gỗ để sửa công trình!';
+        }
+        state.canvasMenu = null;
+        render();
+      },
+    });
+  }
+
+  // Demolish building (anim 17)
+  if (bld.targetType !== 3) {
+    items.push({
+      label: 'PHÁ HỦY CÔNG TRÌNH',
+      iconAnim: 17,
+      action: () => {
+        state.canvasMenu = null;
+        performDemolishBuilding(bld);
+      },
+    });
+  }
+
+  state.canvasMenu = { kind: 'building', buildingBid: bld.bid, items, selected: 0, scroll: 0 };
+  render();
+}
+
+function openCanvasScenariosMenu() {
+  const items = SCENARIOS.map((sc, idx) => ({
+    label: `MÀN ${idx + 1}: ${sc.name.toUpperCase()}`,
+    action: () => {
+      state.canvasMenu = null;
+      state.paused = false;
+      loadScenario(idx, { showStory: false });
+    },
+  }));
+  state.canvasMenu = {
+    kind: 'scenarios',
+    title: 'CHỌN MÀN CHIẾN DỊCH',
+    items,
+    selected: state.scenarioIndex || 0,
+    scroll: Math.max(0, (state.scenarioIndex || 0) - 3),
+  };
+  render();
+}
+
 function openPauseMenu() {
   if (state.phase !== 'game') return;
   cancelBuildPlacement();
   state.showMinimap = false;
   state.paused = true;
   state.panelMode = 'pause';
+  const ui = getUiStrings(state.language);
+  const langName = LANGUAGES[state.language]?.label || 'TIẾNG VIỆT';
+  const items = [
+    { label: 'TIẾP TỤC CHƠI', action: () => closePauseMenu() },
+    {
+      label: 'LƯU TRÒ CHƠI',
+      action: () => {
+        const ok = saveGameToStorage(state);
+        state.message = ok ? ui.savedOk : 'Không lưu được bản lưu.';
+        closePauseMenu();
+      },
+    },
+    {
+      label: 'TẢI BẢN LƯU',
+      action: () => {
+        const saved = loadGameFromStorage(state.baseData);
+        if (saved) {
+          applyLoadedSave(saved);
+          state.canvasMenu = null;
+          state.paused = false;
+          state.message = ui.loadedOk;
+          render();
+        } else {
+          state.message = ui.noSave;
+          closePauseMenu();
+        }
+      },
+    },
+    {
+      label: 'BẢN ĐỒ NHỎ (PHÍM 3)',
+      action: () => {
+        state.canvasMenu = null;
+        state.paused = false;
+        toggleMinimap();
+      },
+    },
+    {
+      label: `ÂM NHẠC MIDI: ${state.music ? 'BẬT' : 'TẮT'}`,
+      action: () => {
+        toggleMusic();
+        openPauseMenu();
+      },
+    },
+    {
+      label: `NGÔN NGỮ: ${langName}`,
+      action: () => {
+        switchLanguage((state.language + 1) % LANGUAGES.length).then(() => openPauseMenu());
+      },
+    },
+    {
+      label: `CHỌN MÀN (${state.scenarioIndex + 1}/10)`,
+      action: () => openCanvasScenariosMenu(),
+    },
+    {
+      label: 'THOÁT VỀ MENU CHÍNH',
+      action: () => {
+        state.canvasMenu = null;
+        state.paused = false;
+        setPhase('mainMenu');
+      },
+    },
+  ];
+  state.canvasMenu = { kind: 'pause', title: 'MENU TẠM DỪNG', items, selected: 0, scroll: 0 };
   render();
 }
 
 function closePauseMenu() {
   if (state.phase !== 'game') return;
   state.paused = false;
+  state.canvasMenu = null;
   if (state.panelMode === 'pause') state.panelMode = 'main';
   render();
+}
+
+function moveCanvasMenuSelection(delta) {
+  const m = state.canvasMenu;
+  if (!m || !m.items?.length) return;
+  const len = m.items.length;
+  m.selected = (m.selected + delta + len) % len;
+  const pageSize = m.kind === 'pause' || m.kind === 'scenarios' ? 8 : m.kind === 'build' ? 1 : 5;
+  if (m.selected < (m.scroll || 0)) m.scroll = m.selected;
+  if (m.selected >= (m.scroll || 0) + pageSize) m.scroll = Math.max(0, m.selected - pageSize + 1);
+  if (m.kind === 'villagers' && m.items[m.selected]?.unitId) {
+    state.selectedUnit = m.items[m.selected].unitId;
+  }
+  render();
+}
+
+function handleCanvasMenuClick(x, y) {
+  const m = state.canvasMenu;
+  if (!m) return false;
+
+  // Bottom softkey bar (y >= 298): Left green ✓ (x <= 34) confirms, Right red ✕ (x >= 206) goes back/closes
+  if (y >= LOGICAL_HEIGHT - 22) {
+    if (x <= 34) {
+      const item = m.items?.[m.selected];
+      if (item?.action) item.action();
+      return true;
+    }
+    if (x >= LOGICAL_WIDTH - 34) {
+      if (m.kind === 'build' || m.kind === 'villagers') openCanvasActionsMenu();
+      else if (m.kind === 'scenarios') openPauseMenu();
+      else closeCanvasMenu();
+      return true;
+    }
+  }
+
+  if (m.kind === 'pause' || m.kind === 'scenarios') {
+    const items = m.items || [];
+    const visibleCount = Math.min(8, items.length);
+    const scroll = m.scroll || 0;
+    const rowH = 22;
+    const bh = 34 + visibleCount * rowH + 14;
+    const bw = 204;
+    const bx = Math.floor((LOGICAL_WIDTH - bw) / 2);
+    const by = Math.max(30, Math.floor((LOGICAL_HEIGHT - 22 - bh) / 2) + 8);
+    if (x >= bx && x <= bx + bw && y >= by + 26 && y <= by + 26 + visibleCount * rowH) {
+      const row = Math.floor((y - (by + 26)) / rowH);
+      const idx = scroll + row;
+      if (idx >= 0 && idx < items.length) {
+        m.selected = idx;
+        items[idx].action?.();
+        return true;
+      }
+    }
+    // Click outside popup closes menu
+    if (x < bx || x > bx + bw || y < by || y > by + bh) {
+      closeCanvasMenu();
+    }
+    return true;
+  }
+
+  if (m.kind === 'build') {
+    const panelY = 234;
+    if (y < panelY) {
+      closeCanvasMenu();
+      return true;
+    }
+    // Left arrow area (x < 34, y >= panelY + 50)
+    if (x < 36 && y >= panelY + 46 && y < LOGICAL_HEIGHT - 22) {
+      moveCanvasMenuSelection(-1);
+      return true;
+    }
+    // Right arrow area (x 36..62, y >= panelY + 46)
+    if (x >= 36 && x <= 64 && y >= panelY + 46 && y < LOGICAL_HEIGHT - 22) {
+      moveCanvasMenuSelection(1);
+      return true;
+    }
+    // Click on building icon or description box directly starts placing that building!
+    if (y >= panelY && y < LOGICAL_HEIGHT - 22) {
+      m.items?.[m.selected]?.action?.();
+      return true;
+    }
+    return true;
+  }
+
+  // Panel 2 / Panel 5 horizontal 5-icon bar (y = 272..320)
+  const panelY = 272;
+  if (y < panelY) {
+    closeCanvasMenu();
+    return true;
+  }
+  const items = m.items || [];
+  const visible = Math.min(5, items.length);
+  const scroll = m.scroll || 0;
+  const slotStep = 34;
+  const totalW = visible * slotStep;
+  const startX = Math.floor((LOGICAL_WIDTH - totalW + 9) / 2);
+
+  if (scroll > 0 && x < startX) {
+    moveCanvasMenuSelection(-1);
+    return true;
+  }
+  if (scroll + visible < items.length && x > startX + totalW) {
+    moveCanvasMenuSelection(1);
+    return true;
+  }
+  const slotIdx = Math.floor((x - startX) / slotStep);
+  if (slotIdx >= 0 && slotIdx < visible) {
+    const idx = scroll + slotIdx;
+    if (m.selected === idx) {
+      // Clicking the already-highlighted icon executes it immediately!
+      items[idx]?.action?.();
+    } else {
+      m.selected = idx;
+      if (m.kind === 'villagers' && items[idx]?.unitId) {
+        state.selectedUnit = items[idx].unitId;
+      }
+      // On Panel 5/2, single click executes immediately if clicking directly on icon for crisp desktop/touch UX
+      items[idx]?.action?.();
+    }
+    return true;
+  }
+  return true;
 }
 
 function startCustomGame() {
@@ -2990,6 +3435,7 @@ function loadScenario(index, opts = {}) {
   state.groups = { 7: new Set(), 9: new Set() };
   state.activeGroupId = 0;
   state.selectionBox = null;
+  state.canvasMenu = null;
   state.showMinimap = false;
   state.storyDialog = null;
   state.missionResult = null;
@@ -3792,7 +4238,19 @@ function confirm() {
       advanceStoryDialog();
       return;
     }
-    if (state.missionResult) return;
+    if (state.missionResult) {
+      if (state.missionResult.status === 'victory' && !state.isCustomGame && state.scenarioIndex < SCENARIOS.length - 1) {
+        proceedToNextMission();
+      } else {
+        loadScenario(state.scenarioIndex, { isCustomGame: state.isCustomGame, showStory: false });
+      }
+      return;
+    }
+    if (state.canvasMenu) {
+      const item = state.canvasMenu.items?.[state.canvasMenu.selected];
+      if (item?.action) item.action();
+      return;
+    }
     if (state.buildType !== null) {
       confirmBuildAtCursor();
       return;
@@ -3813,7 +4271,7 @@ function confirm() {
         state.selectedBuildingBid = bld.bid;
         state.panelMode = 'building';
         state.message = `${bld.spec.name} (HP ${bld.hp}/${bld.maxHp}). ${bld.spec.desc}`;
-        render();
+        openCanvasBuildingMenu(bld);
         return;
       }
     }
@@ -3852,6 +4310,12 @@ function back() {
     if (state.showMinimap) {
       state.showMinimap = false;
       render();
+      return;
+    }
+    if (state.canvasMenu) {
+      if (state.canvasMenu.kind === 'build' || state.canvasMenu.kind === 'villagers') openCanvasActionsMenu();
+      else if (state.canvasMenu.kind === 'scenarios') openPauseMenu();
+      else closeCanvasMenu();
       return;
     }
     if (state.panelMode === 'pause') {
@@ -3930,6 +4394,16 @@ function toSignedByteLocal(v) {
 window.addEventListener('keydown', (event) => {
   const key = event.key.toLowerCase();
   if (state.phase === 'game') {
+    if (state.canvasMenu) {
+      const vertical = state.canvasMenu.kind === 'pause' || state.canvasMenu.kind === 'scenarios';
+      if (vertical && (event.key === 'ArrowUp' || key === 'w')) { event.preventDefault(); moveCanvasMenuSelection(-1); return; }
+      if (vertical && (event.key === 'ArrowDown' || key === 's')) { event.preventDefault(); moveCanvasMenuSelection(1); return; }
+      if (!vertical && (event.key === 'ArrowLeft' || key === 'a')) { event.preventDefault(); moveCanvasMenuSelection(-1); return; }
+      if (!vertical && (event.key === 'ArrowRight' || key === 'd')) { event.preventDefault(); moveCanvasMenuSelection(1); return; }
+      if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); confirm(); return; }
+      if (event.key === 'Escape' || event.key === 'Backspace' || key === 'p') { event.preventDefault(); back(); return; }
+      return;
+    }
     if (event.key === 'ArrowLeft' || key === 'a') { event.preventDefault(); moveCursor(-1, 0); }
     else if (event.key === 'ArrowRight' || key === 'd') { event.preventDefault(); moveCursor(1, 0); }
     else if (event.key === 'ArrowUp' || key === 'w') { event.preventDefault(); moveCursor(0, -1); }
@@ -3939,8 +4413,8 @@ window.addEventListener('keydown', (event) => {
     else if (event.key === '9' || event.key === '(') { event.preventDefault(); if (event.shiftKey) assignGroup(9); else recallGroup(9); }
     else if (key === 'r') { event.preventDefault(); rallyAllVillagers(); }
     else if (key === 'f') { event.preventDefault(); attackNearestEnemy(); }
-    else if (key === 'b') { event.preventDefault(); cancelBuildPlacement(); state.panelMode = state.panelMode === 'build' ? 'main' : 'build'; render(); }
-    else if (key === 'm') { event.preventDefault(); cancelBuildPlacement(); state.panelMode = state.panelMode === 'scenarios' ? 'main' : 'scenarios'; render(); }
+    else if (key === 'b') { event.preventDefault(); openCanvasBuildMenu(); }
+    else if (key === 'm') { event.preventDefault(); openCanvasScenariosMenu(); }
     else if (key === 'q') { event.preventDefault(); state.autoAI = !state.autoAI; if (state.autoAI) runTribeAutoAI(); state.message = state.autoAI ? 'Đã bật AI bộ lạc tự động.' : 'Đã tắt AI bộ lạc tự động.'; render(); }
     else if (key === 'g') { event.preventDefault(); gatherNearest(); }
     else if (key === 'c') { event.preventDefault(); if (state.selectedUnit) { centerOnUnit(state.selectedUnit); render(); } }
@@ -4009,26 +4483,47 @@ canvas.addEventListener('pointerdown', (event) => {
       advanceStoryDialog();
       return;
     }
-    if (state.missionResult) return;
+    if (state.missionResult) {
+      confirm();
+      return;
+    }
+    if (state.canvasMenu) {
+      handleCanvasMenuClick(x, y);
+      return;
+    }
     const bottomTop = LOGICAL_HEIGHT - (state.data.bottomUi ?? 22);
     if (y >= bottomTop) {
-      if (x <= 32) {
-        state.paused = !state.paused;
-        state.message = state.paused ? 'Đã tạm dừng mô phỏng.' : 'Tiếp tục mô phỏng.';
-        render();
+      if (x <= 34) {
+        // Authentic Left Green Softkey (f.java:3531): Confirm build placement if placing, otherwise open Panel 5 Tribe Actions Menu!
+        if (state.buildType !== null) {
+          confirmBuildAtCursor();
+        } else {
+          openCanvasActionsMenu();
+        }
       } else if (x >= 92 && x <= 118) {
         if (event.shiftKey) assignGroup(7);
         else recallGroup(7);
       } else if (x >= 122 && x <= 148) {
         if (event.shiftKey) assignGroup(9);
         else recallGroup(9);
-      } else if (x >= 165 && x <= 212) {
-        cancelBuildPlacement();
-        state.panelMode = state.panelMode === 'build' ? 'main' : 'build';
-        render();
-      } else if (x >= LOGICAL_WIDTH - 32) {
-        if (state.panelMode === 'pause') closePauseMenu();
-        else openPauseMenu();
+      } else if (x >= 165 && x <= 205) {
+        // Map/Compass icon on bottom bar -> toggle Minimap (key 3)
+        toggleMinimap();
+      } else if (x >= LOGICAL_WIDTH - 34) {
+        // Authentic Right Red Softkey (f.java:3538): Cancel build/selection if active, otherwise open On-Canvas Pause Menu!
+        if (state.buildType !== null) {
+          cancelBuildPlacement();
+          state.message = 'Đã hủy đặt công trình.';
+          render();
+        } else if (state.selectedUnit > 0 || state.selectedUnits?.size > 0) {
+          state.selectedUnit = 0;
+          state.selectedUnits.clear();
+          state.activeGroupId = 0;
+          state.activePath = [];
+          render();
+        } else {
+          openPauseMenu();
+        }
       }
       return;
     }

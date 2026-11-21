@@ -773,24 +773,310 @@ export function drawOriginalHud(ctx, data, state, imageCache) {
 
   // Bottom HUD bar (panel 1 + panel 17 softkey buttons from mapTableOffsets[195])
   const bottomTop = LOGICAL_HEIGHT - data.bottomUi;
+  const activeMenu = state.canvasMenu;
+  if (activeMenu && !state.storyDialog && !state.missionResult && !state.showMinimap) {
+    drawAuthenticBottomMenu(ctx, data, state, imageCache);
+  } else {
+    ctx.fillStyle = '#c5b85a';
+    ctx.fillRect(0, bottomTop, LOGICAL_WIDTH, data.bottomUi);
+    drawComposite(ctx, data, 525, 0, bottomTop, imageCache);
+    drawComposite(ctx, data, 541, 172, bottomTop + 12, imageCache);
+    drawComposite(ctx, data, 542, 97, bottomTop + 8, imageCache);
+    drawComposite(ctx, data, 545, 126, bottomTop + 8, imageCache);
+    // Highlight assigned combat groups 7 and 9 on bottom HUD bar
+    if (state.groups?.[7]?.size > 0) {
+      ctx.fillStyle = state.activeGroupId === 7 ? '#fff36b' : '#7ae665';
+      ctx.fillRect(99, LOGICAL_HEIGHT - 3, 14, 2);
+    }
+    if (state.groups?.[9]?.size > 0) {
+      ctx.fillStyle = state.activeGroupId === 9 ? '#fff36b' : '#7ae665';
+      ctx.fillRect(128, LOGICAL_HEIGHT - 3, 14, 2);
+    }
+    // Authentic Panel 17 softkey icons: Left green = 530 (Action/Build/Tribe menu) or 529 (Confirm ✓ when placing building),
+    // Right red = 535 (Pause Menu) or 534 (Cancel/Back ✕ when unit selected or placing building)
+    const leftSoftkey = state.buildType !== null ? 529 : 530;
+    const rightSoftkey = state.buildType !== null || state.selectedUnit > 0 || state.selectedUnits?.size > 0 ? 534 : 535;
+    drawComposite(ctx, data, leftSoftkey, 0, LOGICAL_HEIGHT - 18, imageCache);
+    drawComposite(ctx, data, rightSoftkey, 220, LOGICAL_HEIGHT - 18, imageCache);
+    drawComposite(ctx, data, 528, 0, bottomTop, imageCache);
+  }
+}
+
+/**
+ * Authentic J2ME On-Canvas Interactive Menus (exact port of f.java Panels 2, 5, 6, 8 & Pause Q=10/11):
+ * - Panel 5 ('actions'): Green button Tribe Command Bar (Build, Rally, Attack, Villagers list, Auto-AI)
+ * - Panel 6 ('build'):   Authentic 86px-tall Build Menu with 680+bType building icon, description, cost card (Panel 8)
+ * - Panel 2 ('building'): Building Action Bar (Weapons, Spells, Workers, Upgrade, Repair, Demolish)
+ * - Panel 5b ('villagers'): Scrollable Villager Picker showing portrait/avatar + live Panel 4 stats
+ * - Panel 10 ('pause'):  Authentic In-Game Pause Menu (Tiếp tục, Lưu, Tải, Bản đồ nhỏ, Nhạc, Ngôn ngữ, Màn chơi, Thoát)
+ */
+function drawAuthenticBottomMenu(ctx, data, state, imageCache) {
+  const menu = state.canvasMenu;
+  if (!menu) return;
+  const animTick = state.animTick || 0;
+
+  if (menu.kind === 'pause' || menu.kind === 'scenarios') {
+    ctx.save();
+    ctx.fillStyle = 'rgba(12, 10, 6, 0.58)';
+    ctx.fillRect(0, 22, LOGICAL_WIDTH, LOGICAL_HEIGHT - 22);
+    const items = menu.items || [];
+    const visibleCount = Math.min(8, items.length);
+    const scroll = menu.scroll || 0;
+    const rowH = 22;
+    const bh = 34 + visibleCount * rowH + 14;
+    const bw = 204;
+    const bx = Math.floor((LOGICAL_WIDTH - bw) / 2);
+    const by = Math.max(30, Math.floor((LOGICAL_HEIGHT - 22 - bh) / 2) + 8);
+
+    // Parchment / wooden frame matching Panel 10
+    ctx.fillStyle = '#473010';
+    ctx.fillRect(bx - 2, by - 2, bw + 4, bh + 4);
+    ctx.fillStyle = '#e5d58e';
+    ctx.fillRect(bx, by, bw, bh);
+    ctx.strokeStyle = '#8b6629';
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(bx + 2.5, by + 2.5, bw - 5, bh - 5);
+
+    ctx.fillStyle = '#5a2d0c';
+    ctx.font = 'bold 10px monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillText(menu.title || 'MENU TẠM DỪNG', LOGICAL_WIDTH / 2, by + 8);
+
+    for (let i = 0; i < visibleCount; i++) {
+      const idx = scroll + i;
+      const item = items[idx];
+      if (!item) continue;
+      const ry = by + 26 + i * rowH;
+      const isSel = idx === menu.selected;
+      if (isSel) {
+        ctx.fillStyle = '#b9993c';
+        ctx.fillRect(bx + 10, ry, bw - 20, rowH - 3);
+        ctx.strokeStyle = '#5a3a0e';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(bx + 10.5, ry + 0.5, bw - 21, rowH - 4);
+        drawAnimation(ctx, data, 2, bx + 12, ry + 6, Math.floor(animTick / 2), imageCache);
+        drawAnimation(ctx, data, 1, bx + bw - 20, ry + 6, Math.floor(animTick / 2), imageCache);
+      } else {
+        ctx.fillStyle = 'rgba(139, 102, 41, 0.16)';
+        ctx.fillRect(bx + 10, ry, bw - 20, rowH - 3);
+      }
+      ctx.fillStyle = isSel ? '#fff9cc' : '#2f1e08';
+      ctx.font = isSel ? 'bold 9px monospace' : '9px monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(item.label, LOGICAL_WIDTH / 2, ry + (rowH - 3) / 2);
+    }
+
+    if (items.length > visibleCount) {
+      ctx.fillStyle = '#6c4916';
+      ctx.font = 'bold 7px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(`▲ ▼ CUỘN (${menu.selected + 1}/${items.length})`, LOGICAL_WIDTH / 2, by + bh - 10);
+    }
+
+    // Bottom softkey bar: Left green ✓ (529), Right red ✕ (534)
+    const bottomTop = LOGICAL_HEIGHT - 22;
+    ctx.fillStyle = '#c5b85a';
+    ctx.fillRect(0, bottomTop, LOGICAL_WIDTH, 22);
+    drawComposite(ctx, data, 525, 0, bottomTop, imageCache);
+    drawComposite(ctx, data, 529, 0, LOGICAL_HEIGHT - 18, imageCache);
+    drawComposite(ctx, data, 534, 220, LOGICAL_HEIGHT - 18, imageCache);
+    drawComposite(ctx, data, 528, 0, bottomTop, imageCache);
+    ctx.restore();
+    return;
+  }
+
+  if (menu.kind === 'build') {
+    // Authentic Panel 6 (y = 234..320, height = 86px) + Cost Box (Panel 8) above right
+    const panelY = 234;
+    const panelH = 86;
+    const items = menu.items || [];
+    const item = items[menu.selected] || items[0];
+
+    // Panel 8 Cost Box on top-right above Panel 6 (wood/stone/bones)
+    if (item && item.spec) {
+      const sp = item.spec;
+      const costW = 68;
+      const costH = 44;
+      const costX = LOGICAL_WIDTH - costW - 4;
+      const costY = panelY - costH - 2;
+      ctx.save();
+      ctx.fillStyle = '#473010';
+      ctx.fillRect(costX - 1, costY - 1, costW + 2, costH + 2);
+      ctx.fillStyle = '#d6c678';
+      ctx.fillRect(costX, costY, costW, costH);
+      ctx.strokeStyle = '#7c5d22';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(costX + 1.5, costY + 1.5, costW - 3, costH - 3);
+      let cy = costY + 5;
+      if (sp.woodCost > 0) {
+        drawComposite(ctx, data, 627, costX + 5, cy - 2, imageCache);
+        drawOutlinedNumber(ctx, String(sp.woodCost), costX + 26, cy, state.wood >= sp.woodCost ? '#ffffff' : '#ff6b6b');
+        cy += 12;
+      }
+      if (sp.stoneCost > 0) {
+        drawComposite(ctx, data, 628, costX + 5, cy - 2, imageCache);
+        drawOutlinedNumber(ctx, String(sp.stoneCost), costX + 26, cy, state.stone >= sp.stoneCost ? '#ffffff' : '#ff6b6b');
+        cy += 12;
+      }
+      if (sp.toolsCost > 0) {
+        drawComposite(ctx, data, 629, costX + 5, cy - 2, imageCache);
+        drawOutlinedNumber(ctx, String(sp.toolsCost), costX + 26, cy, state.tools >= sp.toolsCost ? '#ffffff' : '#ff6b6b');
+      }
+      ctx.restore();
+    }
+
+    ctx.save();
+    ctx.fillStyle = '#c5b85a';
+    ctx.fillRect(0, panelY, LOGICAL_WIDTH, panelH);
+    drawComposite(ctx, data, 526, 0, panelY, imageCache);
+    drawComposite(ctx, data, 528, 0, panelY, imageCache);
+
+    // Building portrait frame (composite 617) + building icon (680 + bType)
+    drawComposite(ctx, data, 617, 8, panelY + 13, imageCache);
+    if (item && item.bType !== undefined) {
+      drawComposite(ctx, data, 680 + item.bType, 9, panelY + 14, imageCache);
+    }
+
+    // Left / Right selector arrows below building icon (matching Panel 6 idx 1093 & 1095)
+    if (menu.selected > 0) {
+      drawAnimation(ctx, data, 1, 14, panelY + 60, Math.floor(animTick / 2), imageCache);
+    }
+    if (menu.selected < items.length - 1) {
+      drawAnimation(ctx, data, 2, 40, panelY + 60, Math.floor(animTick / 2), imageCache);
+    }
+
+    // Title & wrapped description in parchment box (x=64..228, y=panelY+22..panelY+76)
+    ctx.fillStyle = '#e5d68c';
+    ctx.fillRect(64, panelY + 22, 158, 54);
+    ctx.strokeStyle = '#7c5d22';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(64.5, panelY + 22.5, 157, 53);
+
+    if (item) {
+      ctx.fillStyle = '#fff582';
+      ctx.strokeStyle = '#2d1c06';
+      ctx.lineWidth = 2;
+      ctx.font = 'bold 9px monospace';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      const titleTxt = `${item.label} (${menu.selected + 1}/${items.length})`;
+      ctx.strokeText(titleTxt, 66, panelY + 6);
+      ctx.fillText(titleTxt, 66, panelY + 6);
+
+      ctx.fillStyle = '#281805';
+      ctx.font = '8px monospace';
+      const words = (item.desc || '').split(' ');
+      let line = '';
+      let ly = panelY + 26;
+      for (const w of words) {
+        const test = line ? `${line} ${w}` : w;
+        if (ctx.measureText(test).width > 148 && line) {
+          if (ly <= panelY + 66) ctx.fillText(line, 68, ly);
+          ly += 10;
+          line = w;
+        } else {
+          line = test;
+        }
+      }
+      if (line && ly <= panelY + 66) ctx.fillText(line, 68, ly);
+    }
+
+    // Bottom softkeys: Left green ✓ (529 = place building), Right red ✕ (534 = back)
+    drawComposite(ctx, data, 529, 0, LOGICAL_HEIGHT - 18, imageCache);
+    drawComposite(ctx, data, 534, 220, LOGICAL_HEIGHT - 18, imageCache);
+    ctx.restore();
+    return;
+  }
+
+  // Authentic Panel 2 / Panel 5 Icon Bar (y = 272..320, height = 48px)
+  const panelY = 272;
+  const panelH = 48;
+  const items = menu.items || [];
+  const visible = Math.min(5, items.length);
+  const scroll = menu.scroll || 0;
+  const slotStep = 34; // authentic f.aV = 34
+  const totalW = visible * slotStep;
+  const startX = Math.floor((LOGICAL_WIDTH - totalW + 9) / 2);
+  const selItem = items[menu.selected];
+
+  // If selected item has a resource cost (weapon / spell / upgrade), show small cost tooltip above bar
+  if (selItem && selItem.costText) {
+    ctx.save();
+    ctx.font = 'bold 8px monospace';
+    const tw = Math.min(220, ctx.measureText(selItem.costText).width + 14);
+    const tx = Math.floor((LOGICAL_WIDTH - tw) / 2);
+    const ty = panelY - 16;
+    ctx.fillStyle = 'rgba(34, 23, 8, 0.88)';
+    ctx.fillRect(tx, ty, tw, 14);
+    ctx.strokeStyle = '#c5a448';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(tx + 0.5, ty + 0.5, tw - 1, 13);
+    ctx.fillStyle = selItem.canAfford === false ? '#ff8070' : '#fff48c';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(selItem.costText, LOGICAL_WIDTH / 2, ty + 7);
+    ctx.restore();
+  }
+
+  ctx.save();
   ctx.fillStyle = '#c5b85a';
-  ctx.fillRect(0, bottomTop, LOGICAL_WIDTH, data.bottomUi);
-  drawComposite(ctx, data, 525, 0, bottomTop, imageCache);
-  drawComposite(ctx, data, 541, 172, bottomTop + 12, imageCache);
-  drawComposite(ctx, data, 542, 97, bottomTop + 8, imageCache);
-  drawComposite(ctx, data, 545, 126, bottomTop + 8, imageCache);
-  // Highlight assigned combat groups 7 and 9 on bottom HUD bar
-  if (state.groups?.[7]?.size > 0) {
-    ctx.fillStyle = state.activeGroupId === 7 ? '#fff36b' : '#7ae665';
-    ctx.fillRect(99, LOGICAL_HEIGHT - 3, 14, 2);
+  ctx.fillRect(0, panelY, LOGICAL_WIDTH, panelH);
+  drawComposite(ctx, data, 525, 0, panelY, imageCache);
+  drawComposite(ctx, data, 527, 0, panelY, imageCache);
+  drawComposite(ctx, data, 528, 0, panelY, imageCache);
+
+  // Selected item label centered at top of Panel 2/5 (y = panelY + 7)
+  if (selItem) {
+    ctx.font = 'bold 9px monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.strokeStyle = '#2d1c06';
+    ctx.lineWidth = 2;
+    ctx.strokeText(selItem.label, LOGICAL_WIDTH / 2, panelY + 6);
+    ctx.fillStyle = '#fff582';
+    ctx.fillText(selItem.label, LOGICAL_WIDTH / 2, panelY + 6);
   }
-  if (state.groups?.[9]?.size > 0) {
-    ctx.fillStyle = state.activeGroupId === 9 ? '#fff36b' : '#7ae665';
-    ctx.fillRect(128, LOGICAL_HEIGHT - 3, 14, 2);
+
+  // Draw up to 5 icon slots using authentic 548 (selected) / 549 (unselected)
+  for (let i = 0; i < visible; i++) {
+    const idx = scroll + i;
+    const item = items[idx];
+    if (!item) continue;
+    const sx = startX + i * slotStep;
+    const sy = panelY + 21;
+    const isSel = idx === menu.selected;
+    drawComposite(ctx, data, isSel ? 548 : 549, sx, sy, imageCache);
+
+    if (item.iconAnim !== undefined) {
+      drawAnimation(ctx, data, item.iconAnim, sx, sy, isSel ? Math.floor(animTick / 2) : 0, imageCache);
+    } else if (item.weaponId !== undefined) {
+      drawComposite(ctx, data, 659 + item.weaponId, sx, sy, imageCache);
+    } else if (item.unitId !== undefined) {
+      const av = (data.entityData[2727 + item.unitId] & 0xff) % 10;
+      drawComposite(ctx, data, 720 + av, sx + 1, sy - 2, imageCache);
+    } else if (item.glyph) {
+      ctx.fillStyle = isSel ? '#fff582' : '#2e1d08';
+      ctx.font = 'bold 11px monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(item.glyph, sx + 12, sy + 12);
+    }
   }
-  drawComposite(ctx, data, state.paused ? 529 : 530, 0, LOGICAL_HEIGHT - 18, imageCache);
-  drawComposite(ctx, data, 535, 220, LOGICAL_HEIGHT - 18, imageCache);
-  drawComposite(ctx, data, 528, 0, bottomTop, imageCache);
+
+  // Scroll arrows when more than 5 items
+  if (scroll > 0) {
+    drawAnimation(ctx, data, 1, startX - 11, panelY + 28, Math.floor(animTick / 2), imageCache);
+  }
+  if (scroll + visible < items.length) {
+    drawAnimation(ctx, data, 2, startX + totalW + 2, panelY + 28, Math.floor(animTick / 2), imageCache);
+  }
+
+  // Bottom softkeys: Left green ✓ (529 = execute), Right red ✕ (534 = back/close)
+  drawComposite(ctx, data, 529, 0, LOGICAL_HEIGHT - 18, imageCache);
+  drawComposite(ctx, data, 534, 220, LOGICAL_HEIGHT - 18, imageCache);
+  ctx.restore();
 }
 
 export function renderOriginalMap(ctx, data, state, imageCache) {
@@ -1225,7 +1511,7 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
 
     ctx.fillStyle = '#473010';
     ctx.font = 'bold 8px monospace';
-    ctx.fillText(isWin ? 'CHỌN SANG MÀN TIẾP THEO BÊN PHẢI' : 'CHỌN CHƠI LẠI Ở BẢNG BÊN PHẢI', LOGICAL_WIDTH / 2, by + 154);
+    ctx.fillText(isWin ? 'CLICK MÀN HÌNH / ENTER: SANG MÀN TIẾP' : 'CLICK MÀN HÌNH / ENTER: CHƠI LẠI', LOGICAL_WIDTH / 2, by + 154);
     ctx.restore();
   } else if (state.showMinimap) {
     drawMinimapOverlay(ctx, data, state);
