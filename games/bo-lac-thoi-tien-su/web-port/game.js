@@ -1880,7 +1880,7 @@ function depleteGatherTarget(gt, amount) {
   if (!d || !gt) return false;
   if (gt.type === 'wood') {
     const key = `${gt.x},${gt.y}`;
-    const cur = state.treeWood.has(key) ? state.treeWood.get(key) : 12;
+    const cur = state.treeWood.has(key) ? state.treeWood.get(key) : 20;
     const next = cur - amount;
     if (next <= 0) {
       state.treeWood.delete(key);
@@ -3445,8 +3445,10 @@ function getUnitStepTicks(unitId, dx, dy) {
 }
 
 function getUnitCarryCap(unitId) {
-  const cap = state.data.entityData[3737 + unitId] & 0xff;
-  return cap > 0 ? cap : 2;
+  const raw = state.data.entityData[3737 + unitId] & 0xff;
+  const cap = raw >= 10 ? raw : 10;
+  state.data.entityData[3737 + unitId] = cap;
+  return cap;
 }
 
 function stepUnitMovement(unitId, task, isEnemy = false) {
@@ -3838,8 +3840,18 @@ function stepSimulation() {
       continue;
     } else if (task.kind === 'gather') {
       const gt = task.target;
-      const cap = getUnitCarryCap(unitId); // authentic e[3737+uid]: 2..3 units per trip
-      const harvestTicks = cap * 20; // ~2.4s per unit (4.8s-7.2s working at resource, no dust cloud!)
+      const maxCap = getUnitCarryCap(unitId); // up to 10 resources per trip
+      let available = maxCap;
+      if (gt.type === 'wood') {
+        const key = `${gt.x},${gt.y}`;
+        available = state.treeWood.has(key) ? state.treeWood.get(key) : 20;
+      } else if (gt.propIdx !== undefined) {
+        const pKind = e[9833 + gt.propIdx] & 0xff;
+        if (pKind !== 5) available = Math.max(1, e[9883 + gt.propIdx] & 0xff);
+      }
+      const cap = Math.max(1, Math.min(maxCap, available));
+      const ticksPerUnit = 8; // ~0.96s per unit (~9.6s for full load of 10)
+      const harvestTicks = cap * ticksPerUnit;
       e[606 + unitId] = directionFromDelta(gt.x - ux, gt.y - uy);
 
       if (task.workTicks < harvestTicks) {
@@ -3848,6 +3860,12 @@ function stepSimulation() {
           setUnitAnim(unitId, 142, Math.floor(task.workTicks / 2) % 10);
         } else {
           setUnitAnim(unitId, 21, Math.floor(task.workTicks / 2) % 2);
+        }
+        // Show live gathering progress (1..10) in Panel 4 cargo counter as each unit is collected
+        const collectedSoFar = Math.min(cap, Math.floor((task.workTicks + 1) / ticksPerUnit));
+        if (collectedSoFar > 0 && (e[3636 + unitId] & 0xff) !== collectedSoFar) {
+          setUnitCarry(unitId, gt.carrySprite || 2, collectedSoFar);
+          uiChanged = true;
         }
         task.workTicks++;
         continue;
@@ -4454,20 +4472,24 @@ function stepSimulation() {
         uiChanged = true;
       }
     } else if (task.kind === 'buildFetch') {
-      // Builder arrived at Storage: physically deduct & pick up required materials, then carry them to the construction site!
+      // Builder arrived at Storage: physically deduct & pick up up to 10 materials per trip, then carry them to the construction site!
       const owner = task.owner ?? (unitId > 50 ? 1 : 0);
       const r = d.resources?.[owner];
       const need = state.siteMaterials.get(task.buildBld.bid);
       let carrySprite = 2;
-      let pickedAny = false;
+      let totalTaken = 0;
       if (need) {
         const curWood = owner === (state.localTribe ?? 0) ? state.wood : (r?.[1] || 0);
         const curStone = owner === (state.localTribe ?? 0) ? state.stone : (r?.[2] || 0);
         const curTools = owner === (state.localTribe ?? 0) ? state.tools : (r?.[3] || 0);
-        const takeW = Math.min(need.wood, curWood);
-        const takeS = Math.min(need.stone, curStone);
-        const takeT = Math.min(need.tools, curTools);
-        if (takeW > 0 || takeS > 0 || takeT > 0) {
+        let remCarry = getUnitCarryCap(unitId); // max 10 materials per trip
+        const takeW = Math.min(need.wood, curWood, remCarry);
+        remCarry -= takeW;
+        const takeS = Math.min(need.stone, curStone, remCarry);
+        remCarry -= takeS;
+        const takeT = Math.min(need.tools, curTools, remCarry);
+        totalTaken = takeW + takeS + takeT;
+        if (totalTaken > 0) {
           if (owner === (state.localTribe ?? 0)) {
             state.wood -= takeW;
             state.stone -= takeS;
@@ -4485,7 +4507,6 @@ function stepSimulation() {
           need.deliveredStone = (need.deliveredStone || 0) + takeS;
           need.deliveredTools = (need.deliveredTools || 0) + takeT;
           carrySprite = takeW > 0 ? 2 : takeS > 0 ? 3 : 4;
-          pickedAny = true;
         }
         if (need.wood <= 0 && need.stone <= 0 && need.tools <= 0) {
           state.siteMaterials.delete(task.buildBld.bid);
@@ -4494,7 +4515,7 @@ function stepSimulation() {
       state.tasks.delete(unitId);
       const planned = planUnitPath(unitId, task.buildBld.x, task.buildBld.y, false, task.buildBld);
       if (planned !== null) {
-        if (pickedAny) setUnitCarry(unitId, carrySprite, 1);
+        if (totalTaken > 0) setUnitCarry(unitId, carrySprite, totalTaken);
         else setUnitCarry(unitId, 0, 0);
         state.tasks.set(unitId, {
           kind: 'build',
@@ -4505,7 +4526,7 @@ function stepSimulation() {
           workTicks: 0,
           hatJob: 38,
           hatPutFrame: 14,
-          carryWoodAfterHat: pickedAny,
+          carryWoodAfterHat: totalTaken > 0,
         });
         if (state.selectedUnit === unitId) state.activePath = planned.path;
       }

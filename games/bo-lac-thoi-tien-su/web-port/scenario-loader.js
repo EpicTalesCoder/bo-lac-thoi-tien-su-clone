@@ -880,7 +880,7 @@ function spawnUnit(data, owner, x, y, indexSeed) {
   e[303 + uid] = 0;
   e[606 + uid] = indexSeed % 8;
   e[1010 + uid] = 8; // authentic base movement speed (mo[15][8] = 8 ticks/tile cardinal, 11 diagonal)
-  e[3737 + uid] = uid <= 5 ? 3 : 2; // authentic carry capacity per trip
+  e[3737 + uid] = 10; // carry capacity per trip: up to 10 resources
   e[1414 + uid] = 18 + ((indexSeed * 5) % 20);
   e[1515 + uid] = uid === 1 ? 0 : indexSeed % 2;
   e[1919 + uid] = maxHp;
