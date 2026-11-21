@@ -708,7 +708,7 @@ export function drawOriginalVillagerHud(ctx, data, state, imageCache) {
   const moodFrame = Math.max(0, Math.min(4, Math.floor(moodVal / 21)));
   drawComposite(ctx, data, 675 + moodFrame, 70, y0 + 23, imageCache);
 
-  // 5. HP, Energy, and Hunger bars (composites 551, 552, 553 + exact f.java:2092-2097 black mask)
+  // 5. HP, Hunger/Food (comp 552 = meat bone), and Sleep/Energy (comp 553 = sleeping moon/eye) bars (exact f.java:2092-2101)
   const maxHp = Math.max(1, e[6767 + uid] & 0xff);
   const energy = Math.min(99, e[2020 + uid] & 0xff);
   const satiety = Math.min(99, e[2121 + uid] & 0xff);
@@ -721,18 +721,20 @@ export function drawOriginalVillagerHud(ctx, data, state, imageCache) {
   }
   drawPanel4Text(ctx, String(maxHp), 119, y0 + 10, 'center', 7, '#fff55a');
 
+  // Middle bar (comp 552 at y0+21): Food / Satiety bar (e[2121 + uid], restored by eating in Bếp!)
   drawComposite(ctx, data, 552, 92, y0 + 21, imageCache);
-  const enW = Math.max(0, Math.min(16, Math.round((16 * energy) / 99)));
-  if (enW < 16) {
-    ctx.fillStyle = '#000000';
-    ctx.fillRect(100 + enW + 1, y0 + 24, 16 - enW, 4);
-  }
-
-  drawComposite(ctx, data, 553, 92, y0 + 31, imageCache);
   const satW = Math.max(0, Math.min(16, Math.round((16 * satiety) / 99)));
   if (satW < 16) {
     ctx.fillStyle = '#000000';
-    ctx.fillRect(100 + satW + 1, y0 + 34, 16 - satW, 4);
+    ctx.fillRect(100 + satW + 1, y0 + 24, 16 - satW, 4);
+  }
+
+  // Bottom bar (comp 553 at y0+31): Sleep / Energy bar (e[2020 + uid], restored by sleeping in Lều!)
+  drawComposite(ctx, data, 553, 92, y0 + 31, imageCache);
+  const enW = Math.max(0, Math.min(16, Math.round((16 * energy) / 99)));
+  if (enW < 16) {
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(100 + enW + 1, y0 + 34, 16 - enW, 4);
   }
 
   // 6. Equipped weapon (slot 555 + weapon 659+wpn at (123, y0-1))
