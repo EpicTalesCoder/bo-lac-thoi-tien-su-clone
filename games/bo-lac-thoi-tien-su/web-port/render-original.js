@@ -1279,47 +1279,66 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
             drawMapObject(ctx, data, occ, 1, ah, ai, camX, camY, originY, animTick, imageCache, uiState);
             const bid = -occ;
             const e = data.entityData;
+            const m = data.mapTableData;
+            const mo = data.mapTableOffsets;
             const hp = e[8505 + bid] & 0xff;
             const maxHp = Math.max(1, e[8566 + bid] & 0xff);
-            if (e[8627 + bid] === 1 || hp * 2 < maxHp || (bid > 30 && hp < maxHp)) {
-              const bType = e[8749 + bid];
-              const bw = data.mapTableData[data.mapTableOffsets[138] + 104 + bType] || 2;
-              const bx = (e[8383 + bid] - camX) * CELL_WIDTH + Math.floor((bw * CELL_WIDTH - 24) / 2);
-              const by = originY + (e[8444 + bid] - camY) * CELL_HEIGHT - 6;
-              ctx.fillStyle = '#1b1409';
-              ctx.fillRect(bx - 1, by - 1, 26, 5);
-              ctx.fillStyle = e[8627 + bid] === 1 ? '#ffd84d' : bid > 30 ? '#ef4444' : '#22d422';
-              ctx.fillRect(bx, by, Math.max(2, Math.floor((24 * hp) / maxHp)), 3);
-            }
-            // Authentic "!" worker-needed indicator above an empty finished Sàn disco (bType 7, no DJ in slot 0)
             const bTypeCur = e[8749 + bid] & 0xff;
+            const bw = m[mo[138] + 104 + bTypeCur] || 2;
+            const bh = m[mo[138] + 130 + bTypeCur] || 2;
             const myTribe = state.localTribe ?? 0;
             const isMine = myTribe === 1 ? bid > 30 : bid <= 30;
-            if (isMine && bTypeCur === 7 && e[8627 + bid] === 0) {
-              let hasDj = false;
-              let u = e[8993 + bid];
-              let g = 0;
-              while (u > 0 && g++ < 16) {
-                if (e[4646 + u] === 0) { hasDj = true; break; }
-                u = e[4545 + u];
+            const isUnderConst = e[8627 + bid] === 1;
+            const cursorOver =
+              state.cursor &&
+              data.occupancy?.[state.cursor.y]?.[state.cursor.x] === occ;
+
+            // Count occupants inside building + assigned builders walking/fetching to it
+            let insideCount = 0;
+            let hasDj = false;
+            let u = e[8993 + bid];
+            let g = 0;
+            while (u > 0 && g++ < 16) {
+              insideCount++;
+              if (e[4646 + u] === 0) hasDj = true;
+              u = e[4545 + u];
+            }
+            const assignedBuilders = state.buildingBuilders?.get?.(bid) ?? insideCount;
+            const slotOff = m[mo[174] + bTypeCur] & 0xff;
+            const slotNxt = m[mo[174] + bTypeCur + 1] & 0xff;
+            const maxSlots = Math.max(1, slotNxt - slotOff);
+
+            // Authentic HP bar + Worker Slot Pip Bar (exact port of f.java:1776-1796)
+            if (isUnderConst || cursorOver || hp * 2 < maxHp || (bid > 30 && hp < maxHp)) {
+              const bx = (e[8383 + bid] - camX) * CELL_WIDTH + Math.floor((bw * CELL_WIDTH - 24) / 2);
+              const by = originY + (e[8444 + bid] - camY) * CELL_HEIGHT - 8;
+              ctx.fillStyle = '#1b1409';
+              ctx.fillRect(bx - 1, by - 1, 26, 5);
+              ctx.fillStyle = isUnderConst ? '#ffd84d' : bid > 30 ? '#ef4444' : '#22d422';
+              ctx.fillRect(bx, by, Math.max(2, Math.floor((24 * hp) / maxHp)), 3);
+
+              // Worker count pip bar right below HP bar (gold #f6a800 = active worker, brown #40331d = empty slot)
+              if (isMine && (isUnderConst || (cursorOver && bTypeCur !== 6 && maxSlots > 0))) {
+                const activeCount = isUnderConst ? Math.min(maxSlots, assignedBuilders) : Math.min(maxSlots, insideCount);
+                const barW = maxSlots * 4 - 1;
+                const pipX = (e[8383 + bid] - camX) * CELL_WIDTH + Math.floor((bw * CELL_WIDTH - barW) / 2);
+                const pipY = by + 6;
+                ctx.fillStyle = '#000000';
+                ctx.fillRect(pipX, pipY - 1, barW, 4);
+                ctx.fillRect(pipX - 1, pipY, barW + 2, 2);
+                for (let s = 0; s < maxSlots; s++) {
+                  ctx.fillStyle = s < activeCount ? '#f6a800' : '#40331d';
+                  ctx.fillRect(pipX + s * 4, pipY, 3, 2);
+                }
               }
-              if (!hasDj) {
-                const bw = data.mapTableData[data.mapTableOffsets[138] + 104 + bTypeCur] || 5;
-                const ax = (e[8383 + bid] - camX) * CELL_WIDTH + Math.floor((bw * CELL_WIDTH) / 2);
-                const bounce = Math.round(Math.sin(animTick * 0.45) * 2);
-                const ay = originY + (e[8444 + bid] - camY) * CELL_HEIGHT - 8 + bounce;
-                ctx.save();
-                ctx.fillStyle = '#3d1c05';
-                ctx.fillRect(ax - 6, ay - 9, 12, 13);
-                ctx.fillStyle = '#ffe44d';
-                ctx.fillRect(ax - 5, ay - 8, 10, 11);
-                ctx.fillStyle = '#b3190c';
-                ctx.font = 'bold 10px monospace';
-                ctx.textAlign = 'center';
-                ctx.textBaseline = 'middle';
-                ctx.fillText('!', ax, ay - 2);
-                ctx.restore();
-              }
+            }
+
+            // Authentic original "!" alert animation d(40) centered on building (exact f.java:1773-1774):
+            // Shown when a construction site has 0 builders assigned, OR when Sàn disco has no DJ in slot 0!
+            if (isMine && ((isUnderConst && assignedBuilders === 0) || (bTypeCur === 7 && !isUnderConst && !hasDj))) {
+              const cx = (e[8383 + bid] - camX) * CELL_WIDTH + bw * 11 - 11;
+              const cy = originY + (e[8444 + bid] - camY) * CELL_HEIGHT + bh * 8 - 8;
+              drawAnimation(ctx, data, 40, cx, cy, animTick, imageCache);
             }
           }
         } else if (fog < 1 && isWildAnimal(occ)) {

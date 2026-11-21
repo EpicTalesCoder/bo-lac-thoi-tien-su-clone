@@ -17,6 +17,7 @@ import {
   SPELLS,
   getVillagerName,
   getBuildingSpec,
+  getScaffoldSlots,
   canPlaceBuilding,
   placeConstructionSite,
   enterBuildingSlot,
@@ -1355,10 +1356,46 @@ function isWearingJobHat(unitId) {
   return job === 38 || job === 54 || job === 57 || job === 86;
 }
 
+function getMaxBuildersForSite(bid) {
+  const d = state.data;
+  if (!d) return 1;
+  const scafType = d.entityData[8749 + bid] & 0xff;
+  return Math.max(1, getScaffoldSlots(d, scafType).length);
+}
+
+function getAssignedBuilderCount(bid, excludeUnitId = 0) {
+  const d = state.data;
+  if (!d) return 0;
+  const e = d.entityData;
+  const seen = new Set();
+  let cur = e[8993 + bid];
+  let guard = 0;
+  while (cur > 0 && guard++ < 16) {
+    if (cur !== excludeUnitId) seen.add(cur);
+    cur = e[4545 + cur];
+  }
+  for (const [uid, t] of state.tasks.entries()) {
+    if (uid === excludeUnitId) continue;
+    if ((t.kind === 'build' && t.target?.bid === bid) || (t.kind === 'buildFetch' && t.buildBld?.bid === bid)) {
+      seen.add(uid);
+    }
+  }
+  return seen.size;
+}
+
 function assignBuildTask(unitId, bld, carryWood = false) {
-  ensureUnitOutside(unitId);
   const e = state.data.entityData;
   const owner = unitId > 50 ? 1 : 0;
+  // Enforce authentic original builder capacity per building (e.g. Lều=1, Kho=2, Bếp=3, Phòng tập=4)
+  const maxBuilders = getMaxBuildersForSite(bld.bid);
+  const curBuilders = getAssignedBuilderCount(bld.bid, unitId);
+  if (curBuilders >= maxBuilders) {
+    if (owner === (state.localTribe ?? 0)) {
+      state.message = `⚠️ ${bld.spec.name} chỉ cho phép tối đa ${maxBuilders} người xây cùng lúc!`;
+    }
+    return false;
+  }
+  ensureUnitOutside(unitId);
   // If this construction site still needs materials delivered from Storage, send builder to Storage FIRST!
   const need = state.siteMaterials.get(bld.bid);
   if (need && (need.wood > 0 || need.stone > 0 || need.tools > 0)) {
@@ -3323,11 +3360,14 @@ function stepSimulation() {
       // Loop back to gather again automatically (or find next nearby tree/resource if depleted)!
       // Ignore Host's fog when searching for Tribe 1 (Red, unitId > 50) resources so Red never cancels gathering!
       const isRedUnit = unitId > 50;
+      const searchX = task.returnToGather?.x ?? ux;
+      const searchY = task.returnToGather?.y ?? uy;
       const nextTarget =
         task.returnToGather && classifyGatherable(task.returnToGather.x, task.returnToGather.y)
           ? task.returnToGather
           : task.carrying?.type
-            ? findNearestGatherable(ux, uy, 12, task.carrying.type, isRedUnit)
+            ? findNearestGatherable(searchX, searchY, 18, task.carrying.type, isRedUnit) ||
+              findNearestGatherable(ux, uy, 22, task.carrying.type, isRedUnit)
             : null;
       if (nextTarget && assignGatherTask(unitId, nextTarget)) {
         uiChanged = true;
@@ -3380,24 +3420,53 @@ function stepSimulation() {
         e[9115 + bid] = ratio >= 0.78 ? 3 : ratio >= 0.48 ? 2 : ratio >= 0.22 ? 1 : 0;
 
         if (nextHp >= maxHp) {
+          const bldOwner = bid > 30 ? 1 : 0;
           const { spec, workers } = finishConstructionSite(d, bid);
-          state.missionStats.buildingsBuilt++;
+          state.siteMaterials.delete(bid);
+          if (bldOwner === (state.localTribe ?? 0)) {
+            state.missionStats.buildingsBuilt++;
+            if (spec.housingBonus > 0) {
+              state.housingCap = Math.min(50, state.housingCap + spec.housingBonus);
+              syncResourcesToData(bldOwner);
+            }
+            addPopup(bld.x + Math.floor(bld.w / 2), bld.y, `${spec.name} hoàn thành!`, '#9cff7b');
+            state.message = `Nhà đã xây xong: ${spec.name}!${spec.housingBonus ? ` (+${spec.housingBonus} chỗ ở)` : ''}`;
+          }
           // Dust cloud d(74) plays ONLY when the building finishes construction (f.java:1517)!
           addDust(bld.x, bld.y, bld.w, bld.h);
-          if (spec.housingBonus > 0) {
-            state.housingCap = Math.min(50, state.housingCap + spec.housingBonus);
-            syncResourcesToData();
+
+          // Collect all builders who were working on OR heading to this completed site
+          const allFinishedBuilders = new Set([unitId, ...workers]);
+          for (const [uid, t] of state.tasks.entries()) {
+            if ((t.kind === 'build' && t.target?.bid === bid) || (t.kind === 'buildFetch' && t.buildBld?.bid === bid)) {
+              allFinishedBuilders.add(uid);
+            }
           }
-          addPopup(bld.x + Math.floor(bld.w / 2), bld.y, `${spec.name} hoàn thành!`, '#9cff7b');
-          state.message = `Nhà đã xây xong: ${spec.name}!${spec.housingBonus ? ` (+${spec.housingBonus} chỗ ở)` : ''}`;
-          for (const wid of workers) {
+          for (const wid of allFinishedBuilders) {
+            state.tasks.delete(wid);
             setUnitCarry(wid, 0, 0);
-            state.tasks.set(wid, { kind: 'removeHat', path: [], stepProgress: 0, hatRemoveFrame: 0, workTicks: 0 });
-            if (state.selectedUnit === wid) state.activePath = [];
           }
-          setUnitCarry(unitId, 0, 0);
-          state.tasks.set(unitId, { kind: 'removeHat', path: [], stepProgress: 0, hatRemoveFrame: 0, workTicks: 0 });
-          if (state.selectedUnit === unitId) state.activePath = [];
+
+          // Auto-chain builders to the nearest remaining unfinished construction site with free slots!
+          const remainingSites = getPlayerBuildings(bldOwner).filter((b) => b.underConstruction && b.bid !== bid);
+          for (const wid of allFinishedBuilders) {
+            const wx = e[wid] & 0xff;
+            const wy = e[101 + wid] & 0xff;
+            remainingSites.sort((a, b) => Math.hypot(a.x - wx, a.y - wy) - Math.hypot(b.x - wx, b.y - wy));
+            let chained = false;
+            for (const nextSite of remainingSites) {
+              if (getAssignedBuilderCount(nextSite.bid, wid) < getMaxBuildersForSite(nextSite.bid)) {
+                if (assignBuildTask(wid, nextSite)) {
+                  chained = true;
+                  break;
+                }
+              }
+            }
+            if (!chained) {
+              state.tasks.set(wid, { kind: 'removeHat', path: [], stepProgress: 0, hatRemoveFrame: 0, workTicks: 0 });
+              if (state.selectedUnit === wid) state.activePath = [];
+            }
+          }
           uiChanged = true;
         }
       }
@@ -4385,21 +4454,20 @@ function stepVillagerNeeds() {
       else if (mood <= 25) e[3333 + id] = 1;
       else e[3333 + id] = -1;
 
-      // Autonomous self-care:
+      // Autonomous self-care when idle (never abandon an active gather/build/work task!):
       // - Hungry -> seek Bếp (if Bếp exists & food > 0); otherwise just keep showing thought bubble!
       // - Sleepy -> seek Lều (if Lều exists); otherwise just keep showing thought bubble!
       // - Bored  -> seek Sàn disco (if Sàn disco exists); otherwise just keep showing thought bubble!
-      const canInterrupt = !task || (task.kind === 'gather' && (satiety <= 15 || energy <= 15 || mood <= 15));
-      if (canInterrupt && !isUnitInsideBuilding(d, id)) {
+      if (!task && !isUnitInsideBuilding(d, id)) {
         const ux = e[id] & 0xff;
         const uy = e[101 + id] & 0xff;
-        if (satiety <= (task ? 15 : 38) && tribeFood > 0 && finishedKitchens.length > 0) {
+        if (satiety <= 38 && tribeFood > 0 && finishedKitchens.length > 0) {
           const kitchen = pickNearestBld(finishedKitchens, ux, uy);
           if (kitchen && assignEatTask(id, kitchen)) changed = true;
-        } else if (energy <= (task ? 15 : 38) && finishedHuts.length > 0) {
+        } else if (energy <= 38 && finishedHuts.length > 0) {
           const hut = pickNearestBld(finishedHuts, ux, uy);
           if (hut && assignRestTask(id, hut)) changed = true;
-        } else if (mood <= (task ? 15 : 38) && finishedDiscos.length > 0) {
+        } else if (mood <= 38 && finishedDiscos.length > 0) {
           const disco = pickNearestBld(finishedDiscos, ux, uy);
           if (disco && assignWorkAtBuilding(id, disco, [1, 2, 3, 4, 5, 6])) changed = true;
         }
@@ -5316,6 +5384,11 @@ function drawFrameToCtx(targetCtx) {
     }
     if (state.data) {
       state.selectedUnitName = state.selectedUnit ? getVillagerName(state.data, state.selectedUnit) : '';
+      const bMap = new Map();
+      for (const b of getPlayerBuildings(state.localTribe ?? 0)) {
+        if (b.underConstruction) bMap.set(b.bid, getAssignedBuilderCount(b.bid));
+      }
+      state.buildingBuilders = bMap;
       renderOriginalMap(ctx, state.data, state, spriteCache);
     } else {
       ctx.fillStyle = '#18241b';
