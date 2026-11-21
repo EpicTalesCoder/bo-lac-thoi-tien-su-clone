@@ -6062,29 +6062,33 @@ Promise.all([
         ) {
           const winW = window.innerWidth || 1;
           const winH = window.innerHeight || 1;
-          const EDGE_PX = 38;
+          const EDGE_X = 42;
+          const EDGE_Y = 44;
           const px = pointerScreen.x;
           const py = pointerScreen.y;
+          // Dead-zones over clickable UI buttons so hovering green/red softkeys or top-right toolbar NEVER scrolls the map!
+          const onSoftkeyButtons = py > winH - 52 && (px < 88 || px > winW - 88);
+          const onTopToolbar = py < 42 && px > winW - 240;
           let vx = 0;
           let vy = 0;
-          if (px >= 0 && px < EDGE_PX) vx = -1;
-          else if (px > winW - EDGE_PX && px <= winW) vx = 1;
-          // Avoid triggering top edge-scroll when hovering the top-right utility toolbar
-          const onToolbar = px > winW - 260 && py < 46;
-          // Avoid triggering bottom edge-scroll on bottom-left/bottom-right softkey buttons
-          const onSoftkey = py > winH - 46 && (px < 80 || px > winW - 80);
-          if (!onToolbar && py >= 0 && py < EDGE_PX) vy = -1;
-          else if (!onSoftkey && py > winH - EDGE_PX && py <= winH) vy = 1;
+          if (!onSoftkeyButtons && !onTopToolbar) {
+            if (px >= 0 && px < EDGE_X) vx = -1;
+            else if (px > winW - EDGE_X && px <= winW) vx = 1;
+            if (py >= 0 && py < EDGE_Y) vy = -1;
+            else if (py > winH - EDGE_Y && py <= winH) vy = 1;
+          }
 
           if (vx !== 0 || vy !== 0) {
             const d = state.data;
             const maxCamX = Math.max(0, d.width - getViewportCols());
             const maxCamY = Math.max(0, d.height - getViewportRows());
-            const step = ((dt || 16.6) / 1000) * 28; // 28 tiles/sec crisp, fast PC RTS pan
+            const dtSec = (dt || 16.6) / 1000;
+            const stepX = dtSec * 34; // 34 tiles/sec horizontal pan
+            const stepY = dtSec * 44; // 44 tiles/sec fast vertical pan (matches 22x16 tile aspect ratio!)
             const curX = state.smoothCamX ?? state.cameraX ?? 0;
             const curY = state.smoothCamY ?? state.cameraY ?? 0;
-            const nextX = Math.max(0, Math.min(maxCamX, curX + vx * step));
-            const nextY = Math.max(0, Math.min(maxCamY, curY + vy * step));
+            const nextX = Math.max(0, Math.min(maxCamX, curX + vx * stepX));
+            const nextY = Math.max(0, Math.min(maxCamY, curY + vy * stepY));
             if (Math.abs(nextX - curX) > 0.0005 || Math.abs(nextY - curY) > 0.0005) {
               state.cameraX = nextX;
               state.cameraY = nextY;
