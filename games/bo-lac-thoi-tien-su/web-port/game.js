@@ -208,6 +208,7 @@ const state = {
   message: 'Click hoặc kéo khung chọn dân làng, click đất/cây/địch để đi, thu thập hoặc chiến đấu.',
   // Active tasks per villager: { kind: 'move'|'gather'|'return'|'build'|'hunt'|'rest'|'eat'|'workBuilding'|'attackUnit'|'attackBuilding', ... }
   tasks: new Map(),
+  savedJobs: new Map(), // unitId -> previous primary job to resume automatically after eating/sleeping/dancing
   enemyTasks: new Map(),
   weaponQueues: new Map(), // bid -> [q0..q5] weapon forge orders (starts at 0)
   siteMaterials: new Map(), // bid -> { wood, stone, tools, owner } pending material deliveries from Storage
@@ -388,6 +389,7 @@ function applyUnitDamage(attackerId, targetId, dmg) {
     exitBuildingSlot(d, targetId);
     clearUnitFromOccupancy(d, targetId);
     state.tasks.delete(targetId);
+    state.savedJobs.delete(targetId);
     state.enemyTasks.delete(targetId);
     state.selectedUnits.delete(targetId);
     state.groups[7].delete(targetId);
@@ -397,24 +399,27 @@ function applyUnitDamage(attackerId, targetId, dmg) {
       state.activePath = [];
     }
 
+    const deadName = getVillagerName(d, targetId);
     if (targetId > 50) {
       state.tools += 1;
       state.missionStats.enemiesKilled++;
       syncResourcesToData();
-      addPopup(tx, ty, 'Hạ địch! +1 xương', '#9cff7b');
-      state.message = 'Đã hạ gục chiến binh địch (+1 xương)!';
+      addPopup(tx, ty, `${deadName} đã chết!`, '#ff5252');
+      showWarning(`💀 ${deadName} đã chết!`);
+      state.message = `💀 ${deadName} đã chết (+1 xương)!`;
     } else {
-      const deadName = getVillagerName(d, targetId);
       state.population = getVillagerIds().length;
       syncResourcesToData();
-      addPopup(tx, ty, `${deadName} tử trận!`, '#ff5252');
+      addPopup(tx, ty, `${deadName} đã chết!`, '#ff5252');
+      showWarning(`💀 ${deadName} đã chết!`);
+      state.message = `💀 ${deadName} đã chết!`;
       // Elect new Chief if Chief died!
       if (d.resources?.[0]?.[17] === targetId) {
         const survivors = getVillagerIds();
         if (survivors.length > 0) {
           d.resources[0][17] = survivors[0];
           const newChief = getVillagerName(d, survivors[0]);
-          state.message = `${deadName} đã tử trận! ${newChief} trở thành Tộc trưởng mới!`;
+          state.message = `💀 ${deadName} đã chết! ${newChief} trở thành Tộc trưởng mới!`;
         } else {
           state.message = 'Toàn bộ bộ lạc đã tử trận!';
         }
@@ -1402,6 +1407,7 @@ function assignBuildTask(unitId, bld, carryWood = false) {
     }
     return false;
   }
+  state.savedJobs.set(unitId, { kind: 'build', bid: bld.bid });
   ensureUnitOutside(unitId);
   // If this construction site still needs materials delivered from Storage, send builder to Storage FIRST!
   const need = state.siteMaterials.get(bld.bid);
@@ -2002,6 +2008,10 @@ function assignWorkAtBuilding(unitId, bld, preferredSlots = null) {
   }
   // Authentic job hats: 4=Bếp (54 Chef hat), 7=Sàn Disco (86 DJ hat), 8=Khu thánh địa (57 Shaman hat)
   const hatJob = !isGuestOnly && !slot0Taken ? (bt === 4 ? 54 : bt === 7 ? 86 : bt === 8 ? 57 : 69) : 69;
+  const isBreakVisit = (bt === 4 || bt === 7) && (isGuestOnly || slot0Taken);
+  if (!isBreakVisit) {
+    state.savedJobs.set(unitId, { kind: 'workBuilding', bid: bld.bid, preferredSlots });
+  }
   const curHat = state.data.entityData[6464 + unitId] & 0xff;
   const needPutHat = hatJob !== 69 && curHat !== hatJob;
   const needRemoveHat = hatJob === 69 && isWearingJobHat(unitId);
@@ -2153,10 +2163,11 @@ function performDemolishBuilding(bld) {
 
 function findNearestDropoff(x, y, owner = state.localTribe ?? 0) {
   const finished = getPlayerBuildings(owner).filter((b) => !b.underConstruction);
-  // In the original game (b.java:819 & /0/d0[20]), gathered resources (wood, stone, meat, fish, berries, bones)
-  // are ONLY deposited into a finished Kho chứa (targetType === 6) or Lều của Tù trưởng (targetType === 3)!
-  const storageBuildings = finished.filter((b) => b.targetType === 6 || b.targetType === 3);
-  const candidates = storageBuildings.length > 0 ? storageBuildings : finished;
+  // Once the tribe has built a Kho chứa (targetType === 6), ALL material fetches & resource dropoffs
+  // MUST use Kho chứa instead of Lều của Tù trưởng (targetType === 3)!
+  const dedicatedStorage = finished.filter((b) => b.targetType === 6);
+  const chiefHut = finished.filter((b) => b.targetType === 3);
+  const candidates = dedicatedStorage.length > 0 ? dedicatedStorage : chiefHut.length > 0 ? chiefHut : finished;
   if (candidates.length === 0) return null;
   let best = candidates[0];
   let bestDist = Infinity;
@@ -2177,6 +2188,12 @@ function assignGatherTask(unitId, gatherTarget) {
   setUnitCarry(unitId, 0, 0);
   const planned = planUnitPath(unitId, gatherTarget.x, gatherTarget.y, true);
   if (planned === null) return false;
+  state.savedJobs.set(unitId, {
+    kind: 'gather',
+    resourceType: gatherTarget.type,
+    x: gatherTarget.x,
+    y: gatherTarget.y,
+  });
   state.tasks.set(unitId, {
     kind: 'gather',
     path: planned.path,
@@ -2187,6 +2204,63 @@ function assignGatherTask(unitId, gatherTarget) {
   });
   if (state.selectedUnit === unitId) state.activePath = planned.path;
   return true;
+}
+
+function resumeSavedJob(unitId) {
+  const d = state.data;
+  if (!d) return false;
+  const saved = state.savedJobs.get(unitId);
+  if (!saved) return false;
+  const e = d.entityData;
+  const owner = unitId > 50 ? 1 : 0;
+  const ux = e[unitId] & 0xff;
+  const uy = e[101 + unitId] & 0xff;
+
+  if (saved.kind === 'gather') {
+    const isRed = owner === 1;
+    const node =
+      classifyGatherable(saved.x, saved.y) ||
+      findNearestGatherable(saved.x, saved.y, 18, saved.resourceType, isRed) ||
+      findNearestGatherable(ux, uy, 22, saved.resourceType, isRed);
+    if (node && assignGatherTask(unitId, node)) return true;
+    state.savedJobs.delete(unitId);
+    return false;
+  }
+
+  if (saved.kind === 'build') {
+    const sites = getPlayerBuildings(owner).filter((b) => b.underConstruction);
+    sites.sort((a, b) => {
+      if (a.bid === saved.bid) return -1;
+      if (b.bid === saved.bid) return 1;
+      return Math.hypot(a.x - ux, a.y - uy) - Math.hypot(b.x - ux, b.y - uy);
+    });
+    for (const site of sites) {
+      if (getAssignedBuilderCount(site.bid, unitId) < getMaxBuildersForSite(site.bid)) {
+        if (assignBuildTask(unitId, site)) return true;
+      }
+    }
+    state.savedJobs.delete(unitId);
+    return false;
+  }
+
+  if (saved.kind === 'workBuilding') {
+    const bld = getPlayerBuildings(owner).find((b) => !b.underConstruction && b.bid === saved.bid);
+    if (bld) {
+      // For training buildings (Phòng tập=1, Khu tập ném=5), stop auto-resuming once warrior reaches max rank (9)
+      if (bld.targetType === 1 && (e[1616 + unitId] & 0xff) >= 9) {
+        state.savedJobs.delete(unitId);
+        return false;
+      }
+      if (bld.targetType === 5 && (e[1717 + unitId] & 0xff) >= 9) {
+        state.savedJobs.delete(unitId);
+        return false;
+      }
+      if (assignWorkAtBuilding(unitId, bld, saved.preferredSlots)) return true;
+    }
+    state.savedJobs.delete(unitId);
+    return false;
+  }
+  return false;
 }
 
 function assignHuntTask(unitId, animalOcc) {
@@ -3622,7 +3696,9 @@ function stepSimulation() {
           state.population = getVillagerIds().length;
           syncResourcesToData();
           const newName = getVillagerName(d, newId);
-          state.message = `${newName} vừa được sinh ra từ Lều! (Dân số: ${state.population}/${state.housingCap})`;
+          addPopup(hut.x + 1, hut.y, `${newName} được sinh ra!`, '#9cff7b');
+          showWarning(`👶 ${newName} được sinh ra!`);
+          state.message = `👶 ${newName} được sinh ra! (Dân số: ${state.population}/${state.housingCap})`;
           // Switch couple back to normal sleeping state 1 (glowing light only) after birth
           let u = e[8993 + hut.bid];
           let g = 0;
@@ -3642,12 +3718,14 @@ function stepSimulation() {
         e[1919 + unitId] = nextHp;
         if (nextEnergy >= 96 && (e[1313 + unitId] !== 2 || task.workTicks > 38)) {
           exitBuildingSlot(d, unitId);
-          setUnitAnim(unitId, 8, 0);
           e[2222 + unitId] = 0;
           e[3333 + unitId] = -1;
           state.tasks.delete(unitId);
+          if (!resumeSavedJob(unitId)) {
+            setUnitAnim(unitId, 8, 0);
+          }
           const info = getVillagerInfo(unitId);
-          state.message = `${info.role} đã ngủ dậy đầy năng lượng!`;
+          state.message = `${info.role} đã ngủ dậy đầy năng lượng và tiếp tục công việc!`;
           uiChanged = true;
         }
       }
@@ -3665,7 +3743,6 @@ function stepSimulation() {
       if (task.insideSlot && task.insideSlot.anims?.length) {
         const animEntry = task.insideSlot.anims[0];
         setUnitAnim(unitId, animEntry.animId, task.workTicks % animEntry.frames);
-        e[3030 + unitId] = task.workTicks & 0xff;
       } else {
         e[606 + unitId] = directionFromDelta(bld.x - ux, bld.y - uy);
         setUnitAnim(unitId, 16, Math.floor(task.workTicks / 2) % 8);
@@ -3673,9 +3750,16 @@ function stepSimulation() {
       task.workTicks++;
       const eatDuration = task.insideSlot ? 24 : 16;
       if (task.workTicks >= eatDuration) {
-        if (state.food > 0) {
-          state.food = Math.max(0, state.food - 1);
-          syncResourcesToData();
+        const unitOwner = unitId > 50 ? 1 : 0;
+        const r = d.resources?.[unitOwner];
+        const curFood = unitOwner === (state.localTribe ?? 0) ? state.food : (r?.[0] || 0);
+        if (curFood > 0) {
+          if (unitOwner === (state.localTribe ?? 0)) {
+            state.food = Math.max(0, state.food - 1);
+            syncResourcesToData(unitOwner);
+          } else if (r) {
+            r[0] = Math.max(0, (r[0] || 0) - 1);
+          }
           e[2121 + unitId] = 100;
           const maxHp = e[6767 + unitId] & 0xff;
           e[1919 + unitId] = Math.min(maxHp, (e[1919 + unitId] & 0xff) + 6);
@@ -3685,8 +3769,10 @@ function stepSimulation() {
         if (task.insideSlot) {
           exitBuildingSlot(d, unitId);
         }
-        setUnitAnim(unitId, 8, 0);
         state.tasks.delete(unitId);
+        if (!resumeSavedJob(unitId)) {
+          setUnitAnim(unitId, 8, 0);
+        }
         uiChanged = true;
       }
     } else if (task.kind === 'armForBattle') {
@@ -3884,20 +3970,20 @@ function stepSimulation() {
         uiChanged = true;
       }
     } else if (task.kind === 'chefFetch') {
-      // Chef arrived at Storage to fetch 1 Wood for cooking fire, then carries it back to Bếp!
+      // Chef arrived at Storage to fetch raw Meat (carrySprite = 1) to bring back to Bếp and cook!
       const owner = task.owner ?? (unitId > 50 ? 1 : 0);
       const r = d.resources?.[owner];
-      const curWood = owner === (state.localTribe ?? 0) ? state.wood : (r?.[1] || 0);
-      if (curWood >= 1) {
+      const curFood = owner === (state.localTribe ?? 0) ? state.food : (r?.[0] || 0);
+      if (curFood >= 1) {
         if (owner === (state.localTribe ?? 0)) {
-          state.wood -= 1;
+          state.food -= 1;
           syncResourcesToData(owner);
         } else if (r) {
-          r[1] = Math.max(0, (r[1] || 0) - 1);
+          r[0] = Math.max(0, (r[0] || 0) - 1);
         }
         const planned = planUnitPath(unitId, task.kitchen.x, task.kitchen.y, false, task.kitchen);
         if (planned !== null) {
-          setUnitCarry(unitId, 2, 1);
+          setUnitCarry(unitId, 1, 1); // 1 = Meat sprite (authentic raw meat carried from Storage to Bếp!)
           state.tasks.set(unitId, {
             kind: 'workBuilding',
             path: planned.path,
@@ -4054,40 +4140,50 @@ function stepSimulation() {
 
       // Authentic per-building production & training effects!
       if (bType === 4) {
-        if (slotIdx === 0 && task.workTicks % 60 === 0) {
-          // Bếp slot 0: Chef cooks meals (+3 food), then goes to Storage to fetch 1 Wood for the next batch!
-          if (unitOwner === (state.localTribe ?? 0)) {
-            state.food += 3;
-            syncResourcesToData(unitOwner);
-          } else if (d.resources?.[unitOwner]) {
-            d.resources[unitOwner][0] = (d.resources[unitOwner][0] || 0) + 3;
+        if (slotIdx === 0) {
+          // Chef also eats from their own cooking to stay well-fed and healthy!
+          if (task.workTicks % 20 === 0) {
+            e[2121 + unitId] = 100;
+            const maxHp = e[6767 + unitId] & 0xff;
+            e[1919 + unitId] = Math.min(maxHp, (e[1919 + unitId] & 0xff) + 4);
+            if ((e[3333 + unitId] & 0xff) === 2) e[3333 + unitId] = -1;
+            uiChanged = true;
           }
-          const r = d.resources?.[unitOwner];
-          const curWood = unitOwner === (state.localTribe ?? 0) ? state.wood : (r?.[1] || 0);
-          if (curWood >= 1) {
-            exitBuildingSlot(d, unitId);
-            const storage = findNearestDropoff(e[unitId] & 0xff, e[101 + unitId] & 0xff, unitOwner);
-            if (storage) {
-              const toStorage = planUnitPath(unitId, storage.x, storage.y, false, storage);
-              if (toStorage !== null) {
-                state.tasks.set(unitId, {
-                  kind: 'chefFetch',
-                  path: toStorage.path,
-                  stepProgress: toStorage.stepProgress,
-                  target: storage,
-                  kitchen: bld,
-                  owner: unitOwner,
-                  workTicks: 0,
-                });
-                if (state.selectedUnit === unitId) state.activePath = toStorage.path;
-                uiChanged = true;
-                continue;
+          if (task.workTicks % 60 === 0) {
+            // Bếp slot 0: Chef finishes cooking a batch (+4 food), then goes to Storage to fetch raw Meat (carrySprite=1) for the next pot!
+            if (unitOwner === (state.localTribe ?? 0)) {
+              state.food += 4;
+              syncResourcesToData(unitOwner);
+            } else if (d.resources?.[unitOwner]) {
+              d.resources[unitOwner][0] = (d.resources[unitOwner][0] || 0) + 4;
+            }
+            const r = d.resources?.[unitOwner];
+            const curFood = unitOwner === (state.localTribe ?? 0) ? state.food : (r?.[0] || 0);
+            if (curFood >= 1) {
+              exitBuildingSlot(d, unitId);
+              const storage = findNearestDropoff(e[unitId] & 0xff, e[101 + unitId] & 0xff, unitOwner);
+              if (storage) {
+                const toStorage = planUnitPath(unitId, storage.x, storage.y, false, storage);
+                if (toStorage !== null) {
+                  state.tasks.set(unitId, {
+                    kind: 'chefFetch',
+                    path: toStorage.path,
+                    stepProgress: toStorage.stepProgress,
+                    target: storage,
+                    kitchen: bld,
+                    owner: unitOwner,
+                    workTicks: 0,
+                  });
+                  if (state.selectedUnit === unitId) state.activePath = toStorage.path;
+                  uiChanged = true;
+                  continue;
+                }
               }
             }
+            uiChanged = true;
           }
-          uiChanged = true;
         } else if (slotIdx > 0 && task.workTicks >= 24) {
-          // Bếp slots 1..6: Diner finishes meal & exits
+          // Bếp slots 1..6: Diner finishes meal, exits & resumes previous task!
           if (state.food > 0) {
             state.food = Math.max(0, state.food - 1);
             syncResourcesToData();
@@ -4098,8 +4194,10 @@ function stepSimulation() {
             e[3333 + unitId] = -1;
           }
           exitBuildingSlot(d, unitId);
-          setUnitAnim(unitId, 8, 0);
           state.tasks.delete(unitId);
+          if (!resumeSavedJob(unitId)) {
+            setUnitAnim(unitId, 8, 0);
+          }
           uiChanged = true;
         }
       } else if (bType === 1 || bType === 5) {
@@ -4117,8 +4215,10 @@ function stepSimulation() {
             e[1717 + unitId] = Math.min(9, Math.max(5, (e[1717 + unitId] & 0xff) + 1)); // Throwing rank ^
           }
           exitBuildingSlot(d, unitId);
-          setUnitAnim(unitId, 8, 0);
           state.tasks.delete(unitId);
+          if (!resumeSavedJob(unitId)) {
+            setUnitAnim(unitId, 8, 0);
+          }
           if ((unitId > 50 ? 1 : 0) === (state.localTribe ?? 0)) {
             const info = getVillagerInfo(unitId);
             const lv = bType === 1 ? (e[1616 + unitId] & 0xff) : (e[1717 + unitId] & 0xff);
@@ -4136,15 +4236,17 @@ function stepSimulation() {
           }
           uiChanged = true;
         } else if (slotIdx > 0 && task.workTicks % 16 === 0) {
-          // Sàn Disco slots 1..6: Dancers enjoy music & recover mood/energy
+          // Sàn Disco slots 1..6: Dancers enjoy music & recover mood/energy, then resume previous task!
           e[505 + unitId] = Math.min(100, (e[505 + unitId] & 0xff) + 18);
           e[2020 + unitId] = Math.min(100, (e[2020 + unitId] & 0xff) + 10);
           e[3333 + unitId] = -1;
           if (task.workTicks >= 96) {
             e[505 + unitId] = 100;
             exitBuildingSlot(d, unitId);
-            setUnitAnim(unitId, 8, 0);
             state.tasks.delete(unitId);
+            if (!resumeSavedJob(unitId)) {
+              setUnitAnim(unitId, 8, 0);
+            }
             uiChanged = true;
           }
         }
@@ -4514,20 +4616,22 @@ function stepVillagerNeeds() {
       else if (mood <= 25) e[3333 + id] = 1;
       else e[3333 + id] = -1;
 
-      // Autonomous self-care when idle (never abandon an active gather/build/work task!):
+      // Autonomous self-care (after eating/sleeping/dancing, resumeSavedJob() returns them to their previous job!):
       // - Hungry -> seek Bếp (if Bếp exists & food > 0); otherwise just keep showing thought bubble!
       // - Sleepy -> seek Lều (if Lều exists); otherwise just keep showing thought bubble!
       // - Bored  -> seek Sàn disco (if Sàn disco exists); otherwise just keep showing thought bubble!
-      if (!task && !isUnitInsideBuilding(d, id)) {
+      const canBreak = !task || (task.kind === 'gather' && (satiety <= 18 || energy <= 18 || mood <= 18));
+      if (canBreak && !isUnitInsideBuilding(d, id)) {
         const ux = e[id] & 0xff;
         const uy = e[101 + id] & 0xff;
-        if (satiety <= 38 && tribeFood > 0 && finishedKitchens.length > 0) {
+        const thresh = task ? 18 : 38;
+        if (satiety <= thresh && tribeFood > 0 && finishedKitchens.length > 0) {
           const kitchen = pickNearestBld(finishedKitchens, ux, uy);
           if (kitchen && assignEatTask(id, kitchen)) changed = true;
-        } else if (energy <= 38 && finishedHuts.length > 0) {
+        } else if (energy <= thresh && finishedHuts.length > 0) {
           const hut = pickNearestBld(finishedHuts, ux, uy);
           if (hut && assignRestTask(id, hut)) changed = true;
-        } else if (mood <= 38 && finishedDiscos.length > 0) {
+        } else if (mood <= thresh && finishedDiscos.length > 0) {
           const disco = pickNearestBld(finishedDiscos, ux, uy);
           if (disco && assignWorkAtBuilding(id, disco, [1, 2, 3, 4, 5, 6])) changed = true;
         }
@@ -7037,6 +7141,7 @@ Promise.all([
       state.buildPreview = null;
       state.showMinimap = false;
       state.tasks.clear();
+      state.savedJobs.clear();
       state.enemyTasks.clear();
       state.weaponQueues.clear();
       state.siteMaterials.clear();
