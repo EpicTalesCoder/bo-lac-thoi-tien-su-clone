@@ -1732,6 +1732,8 @@ function confirmBuildAtCursor(owner = state.localTribe ?? 0, overridePayload = n
     }
     return;
   }
+  const startHp = state.data.entityData[8505 + bid] & 0xff;
+  const totalCost = Math.max(1, (spec.woodCost || 0) + (spec.stoneCost || 0) + (spec.toolsCost || 0));
   state.siteMaterials.set(bid, {
     wood: spec.woodCost || 0,
     stone: spec.stoneCost || 0,
@@ -1739,6 +1741,8 @@ function confirmBuildAtCursor(owner = state.localTribe ?? 0, overridePayload = n
     deliveredWood: 0,
     deliveredStone: 0,
     deliveredTools: 0,
+    totalCost,
+    baseHp: startHp,
     owner,
   });
 
@@ -2427,11 +2431,22 @@ function performUpgradeBuilding(bld) {
   // Authentic builder-driven upgrade: mark building as upgrading (e[8627]=1), DO NOT deduct resources upfront!
   // Builders will fetch wood & stone from Storage (up to 10/trip) and hammer until upgrade completes.
   const newMax = Math.min(240, (e[8566 + bld.bid] & 0xff) + 25);
+  const startHp = Math.min(e[8505 + bld.bid] & 0xff, Math.max(10, newMax - 25));
   e[8566 + bld.bid] = newMax;
-  e[8505 + bld.bid] = Math.min(e[8505 + bld.bid] & 0xff, Math.max(10, newMax - 25));
+  e[8505 + bld.bid] = startHp;
   e[8627 + bld.bid] = 1;
   state.upgradingBuildings.set(bld.bid, { targetLevel: level + 1, targetType: bld.targetType });
-  state.siteMaterials.set(bld.bid, { wood: woodNeed, stone: stoneNeed, tools: 0, owner });
+  state.siteMaterials.set(bld.bid, {
+    wood: woodNeed,
+    stone: stoneNeed,
+    tools: 0,
+    deliveredWood: 0,
+    deliveredStone: 0,
+    deliveredTools: 0,
+    totalCost: Math.max(1, woodNeed + stoneNeed),
+    baseHp: startHp,
+    owner,
+  });
 
   // Automatically dispatch selected adult villager or nearest idle adult villager to start upgrading!
   const refreshed = getPlayerBuildings(owner).find((b) => b.bid === bld.bid) || bld;
@@ -3107,7 +3122,18 @@ function stepAiCommander() {
                 if (canPlaceBuilding(d, desiredType, bx, by)) {
                   placedBid = placeConstructionSite(d, desiredType, bx, by, 1);
                   if (placedBid > 0) {
-                    state.siteMaterials.set(placedBid, { wood: spec.wood, stone: spec.stone, tools: spec.bones });
+                    const aiTotalCost = Math.max(1, (spec.wood || 0) + (spec.stone || 0) + (spec.bones || 0));
+                    state.siteMaterials.set(placedBid, {
+                      wood: spec.wood,
+                      stone: spec.stone,
+                      tools: spec.bones,
+                      deliveredWood: 0,
+                      deliveredStone: 0,
+                      deliveredTools: 0,
+                      totalCost: aiTotalCost,
+                      baseHp: e[8505 + placedBid] & 0xff,
+                      owner: 1,
+                    });
                     const newBld = getPlayerBuildings(1).find((b) => b.bid === placedBid);
                     if (newBld) assignBuildTask(idle, newBld);
                     changed = true;
@@ -4012,7 +4038,31 @@ function stepSimulation() {
       // Check if construction site still needs materials from Storage (authentic b.java:3013 & 4277-4309)
       const bldOwner = bid > 30 ? 1 : 0;
       const need = state.siteMaterials.get(bid);
-      if (need && (need.wood > 0 || need.stone > 0 || need.tools > 0)) {
+      const upgradeMeta = state.upgradingBuildings.get(bid);
+      const stillMissingMaterials = Boolean(need && (need.wood > 0 || need.stone > 0 || need.tools > 0));
+      const deliveredTotal = need
+        ? (need.deliveredWood || 0) + (need.deliveredStone || 0) + (need.deliveredTools || 0)
+        : 0;
+      const remCost = need ? (need.wood || 0) + (need.stone || 0) + (need.tools || 0) : 0;
+      const totalCost = Math.max(
+        1,
+        need?.totalCost ||
+          (deliveredTotal + remCost) ||
+          (bld.spec.woodCost || 0) + (bld.spec.stoneCost || 0) + (bld.spec.toolsCost || 0)
+      );
+      const baseHp =
+        need?.baseHp ??
+        (upgradeMeta ? Math.max(10, maxHp - 25) : Math.max(6, Math.floor(maxHp * 0.1)));
+      const curHp = e[8505 + bid] & 0xff;
+      const allowedMaxHp = stillMissingMaterials
+        ? deliveredTotal > 0
+          ? Math.min(maxHp - 1, baseHp + Math.ceil((maxHp - baseHp) * (deliveredTotal / totalCost)))
+          : baseHp
+        : maxHp;
+      // Fetch-some -> build-some -> fetch-next/remaining -> raise protest sign ONLY after building everything brought!
+      const hasWorkFromDelivered = deliveredTotal > 0 && curHp < allowedMaxHp;
+
+      if (!hasWorkFromDelivered && stillMissingMaterials) {
         const r = d.resources?.[bldOwner];
         const curWood = bldOwner === (state.localTribe ?? 0) ? state.wood : (r?.[1] || 0);
         const curStone = bldOwner === (state.localTribe ?? 0) ? state.stone : (r?.[2] || 0);
@@ -4108,19 +4158,8 @@ function stepSimulation() {
       setUnitAnim(unitId, buildAnim, Math.floor(task.workTicks / 2) % 3);
       task.workTicks++;
 
-      // Authentic steady construction / upgrade rate: +1 HP every 3 ticks per builder, capped if materials are still missing!
+      // Authentic steady construction / upgrade rate: +1 HP every 3 ticks per builder, capped by delivered materials!
       if (task.workTicks % 3 === 0) {
-        const upgradeMeta = state.upgradingBuildings.get(bid);
-        const stillMissingMaterials = Boolean(need && (need.wood > 0 || need.stone > 0 || need.tools > 0));
-        const totalCost = upgradeMeta
-          ? 25
-          : Math.max(1, (bld.spec.woodCost || 0) + (bld.spec.stoneCost || 0) + (bld.spec.toolsCost || 0));
-        const remCost = need ? (need.wood || 0) + (need.stone || 0) + (need.tools || 0) : 0;
-        const paidRatio = Math.max(0.15, (totalCost - remCost) / totalCost);
-        const allowedMaxHp = stillMissingMaterials
-          ? Math.min(maxHp - 1, Math.max(e[8505 + bid] & 0xff, Math.floor(maxHp * paidRatio)))
-          : maxHp;
-        const curHp = e[8505 + bid] & 0xff;
         if (curHp >= allowedMaxHp && stillMissingMaterials) {
           continue;
         }
