@@ -1451,15 +1451,11 @@ function adjustWeaponQueue(bid, weaponId, delta, fromRemote = false) {
 }
 
 function planUnitPath(unitId, tx, ty, allowAdjacent = false, targetRect = null) {
-  // Always route into a building through its front door tile (bottom-center edge) so villagers never clip through walls!
-  const door = targetRect ? getBuildingDoorTile(targetRect) : null;
+  // Always take the shortest BFS path to the nearest walkable perimeter tile of targetRect (no forced detour to bottom edge!)
   const curTask = state.tasks.get(unitId);
   if (curTask && curTask.path?.length > 0 && curTask.stepProgress > 0) {
     const inFlight = curTask.path[0];
-    const tail = door
-      ? findPath(inFlight.x, inFlight.y, door.x, door.y, unitId, false, null) ??
-        findPath(inFlight.x, inFlight.y, tx, ty, unitId, allowAdjacent, targetRect)
-      : findPath(inFlight.x, inFlight.y, tx, ty, unitId, allowAdjacent, targetRect);
+    const tail = findPath(inFlight.x, inFlight.y, tx, ty, unitId, allowAdjacent, targetRect);
     if (tail !== null) {
       return {
         path: [inFlight, ...tail],
@@ -1471,10 +1467,7 @@ function planUnitPath(unitId, tx, ty, allowAdjacent = false, targetRect = null) 
   e[202 + unitId] = 0;
   e[303 + unitId] = 0;
   const info = getVillagerInfo(unitId);
-  const path = door
-    ? findPath(info.x, info.y, door.x, door.y, unitId, false, null) ??
-      findPath(info.x, info.y, tx, ty, unitId, allowAdjacent, targetRect)
-    : findPath(info.x, info.y, tx, ty, unitId, allowAdjacent, targetRect);
+  const path = findPath(info.x, info.y, tx, ty, unitId, allowAdjacent, targetRect);
   if (path === null) return null;
   return { path, stepProgress: 0 };
 }
