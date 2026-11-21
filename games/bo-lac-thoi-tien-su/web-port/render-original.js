@@ -382,12 +382,14 @@ function drawMapObject(ctx, data, n, layer, ah, ai, camX, camY, originY, animTic
           (resArr[8] || 0) +
           (resArr[9] || 0) +
           (resArr[10] || 0);
+        // Original mo[142] = [25(weapons), 2(wood), 1(food), 3(stone), 4(bones)] in 1-indexed f.java!
+        // Our web-port resArr is 0-indexed: [0]=food, [1]=wood, [2]=stone, [3]=bones, [5..10]=weapons.
         const resSlotMap = [
           weaponsAmt,       // U=0 (comp 1248..1252): Crafted weapons (res[5..10])
-          resArr[2] || 0,   // U=1 (comp 1253..1257): Stone (res[2])
-          resArr[1] || 0,   // U=2 (comp 1258..1262): Wood (res[1])
-          resArr[3] || 0,   // U=3 (comp 1263..1267): Bones/Tools (res[3])
-          resArr[4] || 0,   // U=4 (comp 1268..1272): Special/Extra (res[4])
+          resArr[1] || 0,   // U=1 (comp 1253..1257): Wood (res[1])
+          resArr[0] || 0,   // U=2 (comp 1258..1262): Food / Meat (res[0])
+          resArr[2] || 0,   // U=3 (comp 1263..1267): Stone (res[2])
+          resArr[3] || 0,   // U=4 (comp 1268..1272): Bones (res[3])
         ];
         const amt = resSlotMap[resCounter] || 0;
         if (amt > 0) {
