@@ -215,6 +215,7 @@ const state = {
   enemyTasks: new Map(),
   weaponQueues: new Map(), // bid -> [q0..q5] weapon forge orders (starts at 0)
   siteMaterials: new Map(), // bid -> { wood, stone, tools, owner } pending material deliveries from Storage
+  upgradingBuildings: new Map(), // bid -> { targetLevel, targetType } active builder-driven building upgrades
   treeWood: new Map(), // remaining wood per tree cell "x,y" (12 wood/tree; clears to grass when depleted)
   activePath: [],
   dustEffects: [],
@@ -2385,8 +2386,10 @@ function castShamanSpell(spell) {
 }
 
 function performUpgradeBuilding(bld) {
-  const maxLevel = getBuildingMaxLevel(state.data, bld.targetType);
-  const level = state.data.entityData[9115 + bld.bid] & 0xff;
+  const d = state.data;
+  const e = d.entityData;
+  const maxLevel = getBuildingMaxLevel(d, bld.targetType);
+  const level = e[9115 + bld.bid] & 0xff;
   if (maxLevel <= 1) {
     state.message = `${bld.spec.name} không có cấp nâng cấp trong game gốc.`;
     render();
@@ -2397,21 +2400,48 @@ function performUpgradeBuilding(bld) {
     render();
     return;
   }
-  const woodNeed = 15;
-  const stoneNeed = 10;
-  if (state.wood < woodNeed || state.stone < stoneNeed) {
-    state.message = `Cần 🪵${woodNeed} 🪨${stoneNeed} để nâng cấp ${bld.spec.name} lên Cấp ${level + 1}.`;
+  if (e[8627 + bld.bid] === 1 || state.upgradingBuildings.has(bld.bid)) {
+    state.message = `${bld.spec.name} đang được nâng cấp — hãy cử thợ xây vào thi công!`;
     render();
     return;
   }
-  state.wood -= woodNeed;
-  state.stone -= stoneNeed;
-  upgradeBuilding(state.data, bld.bid);
-  if (bld.targetType === 2) state.housingCap = Math.min(50, state.housingCap + 2);
-  syncResourcesToData();
-  addDust(bld.x, bld.y, bld.w, bld.h);
-  addPopup(bld.x + Math.floor(bld.w / 2), bld.y, `Nâng cấp Cấp ${level + 1}!`, '#9cff7b');
-  state.message = `Đã nâng cấp ${bld.spec.name} lên Cấp ${level + 1}!`;
+  const woodNeed = 15;
+  const stoneNeed = 10;
+  const owner = state.localTribe ?? 0;
+
+  // Eject any non-builder occupants currently inside before upgrading begins
+  const occupants = [];
+  let cur = e[8993 + bld.bid];
+  let g = 0;
+  while (cur > 0 && g++ < 16) {
+    occupants.push(cur);
+    cur = e[4545 + cur];
+  }
+  for (const uid of occupants) {
+    exitBuildingSlot(d, uid);
+    state.tasks.delete(uid);
+    setUnitAnim(uid, 8, 0);
+  }
+
+  // Authentic builder-driven upgrade: mark building as upgrading (e[8627]=1), DO NOT deduct resources upfront!
+  // Builders will fetch wood & stone from Storage (up to 10/trip) and hammer until upgrade completes.
+  const newMax = Math.min(240, (e[8566 + bld.bid] & 0xff) + 25);
+  e[8566 + bld.bid] = newMax;
+  e[8505 + bld.bid] = Math.min(e[8505 + bld.bid] & 0xff, Math.max(10, newMax - 25));
+  e[8627 + bld.bid] = 1;
+  state.upgradingBuildings.set(bld.bid, { targetLevel: level + 1, targetType: bld.targetType });
+  state.siteMaterials.set(bld.bid, { wood: woodNeed, stone: stoneNeed, tools: 0, owner });
+
+  // Automatically dispatch selected adult villager or nearest idle adult villager to start upgrading!
+  const refreshed = getPlayerBuildings(owner).find((b) => b.bid === bld.bid) || bld;
+  const selAdult =
+    state.selectedUnit && (e[1414 + state.selectedUnit] & 0xff) >= 12 ? state.selectedUnit : 0;
+  const builderId = selAdult || findNearestVillager(bld.x, bld.y, true);
+  if (builderId) {
+    assignBuildTask(builderId, refreshed, false);
+  }
+
+  state.message = `🔨 Đã đặt lệnh nâng cấp ${bld.spec.name} lên Cấp ${level + 1} (cần 🪵${woodNeed} 🪨${stoneNeed}) — thợ xây đang lấy nguyên liệu để thi công!`;
   render();
 }
 
@@ -4098,10 +4128,13 @@ function stepSimulation() {
       setUnitAnim(unitId, buildAnim, Math.floor(task.workTicks / 2) % 3);
       task.workTicks++;
 
-      // Authentic steady construction rate: +1 HP every 3 ticks per builder, capped if materials are still missing!
+      // Authentic steady construction / upgrade rate: +1 HP every 3 ticks per builder, capped if materials are still missing!
       if (task.workTicks % 3 === 0) {
+        const upgradeMeta = state.upgradingBuildings.get(bid);
         const stillMissingMaterials = Boolean(need && (need.wood > 0 || need.stone > 0 || need.tools > 0));
-        const totalCost = Math.max(1, (bld.spec.woodCost || 0) + (bld.spec.stoneCost || 0) + (bld.spec.toolsCost || 0));
+        const totalCost = upgradeMeta
+          ? 25
+          : Math.max(1, (bld.spec.woodCost || 0) + (bld.spec.stoneCost || 0) + (bld.spec.toolsCost || 0));
         const remCost = need ? (need.wood || 0) + (need.stone || 0) + (need.tools || 0) : 0;
         const paidRatio = Math.max(0.15, (totalCost - remCost) / totalCost);
         const allowedMaxHp = stillMissingMaterials
@@ -4113,23 +4146,52 @@ function stepSimulation() {
         }
         const nextHp = Math.min(allowedMaxHp, curHp + 1);
         e[8505 + bid] = nextHp;
-        const ratio = nextHp / maxHp;
-        e[9115 + bid] = ratio >= 0.78 ? 3 : ratio >= 0.48 ? 2 : ratio >= 0.22 ? 1 : 0;
+        if (!upgradeMeta) {
+          const ratio = nextHp / maxHp;
+          e[9115 + bid] = ratio >= 0.78 ? 3 : ratio >= 0.48 ? 2 : ratio >= 0.22 ? 1 : 0;
+        }
 
         if (nextHp >= maxHp && !stillMissingMaterials) {
           const bldOwner = bid > 30 ? 1 : 0;
-          const { spec, workers } = finishConstructionSite(d, bid);
-          state.siteMaterials.delete(bid);
-          if (bldOwner === (state.localTribe ?? 0)) {
-            state.missionStats.buildingsBuilt++;
-            if (spec.housingBonus > 0) {
-              state.housingCap = Math.min(50, state.housingCap + spec.housingBonus);
+          let spec = bld.spec;
+          let workers = [];
+          if (upgradeMeta) {
+            let wCur = e[8993 + bid];
+            let wGuard = 0;
+            while (wCur > 0 && wGuard++ < 16) {
+              workers.push(wCur);
+              wCur = e[4545 + wCur];
+            }
+            for (const wid of workers) exitBuildingSlot(d, wid);
+            e[9115 + bid] = upgradeMeta.targetLevel;
+            e[8627 + bid] = 0;
+            e[8505 + bid] = maxHp;
+            if (upgradeMeta.targetType === 2 && bldOwner === (state.localTribe ?? 0)) {
+              state.housingCap = Math.min(50, state.housingCap + 2);
               syncResourcesToData(bldOwner);
             }
-            addPopup(bld.x + Math.floor(bld.w / 2), bld.y, `${spec.name} hoàn thành!`, '#9cff7b');
-            state.message = `Nhà đã xây xong: ${spec.name}!${spec.housingBonus ? ` (+${spec.housingBonus} chỗ ở)` : ''}`;
+            state.upgradingBuildings.delete(bid);
+            state.siteMaterials.delete(bid);
+            if (bldOwner === (state.localTribe ?? 0)) {
+              addPopup(bld.x + Math.floor(bld.w / 2), bld.y, `Nâng cấp Cấp ${upgradeMeta.targetLevel}!`, '#9cff7b');
+              state.message = `✨ Đã nâng cấp xong ${spec.name} lên Cấp ${upgradeMeta.targetLevel}!`;
+            }
+          } else {
+            const fin = finishConstructionSite(d, bid);
+            spec = fin.spec;
+            workers = fin.workers;
+            state.siteMaterials.delete(bid);
+            if (bldOwner === (state.localTribe ?? 0)) {
+              state.missionStats.buildingsBuilt++;
+              if (spec.housingBonus > 0) {
+                state.housingCap = Math.min(50, state.housingCap + spec.housingBonus);
+                syncResourcesToData(bldOwner);
+              }
+              addPopup(bld.x + Math.floor(bld.w / 2), bld.y, `${spec.name} hoàn thành!`, '#9cff7b');
+              state.message = `Nhà đã xây xong: ${spec.name}!${spec.housingBonus ? ` (+${spec.housingBonus} chỗ ở)` : ''}`;
+            }
           }
-          // Dust cloud d(74) plays ONLY when the building finishes construction (f.java:1517)!
+          // Dust cloud d(74) plays ONLY when the building finishes construction/upgrade (f.java:1517)!
           addDust(bld.x, bld.y, bld.w, bld.h);
 
           // If this finished building is a Nhà trẻ (bType 10), immediately call all outside children (< 12) of the tribe to run inside for safety!
