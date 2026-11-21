@@ -1249,8 +1249,9 @@ function syncUnitJobBadge(unitId) {
       badge = 3; // authentic meat/hunt badge (mo[41][12] = 3)
     } else if (task.kind === 'eat') {
       badge = 0; // Diners at Nhà ăn / Lều Tù trưởng have NO hunting/meat overhead badge (mo[41][70/71] = 0)
-    } else if (task.kind === 'attackUnit' || task.kind === 'attackBuilding') {
-      badge = 0; // No overhead icon during combat!
+    } else if (task.kind === 'attackUnit' || task.kind === 'attackBuilding' || task.kind === 'armForBattle') {
+      // Keep the villager's current overhead job badge intact while temporarily running to arm & fight!
+      badge = e[2222 + unitId] & 0xff;
     } else if (task.kind === 'buildFetch') {
       badge = 12; // Builder fetching materials from Storage
     } else if (task.kind === 'blacksmithFetch' || task.kind === 'blacksmithDeliver') {
@@ -1269,8 +1270,6 @@ function syncUnitJobBadge(unitId) {
       else if (bt === 9) badge = 13; // Trung tâm PIA=13
       else if (bt === 11) badge = 16; // Chòi canh=16
       else badge = 0;
-    } else if (task.kind === 'armForBattle') {
-      badge = 0;
     } else if (task.kind === 'fetchWeaponAndTrain') {
       badge = task.trainBld?.targetType === 5 ? 15 : 14;
     }
@@ -3651,7 +3650,11 @@ function stepSimulation() {
         ? 38
         : task.kind === 'chefFetch'
           ? 54
-          : task.kind === 'eat' || task.kind === 'rest'
+          : task.kind === 'eat' ||
+              task.kind === 'rest' ||
+              task.kind === 'armForBattle' ||
+              task.kind === 'attackUnit' ||
+              task.kind === 'attackBuilding'
             ? (e[6464 + unitId] & 0xff) || 69
             : task.kind === 'workBuilding'
               ? task.hatJob !== undefined
