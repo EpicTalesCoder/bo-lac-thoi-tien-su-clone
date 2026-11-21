@@ -2103,6 +2103,13 @@ function assignEatTask(unitId, foodBuilding) {
   return true;
 }
 
+function canKitchenServeFood(bid) {
+  if (!state.data) return false;
+  // Villagers can eat at Nhà ăn whenever cooked food is already on the table (e[8871+bid] > 0)
+  // OR a Chef is actively cooking in slot 0!
+  return (state.data.entityData[8871 + bid] & 0xff) > 0 || isBuildingSlot0ActiveInside(bid);
+}
+
 function isBuildingSlot0ActiveInside(bid) {
   if (!state.data) return false;
   const e = state.data.entityData;
@@ -4319,8 +4326,8 @@ function stepSimulation() {
       }
     } else if (task.kind === 'eat') {
       const bld = task.target;
-      // Authentic b.java:3209: Nobody can enter or eat inside Nhà ăn (bType 4) if there is NO Chef cooking in slot 0!
-      if (bld.targetType === 4 && !isBuildingSlot0ActiveInside(bld.bid)) {
+      // Villagers can eat inside Nhà ăn whenever cooked food is already on the table (e[8871+bid] > 0) OR a Chef is cooking!
+      if (bld.targetType === 4 && !canKitchenServeFood(bld.bid)) {
         if (task.insideSlot) exitBuildingSlot(d, unitId);
         // If a Chef is currently walking to slot 0, wait quietly outside the door until the Chef arrives; otherwise cancel!
         if (isBuildingSlot0Occupied(bld.bid)) {
@@ -4645,8 +4652,11 @@ function stepSimulation() {
         (bld.targetType === 4 || bld.targetType === 7) &&
         ((task.insideSlot && task.insideSlot.slotIdx > 0) ||
           (!task.insideSlot && Array.isArray(task.preferredSlots) && task.preferredSlots.length > 0 && !task.preferredSlots.includes(0)));
-      // Authentic b.java:3209: Dancers cannot dance in Sàn disco without a DJ, and diners cannot eat in Bếp without a Chef — stand outside instead!
-      if (isGuestSlotOnly && !isBuildingSlot0ActiveInside(bld.bid)) {
+      // Dancers cannot dance in Sàn disco without a DJ; diners cannot eat in Bếp if BOTH no cooked food AND no Chef!
+      const guestBlocked =
+        isGuestSlotOnly &&
+        (bld.targetType === 4 ? !canKitchenServeFood(bld.bid) : !isBuildingSlot0ActiveInside(bld.bid));
+      if (guestBlocked) {
         if (task.insideSlot) exitBuildingSlot(d, unitId);
         if (isBuildingSlot0Occupied(bld.bid)) {
           setUnitAnim(unitId, 8, 0);
@@ -5372,10 +5382,10 @@ function stepVillagerNeeds() {
           task?.kind === 'workBuilding' && task.target?.targetType === 4 && (task.insideSlot?.slotIdx ?? 0) === 0;
         const isDjInDisco =
           task?.kind === 'workBuilding' && task.target?.targetType === 7 && (task.insideSlot?.slotIdx ?? 0) === 0;
-        const kitchensWithChef = finishedKitchens.filter((b) => isBuildingSlot0ActiveInside(b.bid));
+        const kitchensReady = finishedKitchens.filter((b) => canKitchenServeFood(b.bid));
         const discosWithDj = finishedDiscos.filter((b) => isBuildingSlot0ActiveInside(b.bid));
-        if (satiety <= thresh && !isChefInKitchen && tribeFood > 0 && kitchensWithChef.length > 0) {
-          const kitchen = pickNearestBld(kitchensWithChef, ux, uy);
+        if (satiety <= thresh && !isChefInKitchen && kitchensReady.length > 0) {
+          const kitchen = pickNearestBld(kitchensReady, ux, uy);
           if (kitchen && assignEatTask(id, kitchen)) changed = true;
         } else if (energy <= thresh && finishedHuts.length > 0) {
           const hut = pickNearestBld(finishedHuts, ux, uy, true);
@@ -5848,8 +5858,8 @@ function openCanvasBuildingMenu(bld) {
       label: 'VÀO NHÀ ĂN DÙNG BỮA',
       iconAnim: 13,
       action: () => {
-        if (!isBuildingSlot0ActiveInside(bld.bid)) {
-          showWarning('⚠ Nhà ăn chưa có Đầu bếp nấu ăn! Hãy cử Đầu bếp vào trước.');
+        if (!canKitchenServeFood(bld.bid)) {
+          showWarning('⚠ Nhà ăn chưa có đồ ăn chín và chưa có Đầu bếp! Hãy cử Đầu bếp vào nấu trước.');
           state.canvasMenu = null;
           render();
           return;
