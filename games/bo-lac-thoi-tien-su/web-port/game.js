@@ -2087,6 +2087,22 @@ function assignEatTask(unitId, foodBuilding) {
   return true;
 }
 
+function isBuildingSlot0ActiveInside(bid) {
+  if (!state.data) return false;
+  const e = state.data.entityData;
+  let u = e[8993 + bid];
+  let g = 0;
+  while (u > 0 && g++ < 16) {
+    if (e[4646 + u] === 0 && (e[1919 + u] & 0xff) > 0) return true;
+    u = e[4545 + u];
+  }
+  // Allow Chef briefly fetching fuel/ingredients from Storage for this Kitchen
+  for (const t of state.tasks.values()) {
+    if (t.kind === 'chefFetch' && t.kitchen?.bid === bid) return true;
+  }
+  return false;
+}
+
 function isBuildingSlot0Occupied(bid) {
   if (!state.data) return false;
   const e = state.data.entityData;
@@ -4214,6 +4230,14 @@ function stepSimulation() {
       }
     } else if (task.kind === 'eat') {
       const bld = task.target;
+      // Authentic b.java:3209: Nobody can enter or eat inside Nhà ăn (bType 4) if there is NO Chef cooking in slot 0!
+      if (bld.targetType === 4 && !isBuildingSlot0ActiveInside(bld.bid)) {
+        if (task.insideSlot) exitBuildingSlot(d, unitId);
+        state.tasks.delete(unitId);
+        setUnitAnim(unitId, 8, 0);
+        uiChanged = true;
+        continue;
+      }
       // Enter Bếp (bType 4) dining slots 1..6 (strictPreferred=true so diners NEVER fall back into Chef slot 0!)
       // to play authentic sitting & eating animations (anim 85 / 86, 19 frames)
       if (bld.targetType === 4 && !task.insideSlot && !task.eatOutside) {
@@ -4510,8 +4534,21 @@ function stepSimulation() {
       uiChanged = true;
     } else if (task.kind === 'workBuilding') {
       const bld = task.target;
+      const isGuestSlotOnly =
+        (bld.targetType === 4 || bld.targetType === 7) &&
+        ((task.insideSlot && task.insideSlot.slotIdx > 0) ||
+          (!task.insideSlot && Array.isArray(task.preferredSlots) && task.preferredSlots.length > 0 && !task.preferredSlots.includes(0)));
+      // Authentic b.java:3209: Dancers cannot dance in Sàn disco without a DJ, and diners cannot eat in Bếp without a Chef — stand outside instead!
+      if (isGuestSlotOnly && !isBuildingSlot0ActiveInside(bld.bid)) {
+        if (task.insideSlot) exitBuildingSlot(d, unitId);
+        state.tasks.delete(unitId);
+        setUnitAnim(unitId, 8, 0);
+        uiChanged = true;
+        continue;
+      }
       if (!task.insideSlot) {
-        const slot = enterBuildingWorkSlot(d, bld.bid, unitId, task.preferredSlots || null);
+        const strictPref = Array.isArray(task.preferredSlots) && task.preferredSlots.length > 0 && !task.preferredSlots.includes(0);
+        const slot = enterBuildingWorkSlot(d, bld.bid, unitId, task.preferredSlots || null, strictPref);
         if (slot) {
           task.insideSlot = slot;
           const info = getVillagerInfo(unitId);
@@ -5208,14 +5245,16 @@ function stepVillagerNeeds() {
           task?.kind === 'workBuilding' && task.target?.targetType === 4 && (task.insideSlot?.slotIdx ?? 0) === 0;
         const isDjInDisco =
           task?.kind === 'workBuilding' && task.target?.targetType === 7 && (task.insideSlot?.slotIdx ?? 0) === 0;
-        if (satiety <= thresh && !isChefInKitchen && tribeFood > 0 && finishedKitchens.length > 0) {
-          const kitchen = pickNearestBld(finishedKitchens, ux, uy);
+        const kitchensWithChef = finishedKitchens.filter((b) => isBuildingSlot0ActiveInside(b.bid));
+        const discosWithDj = finishedDiscos.filter((b) => isBuildingSlot0ActiveInside(b.bid));
+        if (satiety <= thresh && !isChefInKitchen && tribeFood > 0 && kitchensWithChef.length > 0) {
+          const kitchen = pickNearestBld(kitchensWithChef, ux, uy);
           if (kitchen && assignEatTask(id, kitchen)) changed = true;
         } else if (energy <= thresh && finishedHuts.length > 0) {
           const hut = pickNearestBld(finishedHuts, ux, uy, true);
           if (hut && assignRestTask(id, hut)) changed = true;
-        } else if (mood <= thresh && !isDjInDisco && finishedDiscos.length > 0) {
-          const disco = pickNearestBld(finishedDiscos, ux, uy);
+        } else if (mood <= thresh && !isDjInDisco && discosWithDj.length > 0) {
+          const disco = pickNearestBld(discosWithDj, ux, uy);
           if (disco && assignWorkAtBuilding(id, disco, [1, 2, 3, 4, 5, 6])) changed = true;
         }
       }
@@ -5682,6 +5721,12 @@ function openCanvasBuildingMenu(bld) {
       label: 'VÀO NHÀ ĂN DÙNG BỮA',
       iconAnim: 13,
       action: () => {
+        if (!isBuildingSlot0ActiveInside(bld.bid)) {
+          showWarning('⚠ Nhà ăn chưa có Đầu bếp nấu ăn! Hãy cử Đầu bếp vào trước.');
+          state.canvasMenu = null;
+          render();
+          return;
+        }
         const uid = state.selectedUnit || findNearestVillager(bld.x, bld.y, true);
         if (uid) assignEatTask(uid, bld);
         state.canvasMenu = null;
@@ -5704,6 +5749,12 @@ function openCanvasBuildingMenu(bld) {
       label: 'VÀO SÀN NHẢY DISCO',
       iconAnim: 13,
       action: () => {
+        if (!isBuildingSlot0ActiveInside(bld.bid)) {
+          showWarning('⚠ Sàn disco chưa có DJ chơi nhạc! Hãy cử DJ lên bàn nhạc trước.');
+          state.canvasMenu = null;
+          render();
+          return;
+        }
         const uid = state.selectedUnit || findNearestVillager(bld.x, bld.y, true);
         if (uid) assignWorkAtBuilding(uid, bld, [1, 2, 3, 4, 5, 6]);
         state.canvasMenu = null;
