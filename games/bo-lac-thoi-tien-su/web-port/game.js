@@ -218,6 +218,7 @@ const state = {
   weaponQueues: new Map(), // bid -> [q0..q5] weapon forge orders (starts at 0)
   shrineRituals: new Map(), // bid -> { spell, ticks, duration } active Shaman spell rituals
   animalMoves: new Map(), // aid -> { dx, dy, progress, total, anim } smooth sub-tile animal movement
+  hpBonus: new Map(), // uid -> extra max HP from Phòng thủ spell
   animalIdle: new Map(), // aid -> { anim, ticks } random idle variant (grazing/sniffing) from mo[184]
   animalFight: new Map(), // aid -> { ticks } attack animation cycle
   siteMaterials: new Map(), // bid -> { wood, stone, tools, owner } pending material deliveries from Storage
@@ -2418,9 +2419,9 @@ function applyShamanSpellEffect(spell, bld) {
     state.message = '✨ Pháp sư hoàn tất Chữa vết thương / Giải độc: toàn bộ bộ lạc đã hồi đầy máu!';
   } else if (spell.id === 'shield') {
     for (const id of ids) {
-      const nextMax = Math.min(120, (e[6767 + id] & 0xff) + 10);
-      e[6767 + id] = nextMax;
-      e[1919 + id] = Math.min(nextMax, (e[1919 + id] & 0xff) + 10);
+      state.hpBonus.set(id, Math.min(30, (state.hpBonus.get(id) || 0) + 10));
+      syncUnitMaxHp(id);
+      e[1919 + id] = Math.min(e[6767 + id] & 0xff, (e[1919 + id] & 0xff) + 10);
     }
     state.message = '✨ Pháp sư hoàn tất Phòng thủ: +10 HP tối đa cho toàn bộ bộ lạc!';
   } else if (spell.id === 'love') {
@@ -5150,9 +5151,6 @@ function stepSimulation() {
         const curLvRaw = (bType === 1 ? e[1717 + unitId] : e[1616 + unitId]) & 0xff;
         const trainTarget = 220 + curLvRaw * 35;
         if (task.workTicks >= trainTarget) {
-          const nextMax = Math.min(120, (e[6767 + unitId] & 0xff) + 8);
-          e[6767 + unitId] = nextMax;
-          e[1919 + unitId] = nextMax;
           const nextLv = Math.min(9, curLvRaw + 1);
           if (bType === 1) {
             e[1717 + unitId] = nextLv; // Melee skill (skillId 14)
@@ -5160,11 +5158,13 @@ function stepSimulation() {
             e[1616 + unitId] = nextLv; // Throwing skill (skillId 15)
           }
           syncTopCombatSkills(unitId);
+          syncUnitMaxHp(unitId);
+          e[1919 + unitId] = e[6767 + unitId];
           if ((unitId > 50 ? 1 : 0) === (state.localTribe ?? 0)) {
             const info = getVillagerInfo(unitId);
             const skName = bType === 1 ? 'Cận chiến' : 'Ném';
             addPopup(bld.x + Math.floor(bld.w / 2), bld.y, `${skName} Lv.${nextLv}!`, '#fff37b');
-            state.message = `${info.role} đã lên kỹ năng ${skName} cấp ${nextLv} (HP ${nextMax})!`;
+            state.message = `${info.role} đã lên kỹ năng ${skName} cấp ${nextLv} (HP tối đa ${e[6767 + unitId] & 0xff})!`;
           }
           if (nextLv >= 9) {
             exitBuildingSlot(d, unitId);
@@ -5817,6 +5817,34 @@ function stepWildAnimals() {
   return changed;
 }
 
+// Max HP by age: children (< 12) do not count (internal 20, HP bar hidden); age 12 = 100 HP and it keeps shrinking
+// with age until old-age death around 60+.
+function getAgeMaxHp(age) {
+  if (age < 12) return 20;
+  if (age <= 12) return 100;
+  if (age <= 40) return Math.round(100 - (age - 12) * 0.7);
+  if (age <= 60) return Math.round(80 - (age - 40) * 2.75);
+  return Math.max(1, Math.round(25 - (age - 60) * 5));
+}
+
+function syncUnitMaxHp(uid) {
+  const d = state.data;
+  if (!d) return false;
+  const e = d.entityData;
+  const age = e[1414 + uid] & 0xff;
+  const bonus = age < 12 ? 0 : Math.min(40, 3 * ((e[1717 + uid] & 0xff) + (e[1616 + uid] & 0xff))) + (state.hpBonus.get(uid) || 0);
+  const target = Math.max(1, Math.min(150, getAgeMaxHp(age) + (age >= 60 ? 0 : bonus)));
+  const curMax = e[6767 + uid] & 0xff;
+  if (curMax === target) return false;
+  const curHp = e[1919 + uid] & 0xff;
+  e[6767 + uid] = target;
+  if (curHp > 0) {
+    e[1919 + uid] = target > curMax ? Math.min(target, curHp + (target - curMax)) : Math.min(curHp, target);
+    if (e[1919 + uid] <= 0) e[1919 + uid] = 1;
+  }
+  return true;
+}
+
 function stepVillagerNeeds() {
   const d = state.data;
   if (!d) return false;
@@ -5887,8 +5915,8 @@ function stepVillagerNeeds() {
               exitBuildingSlot(d, id);
               state.tasks.delete(id);
             }
-            e[6767 + id] = 42;
-            e[1919 + id] = 42;
+            syncUnitMaxHp(id);
+            e[1919 + id] = e[6767 + id];
             syncUnitAvatar(d, id, id);
             setUnitAnim(id, 8, 0);
             if (tribe === (state.localTribe ?? 0)) {
@@ -5907,6 +5935,31 @@ function stepVillagerNeeds() {
           setUnitAnim(id, Math.random() < 0.45 ? 46 : 14, 0);
         }
         continue;
+      }
+
+      // Adults grow older every year (140 ticks): max HP shrinks with age, and from ~60 they die of old age
+      if (state.animTick % 140 === 0) {
+        const nextAge = Math.min(120, age + 1);
+        e[1414 + id] = nextAge;
+        syncUnitMaxHp(id);
+        if (nextAge >= 60 && (e[1919 + id] & 0xff) > 0) {
+          const chance = Math.min(1, (nextAge - 59) * 0.25);
+          if (Math.random() < chance) {
+            const nm = getVillagerName(d, id);
+            if (isUnitInsideBuilding(d, id)) exitBuildingSlot(d, id);
+            state.tasks.delete(id);
+            applyUnitDamage(0, id, 255);
+            if (tribe === (state.localTribe ?? 0)) {
+              state.message = `💀 ${nm} đã qua đời vì tuổi già (${nextAge} tuổi)!`;
+              showWarning(`💀 ${nm} đã chết vì tuổi già (${nextAge} tuổi)`);
+            }
+            changed = true;
+            continue;
+          }
+        }
+        changed = true;
+      } else if (state.animTick % 28 === 0 && syncUnitMaxHp(id)) {
+        changed = true;
       }
 
       if (task?.kind === 'rest' || task?.kind === 'eat' || task?.kind === 'courtship') continue;
