@@ -6096,9 +6096,15 @@ function getBuildingOccupants(bid) {
 
 function evictUnitFromBuilding(uid, bld) {
   if (!state.data || !uid) return false;
+  const e = state.data.entityData;
+  const leavingSlot = e[4646 + uid];
   const ok = exitBuildingSlot(state.data, uid);
   state.tasks.delete(uid);
   state.savedJobs.delete(uid);
+  if (bld?.targetType === 8 && leavingSlot === 0) {
+    state.shrineRituals.delete(bld.bid);
+  }
+  e[2222 + uid] = 0;
   setUnitCarry(uid, 0, 0);
   setUnitAnim(uid, 8, 0);
   state.selectedUnit = uid;
@@ -6107,9 +6113,80 @@ function evictUnitFromBuilding(uid, bld) {
   state.activePath = [];
   const info = getVillagerInfo(uid);
   if (bld) {
-    state.message = `🚪 ${info.role} đã rời khỏi ${bld.spec.name}!`;
+    state.message = `🚪 ${info.role} đã rời khỏi ${bld.spec.name} và hủy công việc tại đây!`;
   }
   return ok;
+}
+
+function getOccupantRoleTag(bld, uid) {
+  const e = state.data?.entityData;
+  if (!e || !bld) return '';
+  const slotIdx = e[4646 + uid];
+  if (bld.underConstruction) return 'THỢ XÂY';
+  if (bld.targetType === 0 && slotIdx === 0) return 'THỢ RÈN';
+  if (bld.targetType === 1) return `CẤP ${e[1717 + uid] & 0xff}`;
+  if (bld.targetType === 4) return slotIdx === 0 ? 'ĐẦU BẾP' : 'ĐANG ĂN';
+  if (bld.targetType === 5) return `CẤP ${e[1616 + uid] & 0xff}`;
+  if (bld.targetType === 7) return slotIdx === 0 ? 'DJ' : 'NHẢY';
+  if (bld.targetType === 8) return slotIdx === 0 ? 'PHÁP SƯ' : 'CHỮA TRỊ';
+  if (bld.targetType === 9) return 'TRINH SÁT';
+  if (bld.targetType === 10) return 'TRẺ EM';
+  if (bld.targetType === 11) return 'LÍNH GÁC';
+  if (bld.targetType === 2) return 'ĐANG NGỦ';
+  return '';
+}
+
+function buildOccupantMenuItems(bld) {
+  const e = state.data?.entityData;
+  if (!e || !bld) return [];
+  const occupants = getBuildingOccupants(bld.bid);
+  if (occupants.length === 0) return [];
+  const out = [];
+  const isTrainingHall = !bld.underConstruction && (bld.targetType === 1 || bld.targetType === 5);
+  for (const uid of occupants) {
+    const info = getVillagerInfo(uid);
+    const tag = getOccupantRoleTag(bld, uid);
+    const hp = e[1919 + uid] & 0xff;
+    const maxHp = Math.max(1, e[6767 + uid] & 0xff);
+    const item = {
+      label: `RỜI NHÀ: ${info.role.toUpperCase()}${tag ? ` (${tag})` : ''}`,
+      unitId: uid,
+      costText: `Click/Enter: Cho rời ${bld.spec.name} & bỏ việc · HP ${hp}/${maxHp}`,
+      canAfford: true,
+      action: () => {
+        evictUnitFromBuilding(uid, bld);
+        if (getBuildingOccupants(bld.bid).length > 0) {
+          openCanvasBuildingMenu(bld);
+        } else {
+          state.canvasMenu = null;
+          render();
+        }
+      },
+    };
+    if (isTrainingHall) {
+      item.rankBadge = bld.targetType === 5 ? e[1616 + uid] & 0xff : e[1717 + uid] & 0xff;
+    }
+    out.push(item);
+  }
+  if (occupants.length >= 2) {
+    out.push({
+      label: `CHO TẤT CẢ RỜI NHÀ (${occupants.length})`,
+      glyph: '🚪',
+      costText: `Đưa cả ${occupants.length} người rời khỏi ${bld.spec.name} & hủy việc`,
+      canAfford: true,
+      action: () => {
+        const list = getBuildingOccupants(bld.bid);
+        state.selectedUnits.clear();
+        for (const uid of list) evictUnitFromBuilding(uid, bld);
+        for (const uid of list) state.selectedUnits.add(uid);
+        state.selectedUnit = list[0] || 0;
+        state.message = `🚪 Đã cho ${list.length} người rời khỏi ${bld.spec.name}!`;
+        state.canvasMenu = null;
+        render();
+      },
+    });
+  }
+  return out;
 }
 
 function openCanvasBuildingMenu(bld) {
@@ -6119,8 +6196,18 @@ function openCanvasBuildingMenu(bld) {
   state.selectedBuildingBid = bld.bid;
   const level = state.data.entityData[9115 + bld.bid] & 0xff;
   const items = [];
+  const occupantItems = buildOccupantMenuItems(bld);
+  const putOccupantsAfterMain = !bld.underConstruction && (bld.targetType === 0 || bld.targetType === 8);
 
-  if (bld.targetType === 0) {
+  // For every building (except finished Kho vũ khí / Khu thánh địa which keep craft/spell icons first),
+  // list all people currently inside right at the front so 1 click ejects them and abandons their task!
+  if (!putOccupantsAfterMain && occupantItems.length > 0) {
+    items.push(...occupantItems);
+  }
+
+  if (bld.underConstruction) {
+    // Unfinished construction/upgrade site: show occupants (builders inside) + Demolish below
+  } else if (bld.targetType === 0) {
     // Kho vũ khí: Authentic weapon production queue (starts at 0; ↑/Click = +1, ↓/Right-click = -1)!
     const q = getWeaponQueue(bld.bid);
     for (const w of WEAPONS) {
@@ -6139,18 +6226,22 @@ function openCanvasBuildingMenu(bld) {
         decreaseAction: () => adjustWeaponQueue(bld.bid, w.id, -1),
       });
     }
-    items.push({
-      label: 'CỬ THỢ RÈN VÀO XƯỞNG',
-      iconAnim: 13,
-      action: () => {
-        const uid = state.selectedUnit || findNearestVillager(bld.x, bld.y, true);
-        if (uid) assignWorkAtBuilding(uid, bld, [0]);
-        state.canvasMenu = null;
-        render();
-      },
-    });
+    if (occupantItems.length > 0) {
+      items.push(...occupantItems);
+    } else {
+      items.push({
+        label: 'CỬ THỢ RÈN VÀO XƯỞNG',
+        iconAnim: 13,
+        action: () => {
+          const uid = state.selectedUnit || findNearestVillager(bld.x, bld.y, true);
+          if (uid) assignWorkAtBuilding(uid, bld, [0]);
+          state.canvasMenu = null;
+          render();
+        },
+      });
+    }
   } else if (bld.targetType === 8) {
-    // Khu thánh địa: 4 spells with authentic animations 19..22 + Shaman occupant leave/assign slot
+    // Khu thánh địa: 4 spells with authentic animations 19..22 + Shaman/Patient leave or assign slot
     const hasShaman = isBuildingSlot0Occupied(bld.bid);
     SPELLS.forEach((sp, idx) => {
       items.push({
@@ -6165,24 +6256,10 @@ function openCanvasBuildingMenu(bld) {
         },
       });
     });
-    const shrineOccupants = getBuildingOccupants(bld.bid);
-    if (shrineOccupants.length > 0) {
-      for (const uid of shrineOccupants) {
-        const info = getVillagerInfo(uid);
-        items.push({
-          label: `RỜI THÁNH ĐỊA: ${info.role.toUpperCase()}`,
-          unitId: uid,
-          costText: 'Click/Enter: Cho Pháp sư rời khỏi Khu thánh địa',
-          canAfford: true,
-          action: () => {
-            state.shrineRituals.delete(bld.bid);
-            evictUnitFromBuilding(uid, bld);
-            state.canvasMenu = null;
-            render();
-          },
-        });
-      }
-    } else {
+    if (occupantItems.length > 0) {
+      items.push(...occupantItems);
+    }
+    if (!hasShaman) {
       items.push({
         label: 'CỬ PHÁP SƯ HÀNH LỄ',
         iconAnim: 13,
@@ -6330,52 +6407,6 @@ function openCanvasBuildingMenu(bld) {
     });
   } else if ([1, 5, 9, 11].includes(bld.targetType)) {
     const isTrainingHall = bld.targetType === 1 || bld.targetType === 5;
-    if (isTrainingHall) {
-      const e = state.data.entityData;
-      const occupants = getBuildingOccupants(bld.bid);
-      for (const uid of occupants) {
-        const info = getVillagerInfo(uid);
-        const rank = bld.targetType === 5 ? e[1616 + uid] & 0xff : e[1717 + uid] & 0xff;
-        const hp = e[1919 + uid] & 0xff;
-        const maxHp = Math.max(1, e[6767 + uid] & 0xff);
-        items.push({
-          label: `RỜI PHÒNG: ${info.role.toUpperCase()} (CẤP ${rank})`,
-          unitId: uid,
-          rankBadge: rank,
-          costText: `Click/Enter: Cho rời ${bld.spec.name} · HP ${hp}/${maxHp}`,
-          canAfford: true,
-          action: () => {
-            evictUnitFromBuilding(uid, bld);
-            if (getBuildingOccupants(bld.bid).length > 0) {
-              openCanvasBuildingMenu(bld);
-            } else {
-              state.canvasMenu = null;
-              render();
-            }
-          },
-        });
-      }
-      if (occupants.length >= 2) {
-        items.push({
-          label: `CHO TẤT CẢ RỜI PHÒNG (${occupants.length})`,
-          glyph: '🚪',
-          costText: `Đưa cả ${occupants.length} người ra ngoài ${bld.spec.name}`,
-          canAfford: true,
-          action: () => {
-            const list = getBuildingOccupants(bld.bid);
-            state.selectedUnits.clear();
-            for (const uid of list) {
-              evictUnitFromBuilding(uid, bld);
-            }
-            for (const uid of list) state.selectedUnits.add(uid);
-            state.selectedUnit = list[0] || 0;
-            state.message = `🚪 Đã cho ${list.length} người rời khỏi ${bld.spec.name}!`;
-            state.canvasMenu = null;
-            render();
-          },
-        });
-      }
-    }
     const workLabels = {
       1: 'LUYỆN CẬN CHIẾN (+8 HP)',
       5: 'LUYỆN NÉM (+8 HP)',
@@ -7127,6 +7158,44 @@ function updatePanel() {
         choicesNode.classList.add('scrollable');
         let btnIdx = 0;
 
+        // Universal occupant leave buttons for EVERY building (including scaffolds/upgrades!)
+        const panelOccupants = getBuildingOccupants(bld.bid);
+        if (panelOccupants.length > 0) {
+          const e = state.data.entityData;
+          for (const uid of panelOccupants) {
+            const info = getVillagerInfo(uid);
+            const tag = getOccupantRoleTag(bld, uid);
+            const hp = e[1919 + uid] & 0xff;
+            const maxHp = Math.max(1, e[6767 + uid] & 0xff);
+            addChoiceButton(
+              `RỜI NHÀ: ${info.role}${tag ? ` (${tag})` : ''}`,
+              btnIdx++,
+              false,
+              () => {
+                evictUnitFromBuilding(uid, bld);
+                if (state.canvasMenu?.kind === 'building') {
+                  if (getBuildingOccupants(bld.bid).length > 0) openCanvasBuildingMenu(bld);
+                  else state.canvasMenu = null;
+                }
+                render();
+              },
+              `HP ${hp}/${maxHp}`
+            );
+          }
+          if (panelOccupants.length >= 2) {
+            addChoiceButton(`CHO TẤT CẢ RỜI NHÀ (${panelOccupants.length})`, btnIdx++, false, () => {
+              const list = getBuildingOccupants(bld.bid);
+              state.selectedUnits.clear();
+              for (const uid of list) evictUnitFromBuilding(uid, bld);
+              for (const uid of list) state.selectedUnits.add(uid);
+              state.selectedUnit = list[0] || 0;
+              state.message = `🚪 Đã cho ${list.length} người rời khỏi ${bld.spec.name}!`;
+              state.canvasMenu = null;
+              render();
+            });
+          }
+        }
+
         if (bld.targetType === 0) {
           // Kho vũ khí: craft & equip all 6 authentic weapons!
           for (const w of WEAPONS) {
@@ -7152,47 +7221,6 @@ function updatePanel() {
             }
           });
         } else if ([1, 4, 5, 7, 8, 9, 11].includes(bld.targetType)) {
-          if (bld.targetType === 1 || bld.targetType === 5) {
-            const e = state.data.entityData;
-            const occupants = getBuildingOccupants(bld.bid);
-            for (const uid of occupants) {
-              const info = getVillagerInfo(uid);
-              const rank = bld.targetType === 5 ? e[1616 + uid] & 0xff : e[1717 + uid] & 0xff;
-              const hp = e[1919 + uid] & 0xff;
-              const maxHp = Math.max(1, e[6767 + uid] & 0xff);
-              addChoiceButton(
-                `RỜI PHÒNG: ${info.role} (Cấp ${rank})`,
-                btnIdx++,
-                false,
-                () => {
-                  evictUnitFromBuilding(uid, bld);
-                  if (state.canvasMenu?.kind === 'building') {
-                    if (getBuildingOccupants(bld.bid).length > 0) openCanvasBuildingMenu(bld);
-                    else state.canvasMenu = null;
-                  }
-                  render();
-                },
-                `HP ${hp}/${maxHp}`
-              );
-            }
-            if (occupants.length >= 2) {
-              addChoiceButton(
-                `CHO TẤT CẢ RỜI PHÒNG (${occupants.length})`,
-                btnIdx++,
-                false,
-                () => {
-                  const list = getBuildingOccupants(bld.bid);
-                  state.selectedUnits.clear();
-                  for (const uid of list) evictUnitFromBuilding(uid, bld);
-                  for (const uid of list) state.selectedUnits.add(uid);
-                  state.selectedUnit = list[0] || 0;
-                  state.message = `🚪 Đã cho ${list.length} người rời khỏi ${bld.spec.name}!`;
-                  state.canvasMenu = null;
-                  render();
-                }
-              );
-            }
-          }
           const jobLabels = {
             1: 'CỬ DÂN VÀO LUYỆN CẬN CHIẾN (+8 HP)',
             4: 'CỬ ĐẦU BẾP VÀO NẤU ĂN (+2 ĂN)',
@@ -7607,7 +7635,10 @@ function confirm() {
     }
     if (isOwnBldOcc) {
       const bld = getPlayerBuildings(myTribe).find((b) => b.bid === -occ);
-      const hasSel = getActiveSelectionIds().length > 0;
+      const selIds = getActiveSelectionIds();
+      const hasSel = selIds.length > 0;
+      const allSelAlreadyInside =
+        bld && hasSel && selIds.every((uid) => (state.data.entityData[4444 + uid] & 0xff) === bld.bid);
       // Direct 1-click entry when a villager is already selected (no forced menu popup!)
       // Exception: Kho chứa (bType 6) opens weapon swap menu if it has weapons in stock
       const storageHasWeapons =
@@ -7618,6 +7649,7 @@ function confirm() {
       if (
         bld &&
         hasSel &&
+        !allSelAlreadyInside &&
         !workshopAlreadyStaffed &&
         !shrineAlreadyStaffed &&
         (bld.underConstruction || (bld.targetType !== 6 && bld.targetType !== 3) || (!storageHasWeapons && bld.targetType === 3))
