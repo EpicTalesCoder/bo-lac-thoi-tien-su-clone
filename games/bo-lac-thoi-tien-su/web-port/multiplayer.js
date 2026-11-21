@@ -440,6 +440,9 @@ export function packWorldSnapshot(data, state) {
     projectiles: (state.projectiles || []).map((p) => ({
       x0: p.x0, y0: p.y0, x1: p.x1, y1: p.y1, age: p.age, duration: p.duration, weaponId: p.weaponId,
     })),
+    deathEffects: (state.deathEffects || []).map((fx) => ({
+      uid: fx.uid, x: fx.x, y: fx.y, dir: fx.dir, animId: fx.animId, frame: fx.frame, maxFrames: fx.maxFrames,
+    })),
     winner: state.mpWinner ?? null,
   };
 }
@@ -558,6 +561,7 @@ export function applyWorldSnapshot(data, state, snap, revealFogFn, getBuildingSp
   }
 
   state.projectiles = snap.projectiles || [];
+  state.deathEffects = snap.deathEffects || [];
   if (snap.winner !== null && snap.winner !== undefined) {
     state.mpWinner = snap.winner;
   }

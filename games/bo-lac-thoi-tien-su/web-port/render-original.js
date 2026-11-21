@@ -1406,6 +1406,29 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
     }
   }
 
+  // Pass 4a2: Authentic villager death animations (anim 108, 18 frames)
+  if (state.deathEffects && state.deathEffects.length > 0 && data.entityFieldOffsets) {
+    const e = data.entityData;
+    const fo = data.entityFieldOffsets;
+    for (const fx of state.deathEffects) {
+      if (getFogState(data, fx.x, fx.y) >= 2) continue;
+      const sx = (fx.x - camX) * CELL_WIDTH;
+      const sy = originY + (fx.y - camY) * CELL_HEIGHT;
+      const prevAnim = e[fo[29] + fx.uid];
+      const prevFrame = e[fo[30] + fx.uid];
+      e[fo[29] + fx.uid] = fx.animId;
+      e[fo[30] + fx.uid] = Math.min(fx.maxFrames - 1, fx.frame);
+      ctx.save();
+      if (fx.frame > fx.maxFrames - 5) {
+        ctx.globalAlpha = Math.max(0.15, (fx.maxFrames - fx.frame) / 5);
+      }
+      drawEntitySprite(ctx, data, fx.uid, sx, sy, fx.dir, 29, imageCache, { selectedUnit: 0, hoverUnit: 0, animTick });
+      ctx.restore();
+      e[fo[29] + fx.uid] = prevAnim;
+      e[fo[30] + fx.uid] = prevFrame;
+    }
+  }
+
   // Pass 4c: Authentic building placement ghost/frame preview + per-tile green/red footprint
   if (state.buildPreview) {
     const bp = state.buildPreview;
@@ -1436,31 +1459,26 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
       }
     }
 
-    // 2. Authentic COMPLETE building blueprint / ghost sprite drawn directly from /pd0 (kind 0 base + kind 1 walls + kind 2/6 roof/decor)
+    // 2. Authentic INTACT building structure ghost sprite (skip kind 0 ground tiles which sit on the green/red grid)
     if (bp.bType !== undefined && bp.bType >= 0 && bp.bType <= 11) {
       const shorts = data.shortSpriteTables;
       const bytes = data.byteSpriteTables;
-      const startIdx = shorts[0][bp.bType + 1];
-      const partCount = bytes[0][bp.bType + 1] & 0xff;
+      let idx = shorts[0][bp.bType + 1];
+      let remaining = bytes[0][bp.bType + 1] & 0xff;
+      // Advance past all leading kind===0 ground footprint entries exactly like drawMapObject Layer 1
+      while (remaining > 0 && idx < bytes[3].length && (bytes[3][idx] & 7) === 0) {
+        idx++;
+        remaining--;
+      }
       let resSkip = 0;
-      let groundCellIdx = -1;
       ctx.globalAlpha = bp.valid ? 0.85 : 0.55;
-      for (let i = 0, idx = startIdx; i < partCount && idx < shorts[1].length; i++, idx++) {
+      for (let i = 0; i < remaining && idx < shorts[1].length; i++, idx++) {
         const kind = bytes[3][idx] & 7;
         const stageReq = (bytes[3][idx] & 0xff) >>> 6;
+        if (kind === 0 || stageReq > 1) continue;
         const xHi = ((shorts[1][idx] & 0xc000) >>> 14) << 7;
-        if (kind === 0) {
-          if (stageReq === 0) groundCellIdx++;
-          if (stageReq <= 1 && groundCellIdx >= 0) {
-            const gx = groundCellIdx % bp.width;
-            const gy = Math.floor(groundCellIdx / bp.width);
-            const px = bx + gx * CELL_WIDTH + toSignedByte(bytes[1][idx]) + xHi;
-            const py = by + gy * CELL_HEIGHT + toSignedByte(bytes[2][idx]);
-            drawComposite(ctx, data, shorts[1][idx] & 0xfff, px, py, imageCache);
-          }
-          continue;
-        }
-        if (stageReq > 1) continue;
+        const px = bx + toSignedByte(bytes[1][idx]) + xHi;
+        const py = by + toSignedByte(bytes[2][idx]);
         if (kind === 1) {
           if (bp.bType === 6 && resSkip < 5) {
             resSkip++;
@@ -1470,12 +1488,8 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
             resSkip++;
             continue;
           }
-          const px = bx + toSignedByte(bytes[1][idx]) + xHi;
-          const py = by + toSignedByte(bytes[2][idx]);
           drawComposite(ctx, data, shorts[1][idx] & 0xfff, px, py, imageCache);
         } else if (kind === 2 || kind === 6) {
-          const px = bx + toSignedByte(bytes[1][idx]) + xHi;
-          const py = by + toSignedByte(bytes[2][idx]);
           drawAnimation(ctx, data, shorts[1][idx] & 0xfff, px, py, animTick, imageCache);
         }
       }

@@ -206,6 +206,7 @@ const state = {
   treeWood: new Map(), // remaining wood per tree cell "x,y" (12 wood/tree; clears to grass when depleted)
   activePath: [],
   dustEffects: [],
+  deathEffects: [],
   projectiles: [],
   popups: [],
 };
@@ -323,20 +324,34 @@ function applyUnitDamage(attackerId, targetId, dmg) {
   const ty = e[101 + targetId] & 0xff;
   addPopup(tx, ty, `-${dmg}`, targetId <= 50 ? '#ff6f61' : '#ffd84d');
 
-  if (targetId <= 50 && attackerId > 50) {
-    alertCombat('Chúng ta đang bị tấn công!');
-    // Auto self-defense if idle player villager is struck
-    if (!state.tasks.has(targetId) && nextHp > 0) {
-      assignAttackTask(targetId, 'unit', attackerId);
-    }
-  } else if (targetId > 50 && attackerId <= 50) {
-    // Enemy retaliates if attacked
-    if (!state.enemyTasks.has(targetId) && nextHp > 0) {
-      assignEnemyAttack(targetId, 'unit', attackerId);
+  if (nextHp > 0 && (e[1414 + targetId] & 0xff) >= 12) {
+    if (targetId <= 50 && attackerId > 50) {
+      if ((state.localTribe ?? 0) === 0) alertCombat('Chúng ta đang bị tấn công!');
+      if (state.tasks.get(targetId)?.kind !== 'attackUnit') {
+        assignAttackTask(targetId, 'unit', attackerId);
+      }
+    } else if (targetId > 50 && attackerId <= 50) {
+      if (state.mpMode) {
+        if (state.tasks.get(targetId)?.kind !== 'attackUnit') {
+          assignAttackTask(targetId, 'unit', attackerId);
+        }
+      } else if (!state.enemyTasks.has(targetId)) {
+        assignEnemyAttack(targetId, 'unit', attackerId);
+      }
     }
   }
 
   if (nextHp <= 0) {
+    // Spawn authentic villager death animation (anim 108, 18 frames — b.java:1484)
+    state.deathEffects.push({
+      uid: targetId,
+      x: tx,
+      y: ty,
+      dir: e[606 + targetId] & 7,
+      animId: 108,
+      frame: 0,
+      maxFrames: 18,
+    });
     exitBuildingSlot(d, targetId);
     clearUnitFromOccupancy(d, targetId);
     state.tasks.delete(targetId);
@@ -787,7 +802,7 @@ function syncUnitJobBadge(unitId) {
     } else if (task.kind === 'hunt' || task.kind === 'eat') {
       badge = 3; // authentic meat/hunt/eat badge (mo[41][12] = 3)
     } else if (task.kind === 'attackUnit' || task.kind === 'attackBuilding') {
-      badge = 14; // authentic combat badge (sprite 591)
+      badge = 0; // No overhead icon during combat!
     } else if (task.kind === 'workBuilding') {
       const bt = task.target?.targetType;
       const slotIdx = task.insideSlot?.slotIdx ?? (Array.isArray(task.preferredSlots) && !task.preferredSlots.includes(0) ? 1 : 0);
@@ -2543,10 +2558,14 @@ function stepSimulation() {
   const fo = d.entityFieldOffsets;
   let uiChanged = false;
 
-  // Step building completion dust effects (f.java s() d(74)) and floating popups
+  // Step building completion dust effects (f.java s() d(74)), villager death anims (anim 108), and popups
   for (let i = state.dustEffects.length - 1; i >= 0; i--) {
     state.dustEffects[i].frame++;
     if (state.dustEffects[i].frame >= state.dustEffects[i].maxFrames) state.dustEffects.splice(i, 1);
+  }
+  for (let i = state.deathEffects.length - 1; i >= 0; i--) {
+    state.deathEffects[i].frame++;
+    if (state.deathEffects[i].frame >= state.deathEffects[i].maxFrames) state.deathEffects.splice(i, 1);
   }
   for (let i = state.popups.length - 1; i >= 0; i--) {
     state.popups[i].age++;
