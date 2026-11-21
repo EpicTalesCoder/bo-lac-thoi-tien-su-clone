@@ -163,7 +163,40 @@ export function drawLeaf(ctx, data, spriteIndex, x, y, imageCache, paletteSwap =
   }
 }
 
-export function drawComposite(ctx, data, compositeIndex, x, y, imageCache, paletteSwap = -1, depth = 0) {
+export function getCompositeBounds(data, compositeIndex, x = 0, y = 0, depth = 0, out = null) {
+  const res = out || { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+  if (compositeIndex < 0 || depth > 8) return res;
+  const shorts = data.shortSpriteTables;
+  const bytes = data.byteSpriteTables;
+  if (compositeIndex >= shorts[9].length || compositeIndex >= bytes[16].length) return res;
+
+  const packed = shorts[9][compositeIndex] & 0xffff;
+  const start = packed & 0x1fff;
+  const count = bytes[16][compositeIndex] & 0x3f;
+
+  for (let i = start; i < start + count; i++) {
+    if (i >= shorts[10].length) break;
+    const raw = shorts[10][i] & 0xffff;
+    const sprite = raw & 0x1fff;
+    const dx = toSignedByte(bytes[18][i]) + (((raw & 0xc000) >>> 14) << 7);
+    const dy = toSignedByte(bytes[19][i]);
+    if (((raw & 0x2000) >>> 13) === 0) {
+      const w = bytes[23][sprite] & 0xff;
+      const h = bytes[24][sprite] & 0xff;
+      if (w > 0 && h > 0) {
+        res.minX = Math.min(res.minX, x + dx);
+        res.minY = Math.min(res.minY, y + dy);
+        res.maxX = Math.max(res.maxX, x + dx + w);
+        res.maxY = Math.max(res.maxY, y + dy + h);
+      }
+    } else {
+      getCompositeBounds(data, sprite, x + dx, y + dy, depth + 1, res);
+    }
+  }
+  return res;
+}
+
+function drawComposite(ctx, data, compositeIndex, x, y, imageCache, paletteSwap = -1, depth = 0) {
   if (compositeIndex < 0 || depth > 8) return;
   const shorts = data.shortSpriteTables;
   const bytes = data.byteSpriteTables;
@@ -1020,23 +1053,37 @@ function drawAuthenticBottomMenu(ctx, data, state, imageCache) {
     ctx.save();
     ctx.translate(ox, 0);
 
-    // Building portrait frame (composite 617) + crisp 1:1 original building icon (680 + bType), zero fractional scaling!
-    drawComposite(ctx, data, 617, 8, panelY + 13, imageCache);
+    // Full unclipped building preview frame (76x66) cleanly centered using exact composite bounds so every
+    // building (up to 69x59) fits 100% inside the frame with zero cropping or offset!
+    const boxX = -18;
+    const boxY = panelY - 8;
+    const boxW = 76;
+    const boxH = 66;
+    ctx.fillStyle = '#473010';
+    ctx.fillRect(boxX - 2, boxY - 2, boxW + 4, boxH + 4);
+    ctx.fillStyle = '#d2c57a';
+    ctx.fillRect(boxX, boxY, boxW, boxH);
+    ctx.strokeStyle = '#7c5d22';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(boxX + 1.5, boxY + 1.5, boxW - 3, boxH - 3);
     if (item && item.bType !== undefined) {
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(10, panelY + 14, 44, 42);
-      ctx.clip();
-      drawComposite(ctx, data, 680 + item.bType, 16, panelY + 12, imageCache);
-      ctx.restore();
+      const compId = 680 + item.bType;
+      const b = getCompositeBounds(data, compId);
+      const bw = b.maxX > b.minX ? b.maxX - b.minX : 44;
+      const bh = b.maxY > b.minY ? b.maxY - b.minY : 44;
+      const minX = Number.isFinite(b.minX) ? b.minX : 0;
+      const minY = Number.isFinite(b.minY) ? b.minY : 0;
+      const drawX = Math.round(boxX + (boxW - bw) / 2 - minX);
+      const drawY = Math.round(boxY + (boxH - bh) / 2 - minY);
+      drawComposite(ctx, data, compId, drawX, drawY, imageCache);
     }
 
-    // Left / Right selector arrows below building icon (matching Panel 6 idx 1093 & 1095)
+    // Left / Right selector arrows neatly centered below the building preview box
     if (menu.selected > 0) {
-      drawAnimation(ctx, data, 1, 14, panelY + 60, Math.floor(animTick / 2), imageCache);
+      drawAnimation(ctx, data, 1, 2, panelY + 62, Math.floor(animTick / 2), imageCache);
     }
     if (menu.selected < items.length - 1) {
-      drawAnimation(ctx, data, 2, 40, panelY + 60, Math.floor(animTick / 2), imageCache);
+      drawAnimation(ctx, data, 2, 30, panelY + 62, Math.floor(animTick / 2), imageCache);
     }
 
     // Title & wrapped description in parchment box (x=64..228, y=panelY+22..panelY+76)

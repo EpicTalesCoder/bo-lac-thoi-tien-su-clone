@@ -6042,17 +6042,18 @@ function handleCanvasMenuClick(x, y) {
     const panelY = LOGICAL_HEIGHT - 86;
     const ox = Math.floor((LOGICAL_WIDTH - 240) / 2);
     const lx = x - ox;
-    if (y < panelY) {
+    const inPreviewBox = lx >= -20 && lx <= 60 && y >= panelY - 10 && y < panelY + 58;
+    if (y < panelY && !inPreviewBox) {
       closeCanvasMenu();
       return true;
     }
-    // Left arrow area (lx < 36, y >= panelY + 46)
-    if (lx >= 0 && lx < 36 && y >= panelY + 46 && y < LOGICAL_HEIGHT - 22) {
+    // Left arrow area below preview box
+    if (lx >= -20 && lx < 20 && y >= panelY + 56 && y < LOGICAL_HEIGHT - 22) {
       moveCanvasMenuSelection(-1);
       return true;
     }
-    // Right arrow area (lx 36..64, y >= panelY + 46)
-    if (lx >= 36 && lx <= 64 && y >= panelY + 46 && y < LOGICAL_HEIGHT - 22) {
+    // Right arrow area below preview box
+    if (lx >= 20 && lx <= 60 && y >= panelY + 56 && y < LOGICAL_HEIGHT - 22) {
       moveCanvasMenuSelection(1);
       return true;
     }
