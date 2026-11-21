@@ -490,6 +490,71 @@ function cancelFlagPlacement() {
   state.flagMode = null;
 }
 
+function findBestStorageWeaponForUnit(unitId, owner) {
+  const d = state.data;
+  if (!d) return null;
+  const e = d.entityData;
+  const r = d.resources?.[owner] || [];
+  const curW = e[6565 + unitId] & 0xff;
+  const curAtk = curW < WEAPONS.length ? WEAPONS[curW].atk : 0;
+  const meleeLv = e[1616 + unitId] & 0xff;
+  const throwLv = e[1717 + unitId] & 0xff;
+  const preferThrowing = throwLv > meleeLv;
+
+  // Priority order matching the villager's highest combat skill!
+  // Throwing weapons: 2=Giáo (+9), 1=Đá ném (+6)
+  // Melee weapons: 5=Rìu nhỏ (+14), 4=Chùy xương (+12), 3=Búa đá (+11), 0=Dùi cui (+5)
+  const order = preferThrowing ? [2, 1, 5, 4, 3, 0] : [5, 4, 3, 0, 2, 1];
+  for (const wid of order) {
+    const stock = r[5 + wid] || 0;
+    const wAtk = WEAPONS[wid].atk;
+    const isPref = preferThrowing ? (wid === 1 || wid === 2) : (wid !== 1 && wid !== 2);
+    const curIsPref = curW < 6 ? (preferThrowing ? (curW === 1 || curW === 2) : (curW !== 1 && curW !== 2)) : false;
+    if (stock > 0 && (wAtk > curAtk || (isPref && !curIsPref && wAtk >= curAtk - 2))) {
+      return { weaponId: wid, fromStock: true };
+    }
+  }
+  // If unarmed and no crafted weapon in stock, allow grabbing 1 Stone (thrower) or 1 Wood (melee) basic weapon
+  if (curW === 9) {
+    const stoneAmt = owner === (state.localTribe ?? 0) ? state.stone : (r[2] || 0);
+    const woodAmt = owner === (state.localTribe ?? 0) ? state.wood : (r[1] || 0);
+    if (preferThrowing && stoneAmt >= 1) return { weaponId: 1, fromStock: false, resType: 'stone' };
+    if (woodAmt >= 1) return { weaponId: 0, fromStock: false, resType: 'wood' };
+    if (stoneAmt >= 1) return { weaponId: 1, fromStock: false, resType: 'stone' };
+  }
+  return null;
+}
+
+function dispatchUnitToBattleFlag(unitId, fx, fy, owner) {
+  const e = state.data.entityData;
+  const enemies = getEnemyIds(owner);
+  let bestEnemy = 0;
+  let bestDist = 12;
+  for (const eid of enemies) {
+    const dist = Math.hypot((e[eid] & 0xff) - fx, (e[101 + eid] & 0xff) - fy);
+    if (dist < bestDist) {
+      bestDist = dist;
+      bestEnemy = eid;
+    }
+  }
+  if (bestEnemy > 0) {
+    assignAttackTask(unitId, 'unit', bestEnemy);
+    return;
+  }
+  const eblds = getEnemyBuildings(owner);
+  let bestBld = null;
+  let bestBDist = 12;
+  for (const b of eblds) {
+    const dist = Math.hypot(b.x - fx, b.y - fy);
+    if (dist < bestBDist) {
+      bestBDist = dist;
+      bestBld = b;
+    }
+  }
+  if (bestBld) assignAttackTask(unitId, 'building', bestBld.bid);
+  else issueGroupMove([unitId], fx, fy);
+}
+
 function confirmFlagAtCursor(owner = state.localTribe ?? 0, overridePos = null) {
   const kind = overridePos?.flagKind || state.flagMode;
   if (!kind || !state.data) return;
@@ -504,7 +569,7 @@ function confirmFlagAtCursor(owner = state.localTribe ?? 0, overridePos = null) 
   // If Guest in 1v1 Multiplayer, forward flag command to Host
   if (state.mpMode && state.localTribe === 1 && !overridePos) {
     mpClient?.sendCommand({ kind: 'flagCommand', flagKind: kind, x: fx, y: fy });
-    state.message = kind === 'attack' ? `⚔ Đã cắm cờ tấn công tại (${fx}, ${fy})!` : `⚑ Đã cắm cờ tập hợp tại (${fx}, ${fy})!`;
+    state.message = kind === 'attack' ? `⚔ Đã cắm cờ chiến đấu tại (${fx}, ${fy})!` : `⚑ Đã cắm cờ tập hợp chiến binh tại (${fx}, ${fy})!`;
     render();
     return;
   }
@@ -517,49 +582,63 @@ function confirmFlagAtCursor(owner = state.localTribe ?? 0, overridePos = null) 
   }
 
   if (kind === 'rally') {
-    if (!overridePos) {
-      state.selectedUnits = new Set(adults);
-      state.selectedUnit = adults[0];
+    // Authentic Rally Command: gathers ONLY ranked/trained warriors (with ^ rank chevrons: melee/throw skill >= 5)!
+    const ranked = adults.filter(
+      (id) => (e[1616 + id] & 0xff) >= 5 || (e[1717 + id] & 0xff) >= 5 || (e[7575 + id] & 0xff) > 5
+    );
+    if (ranked.length === 0) {
+      if (!overridePos) {
+        state.activeFlag = null;
+        showWarning('⚠ Chưa có chiến binh có cấp bậc (^) để tập hợp! Hãy huấn luyện ở Phòng tập / Khu tập ném trước.');
+      }
+      return;
     }
-    issueGroupMove(adults, fx, fy);
     if (!overridePos) {
-      state.message = `⚑ Đã cắm cờ tập hợp ${adults.length} dân làng tại (${fx}, ${fy})!`;
+      state.selectedUnits = new Set(ranked);
+      state.selectedUnit = ranked[0];
+    }
+    issueGroupMove(ranked, fx, fy);
+    if (!overridePos) {
+      state.message = `⚑ Đã cắm cờ tập hợp ${ranked.length} chiến binh có cấp bậc (^) tại (${fx}, ${fy})!`;
       render();
     }
   } else if (kind === 'attack') {
+    // Authentic Battle Command: rallies ALL adult villagers; anyone who can grab a stronger matching weapon from Storage runs there first!
     if (!overridePos) {
       state.selectedUnits = new Set(adults);
       state.selectedUnit = adults[0];
     }
-    // Attack nearest enemy unit or building near the planted flag, or march to the flag!
-    const enemies = getEnemyIds(owner);
-    let bestEnemy = 0;
-    let bestDist = 12;
-    for (const eid of enemies) {
-      const dist = Math.hypot((e[eid] & 0xff) - fx, (e[101 + eid] & 0xff) - fy);
-      if (dist < bestDist) {
-        bestDist = dist;
-        bestEnemy = eid;
-      }
-    }
-    if (bestEnemy > 0) {
-      issueGroupAttack(adults, 'unit', bestEnemy);
-    } else {
-      const eblds = getEnemyBuildings(owner);
-      let bestBld = null;
-      let bestBDist = 12;
-      for (const b of eblds) {
-        const dist = Math.hypot(b.x - fx, b.y - fy);
-        if (dist < bestBDist) {
-          bestBDist = dist;
-          bestBld = b;
+    let armingCount = 0;
+    for (const uid of adults) {
+      const upgrade = findBestStorageWeaponForUnit(uid, owner);
+      const storage = upgrade ? findNearestDropoff(e[uid] & 0xff, e[101 + uid] & 0xff, owner) : null;
+      if (upgrade && storage) {
+        ensureUnitOutside(uid);
+        setUnitCarry(uid, 0, 0);
+        const planned = planUnitPath(uid, storage.x, storage.y, false, storage);
+        if (planned !== null) {
+          e[7777 + uid] = 1; // Sprint to Storage to grab weapon!
+          state.tasks.set(uid, {
+            kind: 'armForBattle',
+            path: planned.path,
+            stepProgress: planned.stepProgress,
+            target: storage,
+            battleX: fx,
+            battleY: fy,
+            owner,
+            workTicks: 0,
+          });
+          armingCount++;
+          continue;
         }
       }
-      if (bestBld) issueGroupAttack(adults, 'building', bestBld.bid);
-      else issueGroupMove(adults, fx, fy);
+      dispatchUnitToBattleFlag(uid, fx, fy, owner);
     }
     if (!overridePos) {
-      state.message = `⚔ Đã cắm cờ tấn công! ${adults.length} chiến binh đang xung phong tới (${fx}, ${fy})!`;
+      state.message =
+        armingCount > 0
+          ? `⚔ Lệnh chiến đấu! ${armingCount} dân đang chạy vào kho lấy vũ khí mạnh nhất, toàn bộ ${adults.length} người tiến tới (${fx}, ${fy})!`
+          : `⚔ Lệnh chiến đấu! Toàn bộ ${adults.length} dân làng đang xung phong tới (${fx}, ${fy})!`;
       render();
     }
   }
@@ -908,6 +987,8 @@ function syncUnitJobBadge(unitId) {
       else if (bt === 9) badge = 13; // Trung tâm PIA=13
       else if (bt === 11) badge = 16; // Chòi canh=16
       else badge = 0;
+    } else if (task.kind === 'armForBattle') {
+      badge = 0;
     } else if (task.kind === 'fetchWeaponAndTrain') {
       badge = task.trainBld?.targetType === 5 ? 15 : 14;
     }
@@ -2214,7 +2295,7 @@ function commandUnitTo(tx, ty, overrideIds = null, owner = state.localTribe ?? 0
   render();
 }
 
-function findNearestGatherable(x, y, radius = 9, preferType = null) {
+function findNearestGatherable(x, y, radius = 9, preferType = null, ignoreFog = false) {
   let best = null;
   let bestScore = Infinity;
   for (let dy = -radius; dy <= radius; dy++) {
@@ -2222,7 +2303,7 @@ function findNearestGatherable(x, y, radius = 9, preferType = null) {
       const gx = x + dx;
       const gy = y + dy;
       if (gx < 0 || gy < 0 || gx >= state.data.width || gy >= state.data.height) continue;
-      if (getFogState(state.data, gx, gy) === 2) continue;
+      if (!ignoreFog && getFogState(state.data, gx, gy) === 2) continue;
       const target = classifyGatherable(gx, gy);
       if (!target) continue;
       const bonus = preferType && target.type === preferType ? -5 : 0;
@@ -2956,11 +3037,13 @@ function stepSimulation() {
         continue;
       }
       // Loop back to gather again automatically (or find next nearby tree/resource if depleted)!
+      // Ignore Host's fog when searching for Tribe 1 (Red, unitId > 50) resources so Red never cancels gathering!
+      const isRedUnit = unitId > 50;
       const nextTarget =
         task.returnToGather && classifyGatherable(task.returnToGather.x, task.returnToGather.y)
           ? task.returnToGather
-          : task.carrying?.type && task.carrying.type !== 'food'
-            ? findNearestGatherable(ux, uy, 10, task.carrying.type)
+          : task.carrying?.type
+            ? findNearestGatherable(ux, uy, 12, task.carrying.type, isRedUnit)
             : null;
       if (nextTarget && assignGatherTask(unitId, nextTarget)) {
         uiChanged = true;
@@ -3205,6 +3288,38 @@ function stepSimulation() {
         state.tasks.delete(unitId);
         uiChanged = true;
       }
+    } else if (task.kind === 'armForBattle') {
+      // Arrived at Storage during Battle Command: grab the strongest weapon matching this villager's skill, then charge!
+      const owner = task.owner ?? (unitId > 50 ? 1 : 0);
+      const r = d.resources?.[owner];
+      const pick = findBestStorageWeaponForUnit(unitId, owner);
+      if (pick) {
+        if (pick.fromStock && r) {
+          const oldW = e[6565 + unitId] & 0xff;
+          if (oldW < 6 && oldW !== pick.weaponId) {
+            r[5 + oldW] = (r[5 + oldW] || 0) + 1;
+          }
+          r[5 + pick.weaponId] = Math.max(0, (r[5 + pick.weaponId] || 0) - 1);
+          e[6565 + unitId] = pick.weaponId;
+        } else if (!pick.fromStock) {
+          const isStone = pick.resType === 'stone';
+          const curAmt = owner === (state.localTribe ?? 0) ? (isStone ? state.stone : state.wood) : (r?.[isStone ? 2 : 1] || 0);
+          if (curAmt >= 1) {
+            if (owner === (state.localTribe ?? 0)) {
+              if (isStone) state.stone -= 1;
+              else state.wood -= 1;
+              syncResourcesToData(owner);
+            } else if (r) {
+              r[isStone ? 2 : 1] = Math.max(0, (r[isStone ? 2 : 1] || 0) - 1);
+            }
+            e[6565 + unitId] = pick.weaponId;
+          }
+        }
+      }
+      e[7777 + unitId] = 0;
+      state.tasks.delete(unitId);
+      dispatchUnitToBattleFlag(unitId, task.battleX, task.battleY, owner);
+      uiChanged = true;
     } else if (task.kind === 'fetchWeaponAndTrain') {
       // Arrived at Storage: take 1 Wood (Dùi cui) or 1 Stone (Đá ném), equip weapon, and head to training building!
       const owner = task.owner ?? (unitId > 50 ? 1 : 0);
@@ -3311,15 +3426,23 @@ function stepSimulation() {
           uiChanged = true;
         }
       } else if ((bType === 1 || bType === 5) && task.workTicks >= 55) {
-        // Phòng tập / Khu tập ném: trains warrior (+8 maxHp) then exits!
+        // Phòng tập (1) / Khu tập ném (5): trains warrior (+8 maxHp + authentic skill level -> ^ rank chevron!) then exits!
         const nextMax = Math.min(120, (e[6767 + unitId] & 0xff) + 8);
         e[6767 + unitId] = nextMax;
         e[1919 + unitId] = nextMax;
+        if (bType === 1) {
+          e[1616 + unitId] = Math.min(9, Math.max(5, (e[1616 + unitId] & 0xff) + 1)); // Melee rank ^
+        } else {
+          e[1717 + unitId] = Math.min(9, Math.max(5, (e[1717 + unitId] & 0xff) + 1)); // Throwing rank ^
+        }
         exitBuildingSlot(d, unitId);
         setUnitAnim(unitId, 8, 0);
         state.tasks.delete(unitId);
-        const info = getVillagerInfo(unitId);
-        state.message = `${info.role} đã hoàn thành huấn luyện tại ${bld.spec.name} (HP tối đa ${nextMax})!`;
+        if ((unitId > 50 ? 1 : 0) === (state.localTribe ?? 0)) {
+          const info = getVillagerInfo(unitId);
+          const lv = bType === 1 ? (e[1616 + unitId] & 0xff) : (e[1717 + unitId] & 0xff);
+          state.message = `${info.role} đã lên cấp kỹ năng ${bType === 1 ? 'Cận chiến' : 'Ném'} (Cấp ${lv - 4} ^, HP ${nextMax})!`;
+        }
         uiChanged = true;
       } else if (bType === 7) {
         if (slotIdx === 0 && task.workTicks % 45 === 0) {

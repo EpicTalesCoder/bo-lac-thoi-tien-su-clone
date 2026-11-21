@@ -411,6 +411,8 @@ export function packWorldSnapshot(data, state) {
       e[7777 + uid] & 0xff,
       e[5151 + uid] & 0xff,
       e[2727 + uid] & 0xff,
+      e[1616 + uid] & 0xff,
+      e[1717 + uid] & 0xff,
     ]);
   }
 
@@ -506,7 +508,7 @@ export function applyWorldSnapshot(data, state, snap, revealFogFn, getBuildingSp
   for (const u of snap.units || []) {
     const [
       uid, ux, uy, ox, oy, dir, anim, frame, hp, maxHp, energy, satiety, mood, age, sex,
-      carry, carryAmt, weapon, hat, jobBadge, thought, bldBid, bldSlot, bldState, bldPropFrame, sprint, nameStyle, avatar,
+      carry, carryAmt, weapon, hat, jobBadge, thought, bldBid, bldSlot, bldState, bldPropFrame, sprint, nameStyle, avatar, meleeLv, throwLv,
     ] = u;
     e[uid] = ux;
     e[101 + uid] = uy;
@@ -537,6 +539,8 @@ export function applyWorldSnapshot(data, state, snap, revealFogFn, getBuildingSp
     e[7777 + uid] = sprint;
     e[5151 + uid] = nameStyle;
     e[2727 + uid] = avatar;
+    if (meleeLv !== undefined) e[1616 + uid] = meleeLv;
+    if (throwLv !== undefined) e[1717 + uid] = throwLv;
 
     if (bldBid > 0 && bldSlot >= 0) {
       e[4545 + uid] = e[8993 + bldBid];
