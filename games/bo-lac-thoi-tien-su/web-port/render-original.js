@@ -993,50 +993,14 @@ function drawAuthenticBottomMenu(ctx, data, state, imageCache) {
     ctx.save();
     ctx.translate(ox, 0);
 
-    // Building portrait frame (composite 617) + complete auto-scaled building miniature centered inside frame
+    // Building portrait frame (composite 617) + crisp 1:1 original building icon (680 + bType), zero fractional scaling!
     drawComposite(ctx, data, 617, 8, panelY + 13, imageCache);
-    if (item && item.bType !== undefined && item.bType >= 0 && item.bType <= 11) {
-      const shorts = data.shortSpriteTables;
-      const bytes = data.byteSpriteTables;
-      const startIdx = shorts[0][item.bType + 1];
-      const partCount = bytes[0][item.bType + 1] & 0xff;
-      const bwTiles = item.spec?.width || 3;
-      const bhTiles = item.spec?.height || 3;
-      const fullW = bwTiles * CELL_WIDTH;
-      const fullH = bhTiles * CELL_HEIGHT + 22;
-      const thumbScale = Math.min(42 / Math.max(24, fullW), 40 / Math.max(24, fullH), 0.72);
+    if (item && item.bType !== undefined) {
       ctx.save();
       ctx.beginPath();
-      ctx.rect(10, panelY + 15, 44, 42);
+      ctx.rect(10, panelY + 14, 44, 42);
       ctx.clip();
-      const tx0 = 32 - (fullW * thumbScale) / 2;
-      const ty0 = panelY + 38 - (bhTiles * CELL_HEIGHT * thumbScale) / 2 + 4;
-      ctx.translate(tx0, ty0);
-      ctx.scale(thumbScale, thumbScale);
-      let resSkip = 0;
-      let groundCellIdx = -1;
-      for (let i = 0, idx = startIdx; i < partCount && idx < shorts[1].length; i++, idx++) {
-        const kind = bytes[3][idx] & 7;
-        const stageReq = (bytes[3][idx] & 0xff) >>> 6;
-        const xHi = ((shorts[1][idx] & 0xc000) >>> 14) << 7;
-        if (kind === 0) {
-          if (stageReq === 0) groundCellIdx++;
-          if (stageReq <= 1 && groundCellIdx >= 0) {
-            const gx = groundCellIdx % bwTiles;
-            const gy = Math.floor(groundCellIdx / bwTiles);
-            drawComposite(ctx, data, shorts[1][idx] & 0xfff, gx * CELL_WIDTH + toSignedByte(bytes[1][idx]) + xHi, gy * CELL_HEIGHT + toSignedByte(bytes[2][idx]), imageCache);
-          }
-          continue;
-        }
-        if (stageReq > 1) continue;
-        if (kind === 1) {
-          if (item.bType === 6 && resSkip < 5) { resSkip++; continue; }
-          if (item.bType === 4 && resSkip < 1) { resSkip++; continue; }
-          drawComposite(ctx, data, shorts[1][idx] & 0xfff, toSignedByte(bytes[1][idx]) + xHi, toSignedByte(bytes[2][idx]), imageCache);
-        } else if (kind === 2 || kind === 6) {
-          drawAnimation(ctx, data, shorts[1][idx] & 0xfff, toSignedByte(bytes[1][idx]) + xHi, toSignedByte(bytes[2][idx]), animTick, imageCache);
-        }
-      }
+      drawComposite(ctx, data, 680 + item.bType, 16, panelY + 12, imageCache);
       ctx.restore();
     }
 
@@ -1294,6 +1258,36 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
               ctx.fillRect(bx - 1, by - 1, 26, 5);
               ctx.fillStyle = e[8627 + bid] === 1 ? '#ffd84d' : bid > 30 ? '#ef4444' : '#22d422';
               ctx.fillRect(bx, by, Math.max(2, Math.floor((24 * hp) / maxHp)), 3);
+            }
+            // Authentic "!" worker-needed indicator above an empty finished Sàn disco (bType 7, no DJ in slot 0)
+            const bTypeCur = e[8749 + bid] & 0xff;
+            const myTribe = state.localTribe ?? 0;
+            const isMine = myTribe === 1 ? bid > 30 : bid <= 30;
+            if (isMine && bTypeCur === 7 && e[8627 + bid] === 0) {
+              let hasDj = false;
+              let u = e[8993 + bid];
+              let g = 0;
+              while (u > 0 && g++ < 16) {
+                if (e[4646 + u] === 0) { hasDj = true; break; }
+                u = e[4545 + u];
+              }
+              if (!hasDj) {
+                const bw = data.mapTableData[data.mapTableOffsets[138] + 104 + bTypeCur] || 5;
+                const ax = (e[8383 + bid] - camX) * CELL_WIDTH + Math.floor((bw * CELL_WIDTH) / 2);
+                const bounce = Math.round(Math.sin(animTick * 0.45) * 2);
+                const ay = originY + (e[8444 + bid] - camY) * CELL_HEIGHT - 8 + bounce;
+                ctx.save();
+                ctx.fillStyle = '#3d1c05';
+                ctx.fillRect(ax - 6, ay - 9, 12, 13);
+                ctx.fillStyle = '#ffe44d';
+                ctx.fillRect(ax - 5, ay - 8, 10, 11);
+                ctx.fillStyle = '#b3190c';
+                ctx.font = 'bold 10px monospace';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText('!', ax, ay - 2);
+                ctx.restore();
+              }
             }
           }
         } else if (fog < 1 && isWildAnimal(occ)) {

@@ -790,10 +790,18 @@ function syncUnitJobBadge(unitId) {
       badge = 14; // authentic combat badge (sprite 591)
     } else if (task.kind === 'workBuilding') {
       const bt = task.target?.targetType;
-      if (bt === 4) badge = 9; // Bếp (Chef cooking pot badge: mo[41][54] = 9)
-      else if (bt === 8) badge = 11; // Khu thánh địa (Shaman: mo[41][57] = 11)
-      else if (bt === 0 || bt === 1 || bt === 5) badge = 8; // Weapons / Training
+      const slotIdx = task.insideSlot?.slotIdx ?? (Array.isArray(task.preferredSlots) && !task.preferredSlots.includes(0) ? 1 : 0);
+      if (bt === 4) badge = slotIdx === 0 ? 9 : 0; // Bếp: Chef=9, Diner=0
+      else if (bt === 7) badge = slotIdx === 0 ? 10 : 0; // Sàn disco: DJ=10, Dancer=0
+      else if (bt === 8) badge = 11; // Khu thánh địa: Shaman=11
+      else if (bt === 5) badge = 15; // Khu tập ném: Throwing=15 (exact mo[41][72])
+      else if (bt === 1) badge = 14; // Phòng tập: Melee=14 (exact mo[41][61])
+      else if (bt === 0) badge = 8; // Kho vũ khí: Weaponsmith=8
+      else if (bt === 9) badge = 13; // Trung tâm PIA=13
+      else if (bt === 11) badge = 16; // Chòi canh=16
       else badge = 0;
+    } else if (task.kind === 'fetchWeaponAndTrain') {
+      badge = task.trainBld?.targetType === 5 ? 15 : 14;
     }
   }
   e[2222 + unitId] = badge;
@@ -1497,6 +1505,86 @@ function assignEatTask(unitId, foodBuilding) {
   return true;
 }
 
+function isBuildingSlot0Occupied(bid) {
+  if (!state.data) return false;
+  const e = state.data.entityData;
+  let u = e[8993 + bid];
+  let g = 0;
+  while (u > 0 && g++ < 16) {
+    if (e[4646 + u] === 0) return true;
+    u = e[4545 + u];
+  }
+  // Also check if another villager is already walking toward slot 0 of this building
+  for (const t of state.tasks.values()) {
+    if (t.kind === 'workBuilding' && t.target?.bid === bid && !t.insideSlot) {
+      if (!Array.isArray(t.preferredSlots) || t.preferredSlots.includes(0)) return true;
+    }
+  }
+  return false;
+}
+
+function assignTrainOrFetchWeapon(unitId, bld, owner = state.localTribe ?? 0, silent = false) {
+  const d = state.data;
+  if (!d) return false;
+  const e = d.entityData;
+  const curWeapon = e[6565 + unitId] & 0xff;
+  const isThrowing = bld.targetType === 5;
+  // Already armed -> go directly into training building!
+  if (curWeapon !== 9) {
+    return assignWorkAtBuilding(unitId, bld);
+  }
+  // Unarmed: Phòng tập (1) needs 1 Wood -> Dùi cui (weaponId 0); Khu tập ném (5) needs 1 Stone -> Đá ném (weaponId 1)
+  const r = d.resources?.[owner];
+  const needResIdx = isThrowing ? 2 : 1; // 2=Stone, 1=Wood
+  const curRes = owner === (state.localTribe ?? 0) ? (isThrowing ? state.stone : state.wood) : (r?.[needResIdx] || 0);
+  if (curRes < 1) {
+    if (!silent) {
+      showWarning(
+        isThrowing
+          ? '⚠ Cần ít nhất 1 Đá trong kho để lấy Đá ném vào Khu tập ném!'
+          : '⚠ Cần ít nhất 1 Gỗ trong kho để lấy Dùi cui vào Phòng tập!'
+      );
+    }
+    return false;
+  }
+  const storage = findNearestDropoff(e[unitId] & 0xff, e[101 + unitId] & 0xff, owner);
+  if (!storage) {
+    // Fallback equip directly if no storage building exists
+    if (owner === (state.localTribe ?? 0)) {
+      if (isThrowing) state.stone -= 1;
+      else state.wood -= 1;
+      syncResourcesToData(owner);
+    } else if (r) {
+      r[needResIdx] = Math.max(0, (r[needResIdx] || 0) - 1);
+    }
+    e[6565 + unitId] = isThrowing ? 1 : 0;
+    return assignWorkAtBuilding(unitId, bld);
+  }
+  ensureUnitOutside(unitId);
+  setUnitCarry(unitId, 0, 0);
+  const planned = planUnitPath(unitId, storage.x, storage.y, false, storage);
+  if (planned === null) return false;
+  state.tasks.set(unitId, {
+    kind: 'fetchWeaponAndTrain',
+    path: planned.path,
+    stepProgress: planned.stepProgress,
+    target: storage,
+    trainBld: bld,
+    weaponId: isThrowing ? 1 : 0,
+    resType: isThrowing ? 'stone' : 'wood',
+    owner,
+    workTicks: 0,
+  });
+  if (state.selectedUnit === unitId) state.activePath = planned.path;
+  if (!silent) {
+    const info = getVillagerInfo(unitId);
+    state.message = isThrowing
+      ? `${info.role} đang vào kho lấy 1 Đá làm Đá ném trước khi vào Khu tập ném!`
+      : `${info.role} đang vào kho lấy 1 Gỗ làm Dùi cui trước khi vào Phòng tập!`;
+  }
+  return true;
+}
+
 function assignWorkAtBuilding(unitId, bld, preferredSlots = null) {
   ensureUnitOutside(unitId);
   setUnitCarry(unitId, 0, 0);
@@ -1823,24 +1911,85 @@ function commandUnitTo(tx, ty, overrideIds = null, owner = state.localTribe ?? 0
         return;
       }
     } else if (bld && bld.targetType === 2) {
-      if (assignRestTask(unitId, bld)) {
-        const info = getVillagerInfo(unitId);
-        state.message = `${info.role} đang đi vào Lều nghỉ ngủ hồi sức.`;
-        render();
+      if (assignRestTask(adultIds[0], bld)) {
+        if (!overrideIds) {
+          const info = getVillagerInfo(adultIds[0]);
+          state.message = `${info.role} đang đi vào Lều nghỉ ngủ hồi sức.`;
+          render();
+        }
         return;
       }
-    } else if (bld && (bld.targetType === 4 || bld.targetType === 3) && state.food > 0) {
-      if (assignEatTask(unitId, bld)) {
-        const info = getVillagerInfo(unitId);
-        state.message = `${info.role} đang tới ${bld.spec.name} ăn hồi sức.`;
-        render();
+    } else if (bld && bld.targetType === 4) {
+      // Bếp: 1st villager (if slot 0 empty) -> Chef cooking; 2nd+ villager -> Diner eating!
+      const hasChef = isBuildingSlot0Occupied(bld.bid);
+      if (!hasChef) {
+        if (assignWorkAtBuilding(adultIds[0], bld, [0])) {
+          if (!overrideIds) {
+            state.message = `${getVillagerInfo(adultIds[0]).role} đang vào Bếp làm Đầu bếp nấu ăn!`;
+            render();
+          }
+          return;
+        }
+      } else if (assignEatTask(adultIds[0], bld)) {
+        if (!overrideIds) {
+          state.message = `${getVillagerInfo(adultIds[0]).role} đang vào Bếp dùng bữa!`;
+          render();
+        }
         return;
       }
-    } else if (bld && [0, 1, 4, 5, 7, 8, 9, 11].includes(bld.targetType)) {
-      if (assignWorkAtBuilding(unitId, bld)) {
-        const info = getVillagerInfo(unitId);
-        state.message = `${info.role} đang đi tới làm việc tại ${bld.spec.name}.`;
+    } else if (bld && bld.targetType === 7) {
+      // Sàn disco: 1st villager (if slot 0 empty) -> DJ playing music; 2nd+ villager -> Dancer relaxing!
+      let slot0Busy = isBuildingSlot0Occupied(bld.bid);
+      let djSent = 0;
+      let dancersSent = 0;
+      for (const uid of adultIds) {
+        if (!slot0Busy) {
+          if (assignWorkAtBuilding(uid, bld, [0])) {
+            slot0Busy = true;
+            djSent++;
+          }
+        } else {
+          if (assignWorkAtBuilding(uid, bld, [1, 2, 3, 4, 5, 6])) {
+            dancersSent++;
+          }
+        }
+      }
+      if (djSent > 0 || dancersSent > 0) {
+        if (!overrideIds) {
+          state.message =
+            djSent > 0 && dancersSent > 0
+              ? `🎵 Đã cử DJ lên bàn nhạc và ${dancersSent} dân làng vào Sàn disco giải trí!`
+              : djSent > 0
+                ? `🎵 ${getVillagerInfo(adultIds[0]).role} đang lên bàn DJ chơi nhạc!`
+                : `💃 ${dancersSent > 1 ? dancersSent + ' dân làng' : getVillagerInfo(adultIds[0]).role} đang vào Sàn disco nhảy múa giải trí!`;
+          render();
+        }
+        return;
+      }
+    } else if (bld && (bld.targetType === 1 || bld.targetType === 5)) {
+      // Phòng tập (1) / Khu tập ném (5): auto-grab 1 Wood / 1 Stone from Storage if unarmed, then train!
+      let sent = 0;
+      for (const uid of adultIds) {
+        if (assignTrainOrFetchWeapon(uid, bld, owner, Boolean(overrideIds))) sent++;
+      }
+      if (sent > 0 && !overrideIds) {
         render();
+      }
+      return;
+    } else if (bld && bld.targetType === 3 && state.food > 0) {
+      if (assignEatTask(adultIds[0], bld)) {
+        if (!overrideIds) {
+          state.message = `${getVillagerInfo(adultIds[0]).role} đang tới ${bld.spec.name} ăn hồi sức.`;
+          render();
+        }
+        return;
+      }
+    } else if (bld && [0, 8, 9, 11].includes(bld.targetType)) {
+      if (assignWorkAtBuilding(adultIds[0], bld)) {
+        if (!overrideIds) {
+          state.message = `${getVillagerInfo(adultIds[0]).role} đang đi tới làm việc tại ${bld.spec.name}.`;
+          render();
+        }
         return;
       }
     } else if (bld) {
@@ -2944,6 +3093,33 @@ function stepSimulation() {
         state.tasks.delete(unitId);
         uiChanged = true;
       }
+    } else if (task.kind === 'fetchWeaponAndTrain') {
+      // Arrived at Storage: take 1 Wood (Dùi cui) or 1 Stone (Đá ném), equip weapon, and head to training building!
+      const owner = task.owner ?? (unitId > 50 ? 1 : 0);
+      const r = d.resources?.[owner];
+      const isStone = task.resType === 'stone';
+      const curAmt = owner === (state.localTribe ?? 0) ? (isStone ? state.stone : state.wood) : (r?.[isStone ? 2 : 1] || 0);
+      if (curAmt >= 1) {
+        if (owner === (state.localTribe ?? 0)) {
+          if (isStone) state.stone -= 1;
+          else state.wood -= 1;
+          syncResourcesToData(owner);
+        } else if (r) {
+          r[isStone ? 2 : 1] = Math.max(0, (r[isStone ? 2 : 1] || 0) - 1);
+        }
+        e[6565 + unitId] = task.weaponId;
+        state.tasks.delete(unitId);
+        assignWorkAtBuilding(unitId, task.trainBld);
+        if (owner === (state.localTribe ?? 0)) {
+          const wName = task.weaponId === 1 ? 'Đá ném' : 'Dùi cui';
+          state.message = `${getVillagerInfo(unitId).role} đã lấy ${wName} và đang tiến vào ${task.trainBld.spec.name}!`;
+        }
+        uiChanged = true;
+      } else {
+        setUnitAnim(unitId, 8, 0);
+        state.tasks.delete(unitId);
+        uiChanged = true;
+      }
     } else if (task.kind === 'workBuilding') {
       const bld = task.target;
       if (!task.insideSlot) {
@@ -3758,6 +3934,39 @@ function openCanvasBuildingMenu(bld) {
         render();
       },
     });
+  } else if (bld.targetType === 6) {
+    // Kho chứa: allow swapping to any weapon stored in stock (resources[owner][5..10])
+    const owner = state.localTribe ?? 0;
+    const resArr = state.data?.resources?.[owner] || [];
+    for (const w of WEAPONS) {
+      const stock = resArr[5 + w.id] || 0;
+      if (stock > 0) {
+        items.push({
+          label: `ĐỔI ${w.name.toUpperCase()} (KHO: ${stock})`,
+          weaponId: w.id,
+          costText: `Sức đánh +${w.atk} · Miễn phí đổi từ kho`,
+          canAfford: true,
+          action: () => {
+            const uid = state.selectedUnit || getVillagerIds(owner).find((id) => (state.data.entityData[1414 + id] & 0xff) >= 12);
+            if (!uid) return;
+            const e = state.data.entityData;
+            if ((e[1414 + uid] & 0xff) < 12) {
+              showWarning('⚠ Trẻ em (dưới 12 tuổi) chưa thể trang bị vũ khí!');
+              return;
+            }
+            const oldW = e[6565 + uid] & 0xff;
+            if (oldW < 6 && oldW !== w.id) {
+              resArr[5 + oldW] = (resArr[5 + oldW] || 0) + 1;
+            }
+            resArr[5 + w.id] = Math.max(0, (resArr[5 + w.id] || 0) - 1);
+            e[6565 + uid] = w.id;
+            state.message = `${getVillagerInfo(uid).role} đã đổi vũ khí sang ${w.name} từ Kho chứa!`;
+            state.canvasMenu = null;
+            render();
+          },
+        });
+      }
+    }
   } else if (bld.targetType === 2) {
     // Lều: rest/sleep + courtship & reproduction
     items.push({
@@ -4983,7 +5192,13 @@ function confirm() {
     }
     if (isOwnBldOcc) {
       const bld = getPlayerBuildings(myTribe).find((b) => b.bid === -occ);
-      if (bld && bld.underConstruction && getActiveSelectionIds().length > 0) {
+      const hasSel = getActiveSelectionIds().length > 0;
+      // Direct 1-click entry when a villager is already selected (no forced menu popup!)
+      // Exception: Kho chứa (bType 6) opens weapon swap menu if it has weapons in stock
+      const storageHasWeapons =
+        bld?.targetType === 6 &&
+        WEAPONS.some((w) => (state.data.resources?.[myTribe]?.[5 + w.id] || 0) > 0);
+      if (bld && hasSel && (bld.underConstruction || (bld.targetType !== 6 && bld.targetType !== 3) || (!storageHasWeapons && bld.targetType === 3))) {
         commandUnitTo(x, y);
         return;
       }
