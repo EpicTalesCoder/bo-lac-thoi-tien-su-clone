@@ -3569,15 +3569,17 @@ function stepSimulation() {
       if ((e[6464 + unitId] & 0xff) !== taskHatJob && task.hatPutFrame === undefined) {
         task.hatPutFrame = 0;
       }
-      if (task.hatPutFrame !== undefined && task.hatPutFrame < 14) {
+      // Play ONLY frames 0..6 of anim 147 (clean hat-putting motion, symmetric with 7-frame anim 148),
+      // skipping frames 7..13 (p752<->p753 extra shaking/waving hand)!
+      if (task.hatPutFrame !== undefined && task.hatPutFrame < 7) {
         e[202 + unitId] = 0;
         e[303 + unitId] = 0;
         setUnitAnim(unitId, 147, task.hatPutFrame);
         if (task.hatPutFrame === 1) {
-          e[6464 + unitId] = taskHatJob; // b.java:1458 equips job hat at frame 1
+          e[6464 + unitId] = taskHatJob; // b.java:1461 equips job hat at frame 1
         }
         task.hatPutFrame++;
-        if (task.hatPutFrame >= 14 && task.carryWoodAfterHat) {
+        if (task.hatPutFrame >= 7 && task.carryWoodAfterHat) {
           setUnitCarry(unitId, 2, 1);
         }
         continue;
