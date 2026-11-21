@@ -1451,15 +1451,10 @@ function updateBuildPreview() {
 
 function startBuildPlacement(bType) {
   const spec = getBuildingSpec(state.data, bType);
-  if (state.wood < spec.woodCost || state.stone < spec.stoneCost || state.tools < spec.toolsCost) {
-    state.message = `Cần ${spec.woodCost} gỗ, ${spec.stoneCost} đá${spec.toolsCost ? `, ${spec.toolsCost} công cụ` : ''} để xây ${spec.name}.`;
-    render();
-    return;
-  }
   state.buildType = bType;
   state.panelMode = 'main';
   updateBuildPreview();
-  state.message = `Đặt ${spec.name} (${spec.width}×${spec.height}): click vùng ô màu xanh để xây, hoặc nhấn Esc để hủy.`;
+  state.message = `Đặt ${spec.name} (${spec.width}×${spec.height}): click vùng ô màu xanh để đặt khung công trình, hoặc nhấn Esc để hủy.`;
   render();
 }
 
@@ -1530,35 +1525,13 @@ function assignBuildTask(unitId, bld, carryWood = false) {
   }
   state.savedJobs.set(unitId, { kind: 'build', bid: bld.bid });
   ensureUnitOutside(unitId);
-  // If this construction site still needs materials delivered from Storage, send builder to Storage FIRST!
-  const need = state.siteMaterials.get(bld.bid);
-  if (need && (need.wood > 0 || need.stone > 0 || need.tools > 0)) {
-    const storage = findNearestDropoff(e[unitId] & 0xff, e[101 + unitId] & 0xff, owner);
-    if (storage) {
-      const toStorage = planUnitPath(unitId, storage.x, storage.y, false, storage);
-      if (toStorage !== null) {
-        setUnitCarry(unitId, 0, 0);
-        state.tasks.set(unitId, {
-          kind: 'buildFetch',
-          path: toStorage.path,
-          stepProgress: toStorage.stepProgress,
-          target: storage,
-          buildBld: bld,
-          owner,
-          workTicks: 0,
-        });
-        if (state.selectedUnit === unitId) state.activePath = toStorage.path;
-        return true;
-      }
-    }
-  }
 
+  // Authentic original flow: builder walks to the construction scaffold frame first (puts on builder hard hat),
+  // enters the scaffold, and THEN runs to Storage to fetch materials (or holds the missing-resource protest sign inside/outside)!
   const planned = planUnitPath(unitId, bld.x, bld.y, false, bld);
   if (planned === null) return false;
   const needHatAnim = (e[6464 + unitId] & 0xff) !== 38;
-  // During the 14-frame hat-putting animation (anim 147 / -109), hands are free; wood log is hoisted right after
-  if (!needHatAnim && carryWood) setUnitCarry(unitId, 2, 1);
-  else setUnitCarry(unitId, 0, 0);
+  setUnitCarry(unitId, 0, 0);
   state.tasks.set(unitId, {
     kind: 'build',
     path: planned.path,
@@ -1568,7 +1541,7 @@ function assignBuildTask(unitId, bld, carryWood = false) {
     workTicks: 0,
     hatJob: 38, // 38 -> badge 12 -> hatCode 2 (builder hard hat)
     hatPutFrame: needHatAnim ? 0 : 14,
-    carryWoodAfterHat: Boolean(carryWood),
+    carryWoodAfterHat: false,
   });
   if (state.selectedUnit === unitId) state.activePath = planned.path;
   return true;
@@ -1612,21 +1585,9 @@ function confirmBuildAtCursor(owner = state.localTribe ?? 0, overridePayload = n
   }
 
   const spec = bp.spec;
-  const r = state.data?.resources?.[owner];
-  const curWood = owner === (state.localTribe ?? 0) ? state.wood : (r?.[1] || 0);
-  const curStone = owner === (state.localTribe ?? 0) ? state.stone : (r?.[2] || 0);
-  const curTools = owner === (state.localTribe ?? 0) ? state.tools : (r?.[3] || 0);
-  if (curWood < spec.woodCost || curStone < spec.stoneCost || curTools < spec.toolsCost) {
-    if (!overridePayload) {
-      state.message = `Không đủ nguyên liệu để xây ${spec.name}!`;
-      cancelBuildPlacement();
-      render();
-    }
-    return;
-  }
-
-  // Do NOT deduct resources immediately from the top bar!
-  // Record required materials on the construction site so builders physically fetch them from Storage!
+  // Authentic original game behavior: always allow placing the construction scaffold frame first!
+  // Resources are NOT deducted or blocked upfront; builders walk to the scaffold, then go to Storage to fetch materials,
+  // or hold up the missing-resource protest sign (anim 115/40 with carrySprite 2/3/4) if Storage is short!
   const bid = placeConstructionSite(state.data, bp.bType, bp.x, bp.y, owner);
   if (bid < 0) {
     if (!overridePayload) {
@@ -1640,6 +1601,9 @@ function confirmBuildAtCursor(owner = state.localTribe ?? 0, overridePayload = n
     wood: spec.woodCost || 0,
     stone: spec.stoneCost || 0,
     tools: spec.toolsCost || 0,
+    deliveredWood: 0,
+    deliveredStone: 0,
+    deliveredTools: 0,
     owner,
   });
 
@@ -3686,7 +3650,7 @@ function stepSimulation() {
         if (slot) {
           task.insideSlot = slot;
           const info = getVillagerInfo(unitId);
-          state.message = `${info.role} đã vào công trường và đang đóng khung xây ${bld.spec.name}!`;
+          state.message = `${info.role} đã vào công trường xây ${bld.spec.name}!`;
           uiChanged = true;
         } else {
           task.insideSlot = { slotIdx: -1, animId: 53 };
@@ -3695,19 +3659,104 @@ function stepSimulation() {
         }
       }
 
+      // Check if construction site still needs materials from Storage (authentic b.java:3013 & 4277-4309)
+      const bldOwner = bid > 30 ? 1 : 0;
+      const need = state.siteMaterials.get(bid);
+      if (need && (need.wood > 0 || need.stone > 0 || need.tools > 0)) {
+        const r = d.resources?.[bldOwner];
+        const curWood = bldOwner === (state.localTribe ?? 0) ? state.wood : (r?.[1] || 0);
+        const curStone = bldOwner === (state.localTribe ?? 0) ? state.stone : (r?.[2] || 0);
+        const curTools = bldOwner === (state.localTribe ?? 0) ? state.tools : (r?.[3] || 0);
+        const canFetchNow =
+          (need.wood > 0 && curWood > 0) ||
+          (need.stone > 0 && curStone > 0) ||
+          (need.tools > 0 && curTools > 0);
+        const otherFetching = [...state.tasks.entries()].some(
+          ([uid, t]) => uid !== unitId && t.kind === 'buildFetch' && t.buildBld?.bid === bid
+        );
+
+        if (canFetchNow && !otherFetching) {
+          const storage = findNearestDropoff(e[unitId] & 0xff, e[101 + unitId] & 0xff, bldOwner);
+          if (storage) {
+            exitBuildingSlot(d, unitId);
+            const toStorage = planUnitPath(unitId, storage.x, storage.y, false, storage);
+            if (toStorage !== null) {
+              setUnitCarry(unitId, 0, 0);
+              state.tasks.set(unitId, {
+                kind: 'buildFetch',
+                path: toStorage.path,
+                stepProgress: toStorage.stepProgress,
+                target: storage,
+                buildBld: bld,
+                owner: bldOwner,
+                workTicks: 0,
+              });
+              if (state.selectedUnit === unitId) state.activePath = toStorage.path;
+              uiChanged = true;
+              continue;
+            }
+          }
+        }
+
+        // If some materials are missing from Storage AND none have been delivered yet (or all required materials are still missing),
+        // builder holds up the authentic missing-resource protest sign inside the construction site (anim 115 -> 113, carrySprite 2=Wood, 3=Stone, 4=Bone)!
+        const hasDeliveredAny =
+          (need.deliveredWood || 0) > 0 || (need.deliveredStone || 0) > 0 || (need.deliveredTools || 0) > 0;
+        if (!canFetchNow && !otherFetching) {
+          const missingSprite = need.wood > 0 ? 2 : need.stone > 0 ? 3 : 4;
+          const missingLabel = need.wood > 0 ? 'Gỗ' : need.stone > 0 ? 'Đá' : 'Xương';
+          // Switch between hammering already-delivered materials and raising the missing-material sign!
+          if (!hasDeliveredAny || (Math.floor(task.workTicks / 24) % 2 === 0)) {
+            setUnitCarry(unitId, missingSprite, 0);
+            if (task.insideSlot && task.insideSlot.slotIdx >= 0) {
+              const signFrame = task.workTicks % 25;
+              if (signFrame < 13) {
+                setUnitAnim(unitId, 115, signFrame);
+              } else {
+                setUnitAnim(unitId, 113, (signFrame - 13) % 12);
+              }
+            } else {
+              setUnitAnim(unitId, 40, Math.floor(task.workTicks / 4) % 2);
+            }
+            if (task.workTicks % 60 === 0 && bldOwner === (state.localTribe ?? 0)) {
+              state.message = `🪧 Thợ xây tại ${bld.spec.name} đang giơ bảng báo thiếu ${missingLabel} trong kho!`;
+            }
+            task.workTicks++;
+            uiChanged = true;
+            continue;
+          }
+        }
+      }
+
+      // Clear any protest sign when actively hammering/sawing
+      if ((e[3535 + unitId] & 0xff) > 0 && (e[3636 + unitId] & 0xff) === 0) {
+        setUnitCarry(unitId, 0, 0);
+      }
+
       // Play authentic hammering (anim 53, 3 frames) or sawing (anim 54, 3 frames) INSIDE the scaffold
       const buildAnim = task.insideSlot.animId || 53;
       setUnitAnim(unitId, buildAnim, Math.floor(task.workTicks / 2) % 3);
       task.workTicks++;
 
-      // Authentic steady construction rate: +1 HP every 3 ticks per builder (~13s for a 40 HP Lều)
+      // Authentic steady construction rate: +1 HP every 3 ticks per builder, capped if materials are still missing!
       if (task.workTicks % 3 === 0) {
-        const nextHp = Math.min(maxHp, (e[8505 + bid] & 0xff) + 1);
+        const stillMissingMaterials = Boolean(need && (need.wood > 0 || need.stone > 0 || need.tools > 0));
+        const totalCost = Math.max(1, (bld.spec.woodCost || 0) + (bld.spec.stoneCost || 0) + (bld.spec.toolsCost || 0));
+        const remCost = need ? (need.wood || 0) + (need.stone || 0) + (need.tools || 0) : 0;
+        const paidRatio = Math.max(0.15, (totalCost - remCost) / totalCost);
+        const allowedMaxHp = stillMissingMaterials
+          ? Math.min(maxHp - 1, Math.max(e[8505 + bid] & 0xff, Math.floor(maxHp * paidRatio)))
+          : maxHp;
+        const curHp = e[8505 + bid] & 0xff;
+        if (curHp >= allowedMaxHp && stillMissingMaterials) {
+          continue;
+        }
+        const nextHp = Math.min(allowedMaxHp, curHp + 1);
         e[8505 + bid] = nextHp;
         const ratio = nextHp / maxHp;
         e[9115 + bid] = ratio >= 0.78 ? 3 : ratio >= 0.48 ? 2 : ratio >= 0.22 ? 1 : 0;
 
-        if (nextHp >= maxHp) {
+        if (nextHp >= maxHp && !stillMissingMaterials) {
           const bldOwner = bid > 30 ? 1 : 0;
           const { spec, workers } = finishConstructionSite(d, bid);
           state.siteMaterials.delete(bid);
@@ -4024,6 +4073,7 @@ function stepSimulation() {
       const r = d.resources?.[owner];
       const need = state.siteMaterials.get(task.buildBld.bid);
       let carrySprite = 2;
+      let pickedAny = false;
       if (need) {
         const curWood = owner === (state.localTribe ?? 0) ? state.wood : (r?.[1] || 0);
         const curStone = owner === (state.localTribe ?? 0) ? state.stone : (r?.[2] || 0);
@@ -4045,7 +4095,11 @@ function stepSimulation() {
           need.wood -= takeW;
           need.stone -= takeS;
           need.tools -= takeT;
+          need.deliveredWood = (need.deliveredWood || 0) + takeW;
+          need.deliveredStone = (need.deliveredStone || 0) + takeS;
+          need.deliveredTools = (need.deliveredTools || 0) + takeT;
           carrySprite = takeW > 0 ? 2 : takeS > 0 ? 3 : 4;
+          pickedAny = true;
         }
         if (need.wood <= 0 && need.stone <= 0 && need.tools <= 0) {
           state.siteMaterials.delete(task.buildBld.bid);
@@ -4054,7 +4108,8 @@ function stepSimulation() {
       state.tasks.delete(unitId);
       const planned = planUnitPath(unitId, task.buildBld.x, task.buildBld.y, false, task.buildBld);
       if (planned !== null) {
-        setUnitCarry(unitId, carrySprite, 1);
+        if (pickedAny) setUnitCarry(unitId, carrySprite, 1);
+        else setUnitCarry(unitId, 0, 0);
         state.tasks.set(unitId, {
           kind: 'build',
           path: planned.path,
@@ -4064,7 +4119,7 @@ function stepSimulation() {
           workTicks: 0,
           hatJob: 38,
           hatPutFrame: 14,
-          carryWoodAfterHat: true,
+          carryWoodAfterHat: pickedAny,
         });
         if (state.selectedUnit === unitId) state.activePath = planned.path;
       }
@@ -4261,11 +4316,16 @@ function stepSimulation() {
         const curStone = unitOwner === (state.localTribe ?? 0) ? state.stone : (r?.[2] || 0);
         const curTools = unitOwner === (state.localTribe ?? 0) ? state.tools : (r?.[3] || 0);
         let nextWId = -1;
+        let missingQueuedSprite = 0;
         for (let wid = 0; wid < WEAPONS.length; wid++) {
           const w = WEAPONS[wid];
-          if ((q[wid] || 0) > 0 && curWood >= w.wood && curStone >= w.stone && curTools >= w.bones) {
-            nextWId = wid;
-            break;
+          if ((q[wid] || 0) > 0) {
+            if (curWood >= w.wood && curStone >= w.stone && curTools >= w.bones) {
+              nextWId = wid;
+              break;
+            } else if (!missingQueuedSprite) {
+              missingQueuedSprite = curWood < w.wood ? 2 : curStone < w.stone ? 3 : 4;
+            }
           }
         }
         if (nextWId >= 0) {
@@ -4274,6 +4334,7 @@ function stepSimulation() {
           if (storage) {
             const toStorage = planUnitPath(unitId, storage.x, storage.y, false, storage);
             if (toStorage !== null) {
+              setUnitCarry(unitId, 0, 0);
               state.tasks.set(unitId, {
                 kind: 'blacksmithFetch',
                 path: toStorage.path,
@@ -4290,7 +4351,16 @@ function stepSimulation() {
             }
           }
         }
-        // No weapons to forge (or waiting for materials): Blacksmith naps (anim 85, 19f) instead of hammering!
+        if (missingQueuedSprite > 0) {
+          // Weapon queued in Kho vũ khí, but Storage lacks Wood/Stone/Bones -> hold up protest sign (anim 115 -> 113)!
+          setUnitCarry(unitId, missingQueuedSprite, 0);
+          const signFrame = task.workTicks % 25;
+          if (signFrame < 13) setUnitAnim(unitId, 115, signFrame);
+          else setUnitAnim(unitId, 113, (signFrame - 13) % 12);
+          continue;
+        }
+        // No weapons queued: Blacksmith naps (anim 85, 19f) instead of hammering!
+        setUnitCarry(unitId, 0, 0);
         setUnitAnim(unitId, 85, Math.floor(task.workTicks / 2) % 19);
         continue;
       }
@@ -4722,10 +4792,25 @@ function stepVillagerNeeds() {
   const tribes = state.mpMode || state.aiMode ? [0, 1] : [state.localTribe ?? 0];
   let changed = false;
 
-  const pickNearestBld = (list, ux, uy) => {
+  const getHutOccupantCount = (bid) => {
+    let cnt = 0;
+    let cur = e[8993 + bid];
+    let guard = 0;
+    while (cur > 0 && guard++ < 16) {
+      cnt++;
+      cur = e[4545 + cur];
+    }
+    for (const t of state.tasks.values()) {
+      if (t.kind === 'rest' && t.target?.bid === bid && !t.insideSlot) cnt++;
+    }
+    return cnt;
+  };
+
+  const pickNearestBld = (list, ux, uy, checkHutCapacity = false) => {
     let best = null;
     let bestDist = Infinity;
     for (const b of list) {
+      if (checkHutCapacity && getHutOccupantCount(b.bid) >= 4) continue;
       const dist = Math.hypot(b.x + b.w / 2 - ux, b.y + b.h / 2 - uy);
       if (dist < bestDist) {
         bestDist = dist;
@@ -4792,18 +4877,29 @@ function stepVillagerNeeds() {
       // - Hungry -> seek Bếp (if Bếp exists & food > 0); otherwise just keep showing thought bubble!
       // - Sleepy -> seek Lều (if Lều exists); otherwise just keep showing thought bubble!
       // - Bored  -> seek Sàn disco (if Sàn disco exists); otherwise just keep showing thought bubble!
-      const canBreak = !task || (task.kind === 'gather' && (satiety <= 18 || energy <= 18 || mood <= 18));
-      if (canBreak && !isUnitInsideBuilding(d, id)) {
-        const ux = e[id] & 0xff;
-        const uy = e[101 + id] & 0xff;
-        const thresh = task ? 18 : 38;
-        if (satiety <= thresh && tribeFood > 0 && finishedKitchens.length > 0) {
+      const isCombatTask =
+        task &&
+        (task.kind === 'attackUnit' ||
+          task.kind === 'attackBuilding' ||
+          task.kind === 'armForBattle' ||
+          task.kind === 'hunt');
+      const thresh = task ? 20 : 38;
+      const canBreak = !isCombatTask && (!task || satiety <= thresh || energy <= thresh || mood <= thresh);
+      if (canBreak) {
+        const info = getVillagerInfo(id);
+        const ux = info.x;
+        const uy = info.y;
+        const isChefInKitchen =
+          task?.kind === 'workBuilding' && task.target?.targetType === 4 && (task.insideSlot?.slotIdx ?? 0) === 0;
+        const isDjInDisco =
+          task?.kind === 'workBuilding' && task.target?.targetType === 7 && (task.insideSlot?.slotIdx ?? 0) === 0;
+        if (satiety <= thresh && !isChefInKitchen && tribeFood > 0 && finishedKitchens.length > 0) {
           const kitchen = pickNearestBld(finishedKitchens, ux, uy);
           if (kitchen && assignEatTask(id, kitchen)) changed = true;
         } else if (energy <= thresh && finishedHuts.length > 0) {
-          const hut = pickNearestBld(finishedHuts, ux, uy);
+          const hut = pickNearestBld(finishedHuts, ux, uy, true);
           if (hut && assignRestTask(id, hut)) changed = true;
-        } else if (mood <= thresh && finishedDiscos.length > 0) {
+        } else if (mood <= thresh && !isDjInDisco && finishedDiscos.length > 0) {
           const disco = pickNearestBld(finishedDiscos, ux, uy);
           if (disco && assignWorkAtBuilding(id, disco, [1, 2, 3, 4, 5, 6])) changed = true;
         }
@@ -5102,11 +5198,6 @@ function openCanvasBuildMenu() {
       canAfford,
       desc: spec.desc,
       action: () => {
-        if (state.wood < spec.woodCost || state.stone < spec.stoneCost || state.tools < spec.toolsCost) {
-          state.message = `Cần ${spec.woodCost} gỗ, ${spec.stoneCost} đá${spec.toolsCost ? `, ${spec.toolsCost} xương` : ''} để xây ${spec.name}!`;
-          render();
-          return;
-        }
         state.canvasMenu = null;
         startBuildPlacement(bType);
       },
@@ -5963,7 +6054,6 @@ function updatePanel() {
       choicesNode.classList.add('scrollable');
       BUILDINGS.forEach((b, idx) => {
         const spec = getBuildingSpec(state.data, b.type);
-        const canAfford = state.wood >= spec.woodCost && state.stone >= spec.stoneCost && state.tools >= spec.toolsCost;
         const costStr = `${spec.width}×${spec.height} · 🪵${spec.woodCost} 🪨${spec.stoneCost}${spec.toolsCost ? ` ⚒${spec.toolsCost}` : ''}`;
         addChoiceButton(
           spec.name,
@@ -5971,7 +6061,7 @@ function updatePanel() {
           state.buildType === b.type,
           () => startBuildPlacement(b.type),
           costStr,
-          !canAfford
+          false
         );
       });
       addChoiceButton('+25 GỖ & +20 ĐÁ (THỬ XÂY NHANH)', BUILDINGS.length, false, () => {

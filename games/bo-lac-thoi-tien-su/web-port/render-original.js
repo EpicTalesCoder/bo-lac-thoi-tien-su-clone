@@ -524,12 +524,10 @@ function drawEntitySprite(ctx, data, entityId, screenX, screenY, dir, fieldOffse
           } else {
             skip = true;
           }
-        } else if ((e[6565 + entityId] & 0xff) === 9 && (partKind === 5 || partKind === 6 || partKind === 8)) {
-          // Unarmed villager (weaponId === 9) must NEVER render any weapon attachment sprite!
-          skip = true;
         } else if (aw === 0 && partKind >= 5 && partKind <= 8) {
           const job = e[6565 + entityId];
-          if (dir < 0 && job === 1) skip = true;
+          if (job === 9) skip = true;
+          else if (dir < 0 && job === 1) skip = true;
           else if (partKind === 8 && job === 1 && baseSprite !== 1184) skip = true;
           else if ((partKind === 5 && job === 4) || (partKind === 6 && job === 5)) spriteOffset = 1;
           else if (m[mo[145] + job] !== partKind) skip = true;
@@ -537,7 +535,12 @@ function drawEntitySprite(ctx, data, entityId, screenX, screenY, dir, fieldOffse
           const carry = e[3535 + entityId];
           const job = e[6565 + entityId];
           if (carry !== 0) {
-            if (partKind === 4 && (e[3636 + entityId] > 0 || (animId >= 113 && animId <= 116))) {
+            if (
+              partKind === 4 &&
+              (e[3636 + entityId] > 0 ||
+                (animId >= 113 && animId <= 116) ||
+                (animId >= 39 && animId <= 42))
+            ) {
               spriteOffset += carry;
             } else if (partKind === 5) {
               if (job === 9) skip = true;

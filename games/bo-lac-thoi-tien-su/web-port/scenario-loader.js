@@ -297,6 +297,7 @@ export function exitBuildingSlot(data, unitId) {
   }
 
   // Unlink unitId from building's e[8993 + bid] chain
+  const leavingSlot = e[4646 + unitId];
   if (e[8993 + bid] === unitId) {
     e[8993 + bid] = e[4545 + unitId];
   } else {
@@ -316,8 +317,12 @@ export function exitBuildingSlot(data, unitId) {
   e[1313 + unitId] = 0;
   clearUnitFromOccupancy(data, unitId);
 
-  // If this was a Lều (bType 2), re-check remaining occupants so a solo sleeper reverts to state 1 (glowing light only)
+  // Exact port of b.java:3086-3094: if this was a Lều (bType 2) and slot 0 left while other sleepers remain,
+  // promote one of the remaining sleepers into slot 0 so the Lều window light (anim 115) stays lit!
   if (e[8749 + bid] === 2) {
+    if (leavingSlot === 0 && e[8993 + bid] > 0) {
+      e[4646 + e[8993 + bid]] = 0;
+    }
     let hasM = false;
     let hasF = false;
     let rem = e[8993 + bid];
