@@ -5313,11 +5313,14 @@ function stepVillagerNeeds() {
       e[2020 + id] = energy;
       e[505 + id] = mood;
 
-      // Authentic thought bubbles (b.java:2001-2006 & 3298-3323):
-      // 0 = hungry / food (anim 77), 1 = bored (anim 78), 2 = sleepy / Zzz (anim 79)
+      // Authentic thought bubbles decoded directly from mo[56] (b.java:1994-2006):
+      // 0 = hungry/food (anim 77), 1 = love/courtship ONLY (anim 78), 2 = sleepy/Zzz (anim 79),
+      // 3 = low HP (anim 80), 4 = very sad/bored (mood 0..19, anim 81), 5 = sad/unhappy (mood 20..39, anim 82)
       if (satiety <= 20) e[3333 + id] = 0;
       else if (energy <= 20) e[3333 + id] = 2;
-      else if (mood <= 25) e[3333 + id] = 1;
+      else if ((e[1919 + id] & 0xff) <= 15) e[3333 + id] = 3;
+      else if (mood <= 19) e[3333 + id] = 4;
+      else if (mood <= 30) e[3333 + id] = 5;
       else e[3333 + id] = -1;
 
       // Autonomous self-care (after eating/sleeping/dancing, resumeSavedJob() returns them to their previous job!):
