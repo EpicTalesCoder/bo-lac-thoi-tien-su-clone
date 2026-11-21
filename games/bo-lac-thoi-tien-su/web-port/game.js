@@ -27,8 +27,10 @@ import {
   isUnitInsideBuilding,
   clearUnitFromOccupancy,
   finishConstructionSite,
+  getBuildingMaxLevel,
   upgradeBuilding,
   demolishBuilding,
+  syncUnitAvatar,
   spawnNewbornVillager,
   captureTribeCarryover,
   loadScenarioFromMa,
@@ -1613,6 +1615,21 @@ function getAssignedBuilderCount(bid, excludeUnitId = 0) {
     if (uid === excludeUnitId) continue;
     if ((t.kind === 'build' && t.target?.bid === bid) || (t.kind === 'buildFetch' && t.buildBld?.bid === bid)) {
       seen.add(uid);
+      continue;
+    }
+    // Keep counting builders who temporarily stepped away to grab a weapon / defend / eat / rest
+    // so the construction site does NOT falsely display "!" (abandoned)!
+    if (
+      t.kind === 'armForBattle' ||
+      t.kind === 'attackUnit' ||
+      t.kind === 'attackBuilding' ||
+      t.kind === 'eat' ||
+      t.kind === 'rest'
+    ) {
+      const saved = state.savedJobs.get(uid);
+      if (saved?.kind === 'build' && saved.bid === bid && (e[1919 + uid] & 0xff) > 0) {
+        seen.add(uid);
+      }
     }
   }
   return seen.size;
@@ -2303,9 +2320,15 @@ function castShamanSpell(spell) {
 }
 
 function performUpgradeBuilding(bld) {
+  const maxLevel = getBuildingMaxLevel(state.data, bld.targetType);
   const level = state.data.entityData[9115 + bld.bid] & 0xff;
-  if (level >= 3) {
-    state.message = `${bld.spec.name} đã đạt cấp tối đa (Cấp 3).`;
+  if (maxLevel <= 1) {
+    state.message = `${bld.spec.name} không có cấp nâng cấp trong game gốc.`;
+    render();
+    return;
+  }
+  if (level >= maxLevel) {
+    state.message = `${bld.spec.name} đã đạt cấp tối đa (Cấp ${maxLevel}).`;
     render();
     return;
   }
@@ -2749,6 +2772,7 @@ function commandUnitTo(tx, ty, overrideIds = null, owner = state.localTribe ?? 0
     return;
   }
 
+  state.savedJobs.delete(unitId);
   ensureUnitOutside(unitId);
   setUnitCarry(unitId, 0, 0);
   const info = getVillagerInfo(unitId);
@@ -3362,6 +3386,11 @@ function stepUnitMovement(unitId, task, isEnemy = false) {
 
   // Authentic original pace from mo[15] + e[1010+uid]: 8 ticks/tile cardinal, 11 ticks/tile diagonal at 120ms/tick
   const stepsPerTile = getUnitStepTicks(unitId, dx, dy);
+  // If speed changed mid-tile (e.g. sprint <-> walk), proportionally rescale stepProgress so the unit never jerks backward!
+  if (task.stepProgress > 0 && task.lastStepsPerTile && task.lastStepsPerTile !== stepsPerTile) {
+    task.stepProgress = Math.max(1, Math.min(stepsPerTile - 1, Math.round((task.stepProgress / task.lastStepsPerTile) * stepsPerTile)));
+  }
+  task.lastStepsPerTile = stepsPerTile;
   const isChild = (e[1414 + unitId] & 0xff) < 12;
   const isCarrying = !isEnemy && e[3535 + unitId] > 0 && e[3636 + unitId] > 0;
   const sprinting = isUnitSprinting(unitId);
@@ -3858,28 +3887,47 @@ function stepSimulation() {
           }
         }
 
-        // If some materials are missing from Storage AND none have been delivered yet (or all required materials are still missing),
-        // builder holds up the authentic missing-resource protest sign inside the construction site (anim 115 -> 113, carrySprite 2=Wood, 3=Stone, 4=Bone)!
+        // Authentic b.java:4264: ONLY 1 builder inside an under-construction site (slotIdx === 0, or the lowest-slot
+        // builder currently inside) holds up the missing-resource protest sign (anim 115 -> 113, carrySprite 2/3/4)!
         const hasDeliveredAny =
           (need.deliveredWood || 0) > 0 || (need.deliveredStone || 0) > 0 || (need.deliveredTools || 0) > 0;
         if (!canFetchNow && !otherFetching) {
+          let leadBuilderId = unitId;
+          let minSlot = task.insideSlot?.slotIdx ?? 99;
+          let curInside = e[8993 + bid];
+          let gLead = 0;
+          while (curInside > 0 && gLead++ < 16) {
+            const sIdx = e[4646 + curInside];
+            if (sIdx >= 0 && (sIdx < minSlot || (sIdx === minSlot && curInside < leadBuilderId))) {
+              minSlot = sIdx;
+              leadBuilderId = curInside;
+            }
+            curInside = e[4545 + curInside];
+          }
+          const isLeadSignHolder = unitId === leadBuilderId;
           const missingSprite = need.wood > 0 ? 2 : need.stone > 0 ? 3 : 4;
           const missingLabel = need.wood > 0 ? 'Gỗ' : need.stone > 0 ? 'Đá' : 'Xương';
           // Switch between hammering already-delivered materials and raising the missing-material sign!
           if (!hasDeliveredAny || (Math.floor(task.workTicks / 24) % 2 === 0)) {
-            setUnitCarry(unitId, missingSprite, 0);
-            if (task.insideSlot && task.insideSlot.slotIdx >= 0) {
-              const signFrame = task.workTicks % 25;
-              if (signFrame < 13) {
-                setUnitAnim(unitId, 115, signFrame);
+            if (isLeadSignHolder) {
+              setUnitCarry(unitId, missingSprite, 0);
+              if (task.insideSlot && task.insideSlot.slotIdx >= 0) {
+                const signFrame = task.workTicks % 25;
+                if (signFrame < 13) {
+                  setUnitAnim(unitId, 115, signFrame);
+                } else {
+                  setUnitAnim(unitId, 113, (signFrame - 13) % 12);
+                }
               } else {
-                setUnitAnim(unitId, 113, (signFrame - 13) % 12);
+                setUnitAnim(unitId, 40, Math.floor(task.workTicks / 4) % 2);
+              }
+              if (task.workTicks % 60 === 0 && bldOwner === (state.localTribe ?? 0)) {
+                state.message = `🪧 Thợ xây tại ${bld.spec.name} đang giơ bảng báo thiếu ${missingLabel} trong kho!`;
               }
             } else {
-              setUnitAnim(unitId, 40, Math.floor(task.workTicks / 4) % 2);
-            }
-            if (task.workTicks % 60 === 0 && bldOwner === (state.localTribe ?? 0)) {
-              state.message = `🪧 Thợ xây tại ${bld.spec.name} đang giơ bảng báo thiếu ${missingLabel} trong kho!`;
+              // Secondary builders at the same unfinished site wait quietly without holding a second protest sign!
+              setUnitCarry(unitId, 0, 0);
+              setUnitAnim(unitId, 8, 0);
             }
             task.workTicks++;
             uiChanged = true;
@@ -4118,9 +4166,10 @@ function stepSimulation() {
       }
     } else if (task.kind === 'eat') {
       const bld = task.target;
-      // Enter Bếp (bType 4) dining slots 1..6 to play authentic sitting & eating animations (anim 83/84, 12 frames)
+      // Enter Bếp (bType 4) dining slots 1..6 (strictPreferred=true so diners NEVER fall back into Chef slot 0!)
+      // to play authentic sitting & eating animations (anim 85 / 86, 19 frames)
       if (bld.targetType === 4 && !task.insideSlot && !task.eatOutside) {
-        const slot = enterBuildingWorkSlot(d, bld.bid, unitId, [1, 2, 3, 4, 5, 6]);
+        const slot = enterBuildingWorkSlot(d, bld.bid, unitId, [1, 2, 3, 4, 5, 6], true);
         if (slot) {
           task.insideSlot = slot;
         } else {
@@ -4128,14 +4177,20 @@ function stepSimulation() {
         }
       }
       if (task.insideSlot && task.insideSlot.anims?.length) {
-        const animEntry = task.insideSlot.anims[0];
+        const animEntry = task.insideSlot.anims.find((a) => a.animId !== 0) || task.insideSlot.anims[0];
         setUnitAnim(unitId, animEntry.animId, task.workTicks % animEntry.frames);
+        // Smoothly refill satiety bar while visibly eating inside Nhà ăn
+        if (task.workTicks % 4 === 0) {
+          e[2121 + unitId] = Math.min(100, (e[2121 + unitId] & 0xff) + 10);
+          if ((e[3333 + unitId] & 0xff) === 0) e[3333 + unitId] = -1;
+          uiChanged = true;
+        }
       } else {
         e[606 + unitId] = directionFromDelta(bld.x - ux, bld.y - uy);
-        setUnitAnim(unitId, 16, Math.floor(task.workTicks / 2) % 8);
+        setUnitAnim(unitId, 85, task.workTicks % 19);
       }
       task.workTicks++;
-      const eatDuration = task.insideSlot ? 24 : 16;
+      const eatDuration = task.insideSlot ? 38 : 20;
       if (task.workTicks >= eatDuration) {
         const unitOwner = unitId > 50 ? 1 : 0;
         const r = d.resources?.[unitOwner];
@@ -4563,7 +4618,7 @@ function stepSimulation() {
             e[2121 + unitId] = 100;
             const maxHp = e[6767 + unitId] & 0xff;
             e[1919 + unitId] = Math.min(maxHp, (e[1919 + unitId] & 0xff) + 4);
-            if ((e[3333 + unitId] & 0xff) === 2) e[3333 + unitId] = -1;
+            if ((e[3333 + unitId] & 0xff) === 0) e[3333 + unitId] = -1;
             uiChanged = true;
           }
           if (task.workTicks % 60 === 0) {
@@ -5047,6 +5102,7 @@ function stepVillagerNeeds() {
             }
             e[6767 + id] = 42;
             e[1919 + id] = 42;
+            syncUnitAvatar(d, id, id);
             setUnitAnim(id, 8, 0);
             if (tribe === (state.localTribe ?? 0)) {
               state.message = `🎂 ${getVillagerName(d, id)} đã trưởng thành và sẵn sàng lao động!`;
@@ -5077,9 +5133,10 @@ function stepVillagerNeeds() {
       e[2020 + id] = energy;
       e[505 + id] = mood;
 
-      // Authentic thought bubbles (b.java:1998-2003): 0=sleepy, 1=bored, 2=hungry
-      if (satiety <= 20) e[3333 + id] = 2;
-      else if (energy <= 20) e[3333 + id] = 0;
+      // Authentic thought bubbles (b.java:2001-2006 & 3298-3323):
+      // 0 = hungry / food (anim 77), 1 = bored (anim 78), 2 = sleepy / Zzz (anim 79)
+      if (satiety <= 20) e[3333 + id] = 0;
+      else if (energy <= 20) e[3333 + id] = 2;
       else if (mood <= 25) e[3333 + id] = 1;
       else e[3333 + id] = -1;
 
@@ -5642,8 +5699,9 @@ function openCanvasBuildingMenu(bld) {
     });
   }
 
-  // Upgrade building (anim 16)
-  if (level < 3) {
+  // Upgrade building (anim 16) — ONLY when this building has upgrade stage textures in the original game!
+  const maxLevel = getBuildingMaxLevel(state.data, bld.targetType);
+  if (level < maxLevel) {
     items.push({
       label: `NÂNG CẤP CẤP ${level + 1}`,
       iconAnim: 16,
@@ -6040,10 +6098,21 @@ function drawFrameToCtx(targetCtx) {
     if (state.data) {
       state.selectedUnitName = state.selectedUnit ? getVillagerName(state.data, state.selectedUnit) : '';
       const bMap = new Map();
+      const chefSet = new Set();
       for (const b of getPlayerBuildings(state.localTribe ?? 0)) {
         if (b.underConstruction) bMap.set(b.bid, getAssignedBuilderCount(b.bid));
+        else if (b.targetType === 4 && isBuildingSlot0Occupied(b.bid)) chefSet.add(b.bid);
+      }
+      for (const [uid, t] of state.tasks.entries()) {
+        if (t.kind === 'chefFetch' && t.kitchen?.bid) chefSet.add(t.kitchen.bid);
+        else if (t.kind === 'workBuilding' && t.target?.targetType === 4 && t.preferredSlots?.[0] === 0) chefSet.add(t.target.bid);
+        else if (t.kind === 'armForBattle' || t.kind === 'attackUnit' || t.kind === 'attackBuilding') {
+          const saved = state.savedJobs.get(uid);
+          if (saved?.kind === 'workBuilding' && saved.preferredSlots?.[0] === 0 && saved.bid) chefSet.add(saved.bid);
+        }
       }
       state.buildingBuilders = bMap;
+      state.kitchenHasChef = chefSet;
       renderOriginalMap(ctx, state.data, state, spriteCache);
     } else {
       ctx.fillStyle = '#18241b';
@@ -6391,7 +6460,8 @@ function updatePanel() {
           });
         }
 
-        if (level < 3) {
+        const maxLevel = getBuildingMaxLevel(state.data, bld.targetType);
+        if (level < maxLevel) {
           const canUp = state.wood >= 15 && state.stone >= 10;
           addChoiceButton(`NÂNG CẤP LÊN CẤP ${level + 1}`, btnIdx++, false, () => performUpgradeBuilding(bld), '🪵15 🪨10', !canUp);
         }
@@ -7274,9 +7344,14 @@ function finishCanvasPointerDrag(event, cancelled = false) {
     return;
   }
 
-  // Single left-click: reset sprint flag so single click = normal walk (anim 0)
+  // Single left-click: if a villager is ALREADY running along a path, keep them running smoothly
+  // instead of dropping back to walk speed (which would also cause a backward sub-tile jerk)!
   for (const id of activeIds) {
-    e[7777 + id] = 0;
+    const t = state.tasks.get(id);
+    const alreadyRunning = Boolean(t?.path?.length > 0 && (e[7777 + id] & 0xff) > 0);
+    if (!alreadyRunning) {
+      e[7777 + id] = 0;
+    }
   }
   lastMapClick = { time: now, x: cell.x, y: cell.y };
   confirm();
@@ -7594,7 +7669,10 @@ Promise.all([
       const e = state.data.entityData;
       if (cmd.kind === 'commandTo') {
         const ids = (cmd.unitIds || []).filter((id) => id >= 51 && id <= 100 && (e[1919 + id] & 0xff) > 0);
-        for (const id of ids) e[7777 + id] = 0;
+        for (const id of ids) {
+          const t = state.tasks.get(id);
+          if (!(t?.path?.length > 0 && (e[7777 + id] & 0xff) > 0)) e[7777 + id] = 0;
+        }
         if (ids.length > 0) commandUnitTo(cmd.tx, cmd.ty, ids, 1);
       } else if (cmd.kind === 'sprint') {
         const ids = (cmd.unitIds || []).filter((id) => id >= 51 && id <= 100 && (e[1919 + id] & 0xff) > 0);

@@ -665,7 +665,7 @@ function drawPanel4Text(ctx, text, x, y, align = 'center', size = 8, color = '#f
  */
 export function drawOriginalVillagerHud(ctx, data, state, imageCache) {
   const uid = state.selectedUnit || 0;
-  if (uid < 1 || uid > 50 || !data?.entityData) return;
+  if (uid < 1 || uid > 100 || !data?.entityData) return;
   const e = data.entityData;
   const hp = e[1919 + uid] & 0xff;
   if (hp <= 0) return;
@@ -687,8 +687,19 @@ export function drawOriginalVillagerHud(ctx, data, state, imageCache) {
   ctx.translate(ox, 0);
   drawComposite(ctx, data, 616, 0, y0, imageCache);
 
-  // 1. Avatar portrait (composite 720 + e[2727+uid] at pos (1, 5))
-  const avt = e[2727 + uid] & 0xff;
+  // 1. Avatar portrait (composite 720 + e[2727+uid] at pos (1, 5)) — always synced to gender & ageGroup (f.java:5439)
+  const sex = e[1515 + uid] & 1;
+  const age = e[1414 + uid] & 0xff;
+  let avt = e[2727 + uid] & 0xff;
+  if (m && mo && mo[189] !== undefined) {
+    const ageGroup = age < 12 ? 0 : age < 35 ? 1 : 2;
+    const avBase = m[mo[189] + sex * 10 + ageGroup * 2] & 0xff;
+    const avSpan = Math.max(1, m[mo[189] + sex * 10 + ageGroup * 2 + 1] & 0xff);
+    if (avt < avBase || avt >= avBase + avSpan) {
+      avt = (avBase + (uid % avSpan)) & 0xff;
+      e[2727 + uid] = avt;
+    }
+  }
   drawComposite(ctx, data, 720 + avt, 1, y0 + 5, imageCache);
 
   // 2. Villager name centered at (58, y0+5)
@@ -698,9 +709,7 @@ export function drawOriginalVillagerHud(ctx, data, state, imageCache) {
   drawPanel4Text(ctx, uid === chiefId ? `★${shortName}` : shortName, 60, y0 + 5, 'center', 8, uid === chiefId ? '#fff566' : '#fff8d4');
 
   // 3. Gender icon (composite 619=male, 620=female at (34, 24)) & Age at (58, 25)
-  const sex = e[1515 + uid] & 1;
   drawComposite(ctx, data, 619 + sex, 34, y0 + 24, imageCache);
-  const age = e[1414 + uid] & 0xff;
   drawPanel4Text(ctx, String(age), 58, y0 + 26, 'center', 8, '#fff55a');
 
   // 4. Mood face icon (composite 675 + floor(e[505+uid]/21) at (70, 23))
@@ -1159,7 +1168,7 @@ function drawAuthenticBottomMenu(ctx, data, state, imageCache) {
         }
       }
     } else if (item.unitId !== undefined) {
-      const av = (data.entityData[2727 + item.unitId] & 0xff) % 10;
+      const av = data.entityData[2727 + item.unitId] & 0xff;
       drawComposite(ctx, data, 720 + av, sx + 1, sy - 2, imageCache);
     } else if (item.glyph) {
       ctx.fillStyle = isSel ? '#fff582' : '#2e1d08';
@@ -1340,8 +1349,11 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
             }
 
             // Authentic original "!" alert animation d(40) centered on building (exact f.java:1773-1774):
-            // Shown when a construction site has 0 builders assigned, OR when Sàn disco has no DJ in slot 0!
-            if (isMine && ((isUnderConst && assignedBuilders === 0) || (bTypeCur === 7 && !isUnderConst && !hasDj))) {
+            // Shown when a construction site has 0 builders assigned, when Sàn disco (7) has no DJ in slot 0,
+            // OR when Nhà ăn / Bếp (4) has no Chef in slot 0 (nor a Chef fetching ingredients)!
+            const kitchenNeedsChef =
+              bTypeCur === 4 && !isUnderConst && !hasDj && !state.kitchenHasChef?.has?.(bid);
+            if (isMine && ((isUnderConst && assignedBuilders === 0) || (bTypeCur === 7 && !isUnderConst && !hasDj) || kitchenNeedsChef)) {
               const cx = (e[8383 + bid] - camX) * CELL_WIDTH + bw * 11 - 11;
               const cy = originY + (e[8444 + bid] - camY) * CELL_HEIGHT + bh * 8 - 8;
               drawAnimation(ctx, data, 40, cx, cy, animTick, imageCache);

@@ -473,7 +473,7 @@ function getUnlockedBuildingSlots(data, bType, bStage) {
   return unlocked.size > 0 ? unlocked : null;
 }
 
-export function enterBuildingWorkSlot(data, bid, unitId, preferredSlots = null) {
+export function enterBuildingWorkSlot(data, bid, unitId, preferredSlots = null, strictPreferred = false) {
   const e = data.entityData;
   const rawType = e[8749 + bid] & 0xff;
   const bType = rawType >= 12 && rawType <= 19 ? (e[9237 + bid] & 0xff) : rawType;
@@ -508,7 +508,7 @@ export function enterBuildingWorkSlot(data, bid, unitId, preferredSlots = null) 
       }
     }
   }
-  if (freeSlot === -1) {
+  if (freeSlot === -1 && !strictPreferred) {
     for (let s = 0; s < slotCount; s++) {
       if (!usedSlots.has(s) && (!unlockedSlots || unlockedSlots.has(s))) {
         freeSlot = s;
@@ -534,10 +534,28 @@ export function enterBuildingWorkSlot(data, bid, unitId, preferredSlots = null) 
   return { slotIdx: freeSlot, bType, jobId: meta.jobId, anims: meta.anims };
 }
 
+export function getBuildingMaxLevel(data, bType) {
+  const shorts = data?.shortSpriteTables;
+  const bytes = data?.byteSpriteTables;
+  if (!shorts || !bytes || bType < 0 || bType > 11) return 1;
+  const start = shorts[0]?.[bType + 1];
+  const cnt = (bytes[0]?.[bType + 1] ?? 0) & 0xff;
+  if (start === undefined || cnt === 0) return 1;
+  let maxStage = 1;
+  for (let i = 0; i < cnt; i++) {
+    const stageReq = (bytes[3][start + i] & 0xff) >>> 6;
+    if (stageReq > maxStage) maxStage = stageReq;
+  }
+  return maxStage;
+}
+
 export function upgradeBuilding(data, bid) {
   const e = data.entityData;
+  const rawType = e[8749 + bid] & 0xff;
+  const bType = rawType >= 12 && rawType <= 19 ? (e[9237 + bid] & 0xff) : rawType;
+  const maxStage = getBuildingMaxLevel(data, bType);
   const stage = e[9115 + bid] & 0xff;
-  if (stage >= 3) return false;
+  if (stage >= maxStage) return false;
   e[9115 + bid] = stage + 1;
   const newMax = Math.min(240, (e[8566 + bid] & 0xff) + 25);
   e[8566 + bid] = newMax;
@@ -636,6 +654,22 @@ export function enterRestHut(data, bid, unitId) {
   return { slotIdx: freeSlot, breeding: canBreed };
 }
 
+export function syncUnitAvatar(data, uid, seed = uid) {
+  const e = data?.entityData;
+  const m = data?.mapTableData;
+  const mo = data?.mapTableOffsets;
+  if (!e || !m || !mo || uid < 1 || uid > 100) return;
+  const sex = e[1515 + uid] & 1;
+  const age = e[1414 + uid] & 0xff;
+  const ageGroup = age < 12 ? 0 : age < 35 ? 1 : 2;
+  const avBase = m[mo[189] + sex * 10 + ageGroup * 2] & 0xff;
+  const avSpan = Math.max(1, m[mo[189] + sex * 10 + ageGroup * 2 + 1] & 0xff);
+  const cur = e[2727 + uid] & 0xff;
+  if (cur < avBase || cur >= avBase + avSpan) {
+    e[2727 + uid] = (avBase + (Math.abs(seed) % avSpan)) & 0xff;
+  }
+}
+
 export function spawnNewbornVillager(data, x, y, owner = 0) {
   const e = data.entityData;
   const fo = data.entityFieldOffsets;
@@ -653,6 +687,7 @@ export function spawnNewbornVillager(data, x, y, owner = 0) {
   if (spawned > 0) {
     // Authentic newborn / child (age < 12 uses toddler/child sprite in render-original.js)
     e[1414 + spawned] = 1;
+    syncUnitAvatar(data, spawned, spawned + 7);
     e[6767 + spawned] = 20;
     e[1919 + spawned] = 20;
     e[2020 + spawned] = 100;
@@ -826,16 +861,10 @@ function spawnUnit(data, owner, x, y, indexSeed) {
   e[6565 + uid] = owner === 1 ? indexSeed % 3 : 9; // enemy warriors spawn armed (club/stone/spear)
   e[7979 + uid] = 0;
 
-  // Authentic Panel 4 fields: avatar portrait (f.java:5542 mo[189]), mood, skills & speed
-  const m = data.mapTableData;
-  const mo = data.mapTableOffsets;
+  // Authentic Panel 4 fields: avatar portrait (f.java:5439 mo[189]), mood, skills & speed
   const fo = data.entityFieldOffsets;
-  const sex = e[1515 + uid] & 1;
-  const age = e[1414 + uid] & 0xff;
-  const ageGroup = age < 12 ? 0 : age < 35 ? 1 : 2;
-  const avBase = m?.[mo?.[189] + sex * 10 + ageGroup * 2] & 0xff;
-  const avSpan = Math.max(1, m?.[mo?.[189] + sex * 10 + ageGroup * 2 + 1] & 0xff);
-  e[2727 + uid] = (avBase + (indexSeed % avSpan)) & 0xff;
+  e[2727 + uid] = 255;
+  syncUnitAvatar(data, uid, indexSeed);
   e[505 + uid] = 85 + ((indexSeed * 3) % 12); // mood 0..100
   e[2525 + uid] = indexSeed % 2 === 0 ? 14 : 13; // combat skill 1 (melee/scout)
   e[2626 + uid] = indexSeed % 2 === 0 ? 13 : 14; // combat skill 2
@@ -901,14 +930,15 @@ function cloneFirstMapSnapshot(baseData) {
   };
   // Normalize initial idle villagers: no stale thought bubbles, outside all building slots
   const e = cloned.entityData;
-  for (let uid = 1; uid <= 50; uid++) {
-    if ((e[1919 + uid] & 0xff) > 0) {
-      e[2222 + uid] = 0;
-      e[3333 + uid] = -1;
-      e[4646 + uid] = -1;
-      e[6464 + uid] = 69;
+    for (let uid = 1; uid <= 50; uid++) {
+      if ((e[1919 + uid] & 0xff) > 0) {
+        e[2222 + uid] = 0;
+        e[3333 + uid] = -1;
+        e[4646 + uid] = -1;
+        e[6464 + uid] = 69;
+        syncUnitAvatar(cloned, uid, uid);
+      }
     }
-  }
   return cloned;
 }
 
@@ -1177,6 +1207,8 @@ export function loadScenarioFromMa(baseData, maBytes, scenarioIndex, options = {
       entityData[5151 + uid] = vet.nameStyle;
       entityData[1515 + uid] = vet.sex;
       entityData[1414 + uid] = vet.age;
+      if (vet.avatar !== undefined) entityData[2727 + uid] = vet.avatar;
+      syncUnitAvatar(data, uid, uid);
       entityData[6767 + uid] = vet.maxHp;
       entityData[1919 + uid] = vet.maxHp;
       entityData[6565 + uid] = vet.weaponId;
@@ -1316,6 +1348,8 @@ export function prepareMultiplayerMatch(baseData, maBytes, scenarioIndex = 1, lo
       if (uid > 0) {
         e[1515 + uid] = k % 2; // balanced 4 males + 4 females
         e[1414 + uid] = 20 + (k % 8);
+        e[2727 + uid] = 255;
+        syncUnitAvatar(data, uid, k + 1 + owner * 10);
         e[6767 + uid] = 42;
         e[1919 + uid] = 42;
         e[2020 + uid] = 100;
