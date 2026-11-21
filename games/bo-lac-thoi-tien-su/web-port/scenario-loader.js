@@ -387,13 +387,18 @@ export function getBuildingSlotAnims(data, bType, slotIdx) {
   const mo = data?.mapTableOffsets;
   const bytes = data?.byteSpriteTables;
   if (!mb || !mo || !bytes) {
-    return { jobId: 0, slotCount: 1, anims: [{ animId: 105, frames: 16 }] };
+    return { jobId: 0, slotCount: 1, anims: [{ animId: 81, frames: 6 }] };
   }
   const base = mb[mo[174] + bType] & 0xff;
   const nextBase = mb[mo[174] + bType + 1] & 0xff;
   const slotCount = Math.max(1, nextBase - base);
   const clampedSlot = Math.max(0, Math.min(slotCount - 1, slotIdx));
-  const jobId = mb[mo[57] + base + clampedSlot] & 0xff;
+  // Bếp (bType 4) dining slots 1..6 use mo[57] (jobs 67/68 -> anim 83/84 sitting & eating);
+  // All other building slots (including Bếp slot 0 Chef = job 54 -> anim 81/82 cooking,
+  // Kho vũ khí = job 52 -> anim 53 forging, Khu thánh địa = job 55 -> anim 140 shaman,
+  // Sàn disco = job 86 DJ anim 117 & dancers 126..136) use mo[58] (exact b.java table)!
+  const useTable57 = bType === 4 && clampedSlot > 0;
+  const jobId = mb[mo[useTable57 ? 57 : 58] + base + clampedSlot] & 0xff;
   const aStart = mb[mo[166] + jobId] & 0xff;
   const aEnd = mb[mo[166] + jobId + 1] & 0xff;
   const anims = [];
@@ -404,7 +409,7 @@ export function getBuildingSlotAnims(data, bType, slotIdx) {
     anims.push({ animId, frames });
   }
   if (anims.length === 0) {
-    anims.push({ animId: 105, frames: 16 });
+    anims.push({ animId: 81, frames: 6 });
   }
   return { jobId, slotCount, anims };
 }
@@ -1273,6 +1278,16 @@ export function prepareMultiplayerMatch(baseData, maBytes, scenarioIndex = 1, lo
   const t0 = setupTribe(0, a0);
   const t1 = setupTribe(1, a1);
   data.mpBases = [t0, t1];
+
+  // Reset fogOfWar AFTER placing both bases (placeBuilding reveals fog during placement!)
+  // so each player ONLY sees their own side of the map until they scout!
+  if (Array.isArray(data.fogOfWar)) {
+    for (let layer = 0; layer < data.fogOfWar.length; layer++) {
+      for (let word = 0; word < data.fogOfWar[layer].length; word++) {
+        data.fogOfWar[layer][word].fill(0);
+      }
+    }
+  }
 
   // Reveal fog of war ONLY for localTribe's own base & units
   const myBase = localTribe === 1 ? t1 : t0;

@@ -2227,7 +2227,7 @@ function runTribeAutoAI() {
 
 function isUnitSprinting(unitId) {
   const d = state.data;
-  if (!d || unitId <= 0 || unitId > 50) return false;
+  if (!d || unitId <= 0 || unitId > 100) return false;
   const e = d.entityData;
   return (
     (e[7777 + unitId] & 0xff) > 0 &&
@@ -2324,7 +2324,9 @@ function stepUnitMovement(unitId, task, isEnemy = false) {
     e[202 + unitId] = 0;
     e[303 + unitId] = 0;
     setUnitOnTile(d, unitId, destX, destY);
-    if (!isEnemy) revealFog(d, destX, destY, 4);
+    if (!isEnemy && (unitId > 50 ? 1 : 0) === (state.localTribe ?? 0)) {
+      revealFog(d, destX, destY, 4);
+    }
     task.path.shift();
     task.stepProgress = 0;
     if (!isEnemy && isUnitSprinting(unitId)) {
@@ -2428,15 +2430,16 @@ function stepSimulation() {
       }
     }
 
-    // Combat tasks handle chase + ranged/melee engagement dynamically
+    // Combat tasks handle chase + fast, dramatic ranged/melee engagement dynamically
     if (task.kind === 'attackUnit') {
+      const unitOwner = unitId > 50 ? 1 : 0;
       const tid = task.targetId;
       if ((e[1919 + tid] & 0xff) <= 0) {
         // Target dead -> auto-acquire another nearby enemy within 6 tiles
         state.tasks.delete(unitId);
         setUnitAnim(unitId, 8, 0);
         if (state.selectedUnit === unitId) state.activePath = [];
-        const nextEnemy = getEnemyIds().find((eid) => Math.max(Math.abs((e[eid] & 0xff) - ux), Math.abs((e[101 + eid] & 0xff) - uy)) <= 6);
+        const nextEnemy = getEnemyIds(unitOwner).find((eid) => Math.max(Math.abs((e[eid] & 0xff) - ux), Math.abs((e[101 + eid] & 0xff) - uy)) <= 6);
         if (nextEnemy) assignAttackTask(unitId, 'unit', nextEnemy);
         uiChanged = true;
         continue;
@@ -2471,24 +2474,31 @@ function stepSimulation() {
       const dmg = getUnitDamage(unitId);
       const wId = e[6565 + unitId] & 0xff;
       if (range > 1) {
-        setUnitAnim(unitId, 35, Math.floor(task.cooldown / 2) % 6);
-        if (task.cooldown === 8) {
+        // Fast 1-frame-per-tick ranged throw (anim 35, 6 frames)
+        setUnitAnim(unitId, 35, task.cooldown % 6);
+        if (task.cooldown === 3) {
           launchProjectile(unitId, 'unit', tid, ux, uy, tx, ty, wId, dmg);
           uiChanged = true;
         }
+        task.cooldown = (task.cooldown + 1) % 7;
       } else {
-        setUnitAnim(unitId, 25, Math.floor(task.cooldown / 2) % 6);
-        if (task.cooldown === 8) {
+        // Fast, dramatic 1-frame-per-tick melee combo (anim 25, 29, 33 — punch/club/slash)
+        const meleeAnims = [25, 29, 33];
+        const comboIdx = Math.floor((task.workTicks || 0) / 6) % meleeAnims.length;
+        setUnitAnim(unitId, meleeAnims[comboIdx], task.cooldown % 6);
+        if (task.cooldown === 3) {
           applyUnitDamage(unitId, tid, dmg);
           uiChanged = true;
         }
+        task.workTicks = (task.workTicks || 0) + 1;
+        task.cooldown = (task.cooldown + 1) % 6;
       }
-      task.cooldown = (task.cooldown + 1) % 14;
       continue;
     }
 
     if (task.kind === 'attackBuilding') {
-      const bld = getEnemyBuildings().find((b) => b.bid === task.targetId);
+      const unitOwner = unitId > 50 ? 1 : 0;
+      const bld = getEnemyBuildings(unitOwner).find((b) => b.bid === task.targetId);
       if (!bld || bld.hp <= 0) {
         state.tasks.delete(unitId);
         setUnitAnim(unitId, 8, 0);
@@ -2525,19 +2535,23 @@ function stepSimulation() {
       const dmg = getUnitDamage(unitId);
       const wId = e[6565 + unitId] & 0xff;
       if (range > 1) {
-        setUnitAnim(unitId, 35, Math.floor(task.cooldown / 2) % 6);
-        if (task.cooldown === 8) {
+        setUnitAnim(unitId, 35, task.cooldown % 6);
+        if (task.cooldown === 3) {
           launchProjectile(unitId, 'building', bld.bid, ux, uy, cx, cy, wId, dmg);
           uiChanged = true;
         }
+        task.cooldown = (task.cooldown + 1) % 7;
       } else {
-        setUnitAnim(unitId, 25, Math.floor(task.cooldown / 2) % 6);
-        if (task.cooldown === 8) {
+        const meleeAnims = [25, 29, 33];
+        const comboIdx = Math.floor((task.workTicks || 0) / 6) % meleeAnims.length;
+        setUnitAnim(unitId, meleeAnims[comboIdx], task.cooldown % 6);
+        if (task.cooldown === 3) {
           applyBuildingDamage(unitId, bld.bid, dmg);
           uiChanged = true;
         }
+        task.workTicks = (task.workTicks || 0) + 1;
+        task.cooldown = (task.cooldown + 1) % 6;
       }
-      task.cooldown = (task.cooldown + 1) % 14;
       continue;
     }
 
