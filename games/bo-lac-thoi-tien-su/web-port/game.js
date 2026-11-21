@@ -2034,7 +2034,9 @@ function startCourtshipPair(force = false, preferredHut = null) {
   setUnitCarry(maleId, 0, 0);
   setUnitCarry(femaleId, 0, 0);
 
-  const femalePlanned = planUnitPath(femaleId, meetSpot.x2, meetSpot.y2, true);
+  const femalePlanned =
+    planUnitPath(femaleId, meetSpot.x2, meetSpot.y2, false) ??
+    planUnitPath(femaleId, meetSpot.x2, meetSpot.y2, true);
   if (femalePlanned === null) return false;
 
   const pair = {
@@ -2765,14 +2767,6 @@ function commandUnitTo(tx, ty, overrideIds = null, owner = state.localTribe ?? 0
         render();
       }
       return;
-    } else if (bld && bld.targetType === 3 && state.food > 0) {
-      if (assignEatTask(adultIds[0], bld)) {
-        if (!overrideIds) {
-          state.message = `${getVillagerInfo(adultIds[0]).role} đang tới ${bld.spec.name} ăn hồi sức.`;
-          render();
-        }
-        return;
-      }
     } else if (bld && [0, 8, 9, 11].includes(bld.targetType)) {
       // Kho vũ khí (bType 0) only has 1 Blacksmith slot (slot 0) — don't assign a 2nd villager if already staffed!
       if (bld.targetType === 0 && isBuildingSlot0Occupied(bld.bid)) {
@@ -4321,12 +4315,15 @@ function stepSimulation() {
         continue;
       }
       // Enter Bếp (bType 4) dining slots 1..6 (strictPreferred=true so diners NEVER fall back into Chef slot 0!)
-      if (bld.targetType === 4 && !task.insideSlot && !task.eatOutside) {
+      // Diners MUST enter inside Nhà ăn to eat — NEVER eat from outside!
+      if (bld.targetType === 4 && !task.insideSlot) {
         const slot = enterBuildingWorkSlot(d, bld.bid, unitId, [1, 2, 3, 4, 5, 6], true);
         if (slot) {
           task.insideSlot = slot;
         } else {
-          task.eatOutside = true;
+          // All dining seats are currently full -> wait quietly outside the door until a seat opens!
+          setUnitAnim(unitId, 8, 0);
+          continue;
         }
       }
       task.workTicks++;
@@ -4338,15 +4335,16 @@ function stepSimulation() {
           setUnitAnim(unitId, isLeftSide ? 83 : 84, Math.floor(task.workTicks / 2) % 12);
           continue;
         }
-        // Cooked food is on the table -> play authentic eating animation WITH food bowl s1138 (anim 85/86, 19 frames)!
+        // Cooked food is on the table -> play authentic eating animation WITH food bowl s1138 (anim 85/86, 19 frames)
+        // for a realistic unhurried meal (~95 ticks / ~11.4s = 2.5 full eating loops)!
         task.eatTicks = (task.eatTicks || 0) + 1;
         setUnitAnim(unitId, isLeftSide ? 85 : 86, Math.floor((task.eatTicks - 1) / 2) % 19);
-        if (task.eatTicks % 4 === 0) {
-          e[2121 + unitId] = Math.min(100, (e[2121 + unitId] & 0xff) + 10);
-          if ((e[3333 + unitId] & 0xff) === 0) e[3333 + unitId] = -1;
+        if (task.eatTicks % 3 === 0) {
+          e[2121 + unitId] = Math.min(100, (e[2121 + unitId] & 0xff) + 3);
+          if ((e[3333 + unitId] & 0xff) === 0 && (e[2121 + unitId] & 0xff) > 30) e[3333 + unitId] = -1;
           uiChanged = true;
         }
-        if (task.eatTicks >= 38) {
+        if (task.eatTicks >= 95) {
           e[8871 + bld.bid] = Math.max(0, cooked - 2);
           const unitOwner = unitId > 50 ? 1 : 0;
           const r = d.resources?.[unitOwner];
@@ -4373,35 +4371,10 @@ function stepSimulation() {
         }
         continue;
       }
-      e[606 + unitId] = directionFromDelta(bld.x - ux, bld.y - uy);
-      setUnitAnim(unitId, 85, Math.floor(task.workTicks / 2) % 19);
-      const eatDuration = 24;
-      if (task.workTicks >= eatDuration) {
-        const unitOwner = unitId > 50 ? 1 : 0;
-        const r = d.resources?.[unitOwner];
-        const curFood = unitOwner === (state.localTribe ?? 0) ? state.food : (r?.[0] || 0);
-        if (curFood > 0) {
-          if (unitOwner === (state.localTribe ?? 0)) {
-            state.food = Math.max(0, state.food - 1);
-            syncResourcesToData(unitOwner);
-          } else if (r) {
-            r[0] = Math.max(0, (r[0] || 0) - 1);
-          }
-          e[2121 + unitId] = 100;
-          const maxHp = e[6767 + unitId] & 0xff;
-          e[1919 + unitId] = Math.min(maxHp, (e[1919 + unitId] & 0xff) + 6);
-          e[2222 + unitId] = 0;
-          e[3333 + unitId] = -1;
-        }
-        if (task.insideSlot) {
-          exitBuildingSlot(d, unitId);
-        }
-        state.tasks.delete(unitId);
-        if (!resumeSavedJob(unitId)) {
-          setUnitAnim(unitId, 8, 0);
-        }
-        uiChanged = true;
-      }
+      // Non-Kitchen target (e.g. if Kitchen was demolished) -> cancel cleanly without eating outside
+      state.tasks.delete(unitId);
+      setUnitAnim(unitId, 8, 0);
+      uiChanged = true;
     } else if (task.kind === 'armForBattle') {
       // Arrived at Storage during Battle Command / Enemy Engagement: grab the strongest weapon matching this villager's skill (or default to Stone / Đá ném), then SPRINT to charge!
       const owner = task.owner ?? (unitId > 50 ? 1 : 0);
@@ -4948,6 +4921,7 @@ function stepSimulation() {
         for (const uid of [pair.maleId, pair.femaleId]) {
           if (isUnitInsideBuilding(d, uid)) exitBuildingSlot(d, uid);
           setUnitCarry(uid, 0, 0);
+          e[3333 + uid] = -1;
           setUnitAnim(uid, 8, 0);
           state.tasks.delete(uid);
         }
@@ -4958,6 +4932,12 @@ function stepSimulation() {
       if (!partnerTask || partnerTask.kind !== 'courtship' || partnerTask.pair !== pair) {
         cancelPair();
         continue;
+      }
+
+      // Authentic Love/Hearts thought bubble (thought 1 = anim 78, b.java:1990) on BOTH lovers while courting in front of the Hut!
+      if (pair.stage !== 'inHut') {
+        e[3333 + pair.maleId] = 1;
+        e[3333 + pair.femaleId] = 1;
       }
 
       task.workTicks++;
@@ -4972,7 +4952,9 @@ function stepSimulation() {
             setUnitAnim(unitId, 156, (pair.pickTicks - 11) % 10);
           } else {
             setUnitCarry(unitId, 15, 1);
-            const planned = planUnitPath(unitId, pair.meetX1, pair.meetY1, true);
+            const planned =
+              planUnitPath(unitId, pair.meetX1, pair.meetY1, false) ??
+              planUnitPath(unitId, pair.meetX1, pair.meetY1, true);
             if (planned === null) {
               cancelPair();
               continue;
@@ -4982,7 +4964,8 @@ function stepSimulation() {
             pair.stage = 'walkToMeet';
           }
         } else {
-          // Female arrived early at meeting spot -> wait facing West (dir 4)
+          // Female arrived early in front of the Hut -> wait empty-handed facing West (dir 4) with Love bubble!
+          setUnitCarry(unitId, 0, 0);
           e[606 + unitId] = 4;
           setUnitAnim(unitId, 8, 0);
           pair.femaleReady = true;
@@ -4990,11 +4973,12 @@ function stepSimulation() {
       } else if (pair.stage === 'walkToMeet') {
         if (task.role === 'male') {
           pair.maleReady = true;
-          e[606 + unitId] = 0; // face East toward partner
+          e[606 + unitId] = 0; // face East toward partner in front of Lều
           setUnitAnim(unitId, 9, 0); // standing idle holding flower bouquet (aw=2)
         } else {
           pair.femaleReady = true;
-          e[606 + unitId] = 4; // face West toward partner
+          setUnitCarry(unitId, 0, 0);
+          e[606 + unitId] = 4; // face West toward partner in front of Lều
           setUnitAnim(unitId, 8, 0);
         }
         pair.waitTicks++;
@@ -5022,7 +5006,7 @@ function stepSimulation() {
         }
         setUnitAnim(pair.maleId, 157, giftFrame);
         setUnitAnim(pair.femaleId, 158, giftFrame);
-        if (pair.giftTicks >= 18) {
+        if (pair.giftTicks >= 24) {
           pair.stage = 'enterHut';
           const mHutPath = planUnitPath(pair.maleId, pair.hut.x, pair.hut.y, false, pair.hut);
           const fHutPath = planUnitPath(pair.femaleId, pair.hut.x, pair.hut.y, false, pair.hut);
