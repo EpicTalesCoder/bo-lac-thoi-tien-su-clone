@@ -2109,13 +2109,28 @@ function isBuildingSlot0Occupied(bid) {
   let u = e[8993 + bid];
   let g = 0;
   while (u > 0 && g++ < 16) {
-    if (e[4646 + u] === 0) return true;
+    if (e[4646 + u] === 0 && (e[1919 + u] & 0xff) > 0) return true;
     u = e[4545 + u];
   }
-  // Also check if another villager is already walking toward slot 0 of this building
-  for (const t of state.tasks.values()) {
+  // Also count slot-0 workers who are walking to slot 0, fetching materials/ingredients, or temporarily on break/defending!
+  for (const [uid, t] of state.tasks.entries()) {
+    if ((e[1919 + uid] & 0xff) <= 0) continue;
     if (t.kind === 'workBuilding' && t.target?.bid === bid && !t.insideSlot) {
       if (!Array.isArray(t.preferredSlots) || t.preferredSlots.includes(0)) return true;
+    }
+    if (t.kind === 'chefFetch' && t.kitchen?.bid === bid) return true;
+    if ((t.kind === 'blacksmithFetch' || t.kind === 'blacksmithDeliver') && t.workshop?.bid === bid) return true;
+    if (
+      t.kind === 'armForBattle' ||
+      t.kind === 'attackUnit' ||
+      t.kind === 'attackBuilding' ||
+      t.kind === 'eat' ||
+      t.kind === 'rest'
+    ) {
+      const saved = state.savedJobs.get(uid);
+      if (saved?.kind === 'workBuilding' && saved.bid === bid) {
+        if (!Array.isArray(saved.preferredSlots) || saved.preferredSlots.includes(0)) return true;
+      }
     }
   }
   return false;
@@ -2656,28 +2671,43 @@ function commandUnitTo(tx, ty, overrideIds = null, owner = state.localTribe ?? 0
         return;
       }
     } else if (bld && bld.targetType === 2) {
-      if (assignRestTask(adultIds[0], bld)) {
+      let rested = 0;
+      for (const uid of adultIds) {
+        if (assignRestTask(uid, bld)) rested++;
+      }
+      if (rested > 0) {
         if (!overrideIds) {
-          const info = getVillagerInfo(adultIds[0]);
-          state.message = `${info.role} đang đi vào Lều nghỉ ngủ hồi sức.`;
+          state.message =
+            rested > 1
+              ? `${rested} dân làng đang đi vào Lều nghỉ ngủ hồi sức.`
+              : `${getVillagerInfo(adultIds[0]).role} đang đi vào Lều nghỉ ngủ hồi sức.`;
           render();
         }
         return;
       }
     } else if (bld && bld.targetType === 4) {
-      // Bếp: 1st villager (if slot 0 empty) -> Chef cooking; 2nd+ villager -> Diner eating!
-      const hasChef = isBuildingSlot0Occupied(bld.bid);
-      if (!hasChef) {
-        if (assignWorkAtBuilding(adultIds[0], bld, [0])) {
-          if (!overrideIds) {
-            state.message = `${getVillagerInfo(adultIds[0]).role} đang vào Bếp làm Đầu bếp nấu ăn!`;
-            render();
+      // Bếp: 1st villager (only when slot 0 has NO Chef assigned) -> Chef cooking; 2nd+ villager -> Diner eating ONLY!
+      let hasChef = isBuildingSlot0Occupied(bld.bid);
+      let chefSent = 0;
+      let dinersSent = 0;
+      for (const uid of adultIds) {
+        if (!hasChef) {
+          if (assignWorkAtBuilding(uid, bld, [0])) {
+            hasChef = true;
+            chefSent++;
           }
-          return;
+        } else if (assignEatTask(uid, bld)) {
+          dinersSent++;
         }
-      } else if (assignEatTask(adultIds[0], bld)) {
+      }
+      if (chefSent > 0 || dinersSent > 0) {
         if (!overrideIds) {
-          state.message = `${getVillagerInfo(adultIds[0]).role} đang vào Bếp dùng bữa!`;
+          state.message =
+            chefSent > 0 && dinersSent > 0
+              ? `🍳 Đã cử Đầu bếp vào nấu và ${dinersSent} dân làng vào Bếp dùng bữa!`
+              : chefSent > 0
+                ? `🍳 ${getVillagerInfo(adultIds[0]).role} đang vào Bếp làm Đầu bếp nấu ăn!`
+                : `🍖 ${dinersSent > 1 ? dinersSent + ' dân làng' : getVillagerInfo(adultIds[0]).role} đang vào Bếp dùng bữa!`;
           render();
         }
         return;
@@ -2730,9 +2760,25 @@ function commandUnitTo(tx, ty, overrideIds = null, owner = state.localTribe ?? 0
         return;
       }
     } else if (bld && [0, 8, 9, 11].includes(bld.targetType)) {
-      if (assignWorkAtBuilding(adultIds[0], bld)) {
+      // Kho vũ khí (bType 0) only has 1 Blacksmith slot (slot 0) — don't assign a 2nd villager if already staffed!
+      if (bld.targetType === 0 && isBuildingSlot0Occupied(bld.bid)) {
         if (!overrideIds) {
-          state.message = `${getVillagerInfo(adultIds[0]).role} đang đi tới làm việc tại ${bld.spec.name}.`;
+          state.message = '🔨 Kho vũ khí đã có Thợ rèn đang làm việc!';
+          render();
+        }
+        return;
+      }
+      let sent = 0;
+      for (const uid of adultIds) {
+        if (bld.targetType === 0 && sent >= 1) break;
+        if (assignWorkAtBuilding(uid, bld)) sent++;
+      }
+      if (sent > 0) {
+        if (!overrideIds) {
+          state.message =
+            sent > 1
+              ? `${sent} dân làng đang đi tới làm việc tại ${bld.spec.name}.`
+              : `${getVillagerInfo(adultIds[0]).role} đang đi tới làm việc tại ${bld.spec.name}.`;
           render();
         }
         return;
@@ -4233,6 +4279,11 @@ function stepSimulation() {
       // Authentic b.java:3209: Nobody can enter or eat inside Nhà ăn (bType 4) if there is NO Chef cooking in slot 0!
       if (bld.targetType === 4 && !isBuildingSlot0ActiveInside(bld.bid)) {
         if (task.insideSlot) exitBuildingSlot(d, unitId);
+        // If a Chef is currently walking to slot 0, wait quietly outside the door until the Chef arrives; otherwise cancel!
+        if (isBuildingSlot0Occupied(bld.bid)) {
+          setUnitAnim(unitId, 8, 0);
+          continue;
+        }
         state.tasks.delete(unitId);
         setUnitAnim(unitId, 8, 0);
         uiChanged = true;
@@ -4541,6 +4592,10 @@ function stepSimulation() {
       // Authentic b.java:3209: Dancers cannot dance in Sàn disco without a DJ, and diners cannot eat in Bếp without a Chef — stand outside instead!
       if (isGuestSlotOnly && !isBuildingSlot0ActiveInside(bld.bid)) {
         if (task.insideSlot) exitBuildingSlot(d, unitId);
+        if (isBuildingSlot0Occupied(bld.bid)) {
+          setUnitAnim(unitId, 8, 0);
+          continue;
+        }
         state.tasks.delete(unitId);
         setUnitAnim(unitId, 8, 0);
         uiChanged = true;
