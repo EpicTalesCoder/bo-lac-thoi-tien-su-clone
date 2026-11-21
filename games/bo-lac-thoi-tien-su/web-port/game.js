@@ -3654,7 +3654,6 @@ function stepSimulation() {
           // Forging with hammer (anim 53, 3f)!
           task.forgeTicks = (task.forgeTicks || 0) + 1;
           setUnitAnim(unitId, 53, Math.floor(task.forgeTicks / 2) % 3);
-          e[3030 + unitId] = task.forgeTicks & 0xff;
           if (task.forgeTicks >= 36) {
             const wId = task.forgingWeaponId;
             exitBuildingSlot(d, unitId);
@@ -3744,8 +3743,6 @@ function stepSimulation() {
         cursor -= slotAnims[ai].frames;
       }
       setUnitAnim(unitId, chosenAnim.animId, cursor % chosenAnim.frames);
-      // Advance building's animated interior prop (kind === 4 in render-original.js: cooking pot, disco lights/turntable, altar)
-      e[3030 + unitId] = task.workTicks & 0xff;
 
       // Authentic per-building production & training effects!
       if (bType === 4) {
@@ -3797,40 +3794,46 @@ function stepSimulation() {
           state.tasks.delete(unitId);
           uiChanged = true;
         }
-      } else if ((bType === 1 || bType === 5) && task.workTicks >= 55) {
-        // Phòng tập (1) / Khu tập ném (5): trains warrior (+8 maxHp + authentic skill level -> ^ rank chevron!) then exits!
-        const nextMax = Math.min(120, (e[6767 + unitId] & 0xff) + 8);
-        e[6767 + unitId] = nextMax;
-        e[1919 + unitId] = nextMax;
-        if (bType === 1) {
-          e[1616 + unitId] = Math.min(9, Math.max(5, (e[1616 + unitId] & 0xff) + 1)); // Melee rank ^
-        } else {
-          e[1717 + unitId] = Math.min(9, Math.max(5, (e[1717 + unitId] & 0xff) + 1)); // Throwing rank ^
+      } else if (bType === 1 || bType === 5) {
+        // Authentic long training duration (like original game: ~30s for Lv1 ^, scaling up to ~58s for Lv5)
+        const curLvRaw = (bType === 1 ? e[1616 + unitId] : e[1717 + unitId]) & 0xff;
+        const curRank = Math.max(0, curLvRaw - 4);
+        const trainTarget = 320 + curRank * 80;
+        if (task.workTicks >= trainTarget) {
+          const nextMax = Math.min(120, (e[6767 + unitId] & 0xff) + 8);
+          e[6767 + unitId] = nextMax;
+          e[1919 + unitId] = nextMax;
+          if (bType === 1) {
+            e[1616 + unitId] = Math.min(9, Math.max(5, (e[1616 + unitId] & 0xff) + 1)); // Melee rank ^
+          } else {
+            e[1717 + unitId] = Math.min(9, Math.max(5, (e[1717 + unitId] & 0xff) + 1)); // Throwing rank ^
+          }
+          exitBuildingSlot(d, unitId);
+          setUnitAnim(unitId, 8, 0);
+          state.tasks.delete(unitId);
+          if ((unitId > 50 ? 1 : 0) === (state.localTribe ?? 0)) {
+            const info = getVillagerInfo(unitId);
+            const lv = bType === 1 ? (e[1616 + unitId] & 0xff) : (e[1717 + unitId] & 0xff);
+            state.message = `${info.role} đã lên cấp kỹ năng ${bType === 1 ? 'Cận chiến' : 'Ném'} (Cấp ${lv - 4} ^, HP ${nextMax})!`;
+          }
+          uiChanged = true;
         }
-        exitBuildingSlot(d, unitId);
-        setUnitAnim(unitId, 8, 0);
-        state.tasks.delete(unitId);
-        if ((unitId > 50 ? 1 : 0) === (state.localTribe ?? 0)) {
-          const info = getVillagerInfo(unitId);
-          const lv = bType === 1 ? (e[1616 + unitId] & 0xff) : (e[1717 + unitId] & 0xff);
-          state.message = `${info.role} đã lên cấp kỹ năng ${bType === 1 ? 'Cận chiến' : 'Ném'} (Cấp ${lv - 4} ^, HP ${nextMax})!`;
-        }
-        uiChanged = true;
       } else if (bType === 7) {
         if (slotIdx === 0 && task.workTicks % 45 === 0) {
           // Sàn Disco slot 0: DJ boosts tribe mood & energy!
-          for (const id of getVillagerIds()) {
-            e[2222 + id] = 0;
+          for (const id of getVillagerIds(unitOwner)) {
+            e[505 + id] = Math.min(100, (e[505 + id] & 0xff) + 12);
             e[2020 + id] = Math.min(100, (e[2020 + id] & 0xff) + 8);
-            e[3333 + id] = -1;
+            if ((e[3333 + id] & 0xff) === 1) e[3333 + id] = -1;
           }
           uiChanged = true;
         } else if (slotIdx > 0 && task.workTicks % 16 === 0) {
           // Sàn Disco slots 1..6: Dancers enjoy music & recover mood/energy
-          e[2222 + unitId] = 0;
+          e[505 + unitId] = Math.min(100, (e[505 + unitId] & 0xff) + 18);
           e[2020 + unitId] = Math.min(100, (e[2020 + unitId] & 0xff) + 10);
           e[3333 + unitId] = -1;
           if (task.workTicks >= 96) {
+            e[505 + unitId] = 100;
             exitBuildingSlot(d, unitId);
             setUnitAnim(unitId, 8, 0);
             state.tasks.delete(unitId);
@@ -4129,62 +4132,98 @@ function stepVillagerNeeds() {
   const d = state.data;
   if (!d) return false;
   const e = d.entityData;
-  const ids = getVillagerIds();
-  const finishedHuts = getPlayerBuildings().filter((b) => !b.underConstruction && b.targetType === 2);
-  const foodSpots = getPlayerBuildings().filter((b) => !b.underConstruction && (b.targetType === 4 || b.targetType === 3));
+  const tribes = state.mpMode ? [0, 1] : [state.localTribe ?? 0];
   let changed = false;
 
-  for (const id of ids) {
-    const task = state.tasks.get(id);
-    const age = e[1414 + id] & 0xff;
+  const pickNearestBld = (list, ux, uy) => {
+    let best = null;
+    let bestDist = Infinity;
+    for (const b of list) {
+      const dist = Math.hypot(b.x + b.w / 2 - ux, b.y + b.h / 2 - uy);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = b;
+      }
+    }
+    return best;
+  };
 
-    // Children (age < 12) grow up gradually and play around the village
-    if (age < 12) {
-      e[2121 + id] = 100;
-      e[2020 + id] = 100;
-      e[505 + id] = 100;
-      e[3333 + id] = -1;
-      if (state.animTick % 140 === 0) {
-        const nextAge = age + 1;
-        e[1414 + id] = nextAge;
-        if (nextAge >= 12) {
-          e[6767 + id] = 42;
-          e[1919 + id] = 42;
-          setUnitAnim(id, 8, 0);
-          state.message = `🎂 ${getVillagerName(d, id)} đã trưởng thành và sẵn sàng lao động!`;
-          changed = true;
+  for (const tribe of tribes) {
+    const ids = getVillagerIds(tribe);
+    const tribeBlds = getTribeBuildings(tribe);
+    const finishedHuts = tribeBlds.filter((b) => !b.underConstruction && b.targetType === 2);
+    const finishedKitchens = tribeBlds.filter((b) => !b.underConstruction && b.targetType === 4);
+    const finishedDiscos = tribeBlds.filter((b) => !b.underConstruction && b.targetType === 7);
+    const tribeFood = tribe === (state.localTribe ?? 0) ? state.food : (d.resources?.[tribe]?.[0] || 0);
+
+    for (const id of ids) {
+      const task = state.tasks.get(id);
+      const age = e[1414 + id] & 0xff;
+
+      // Children (age < 12) grow up gradually and play around the village
+      if (age < 12) {
+        e[2121 + id] = 100;
+        e[2020 + id] = 100;
+        e[505 + id] = 100;
+        e[3333 + id] = -1;
+        if (state.animTick % 140 === 0) {
+          const nextAge = age + 1;
+          e[1414 + id] = nextAge;
+          if (nextAge >= 12) {
+            e[6767 + id] = 42;
+            e[1919 + id] = 42;
+            setUnitAnim(id, 8, 0);
+            if (tribe === (state.localTribe ?? 0)) {
+              state.message = `🎂 ${getVillagerName(d, id)} đã trưởng thành và sẵn sàng lao động!`;
+            }
+            changed = true;
+          }
+        } else if (!task) {
+          setUnitAnim(id, Math.random() < 0.45 ? 46 : 14, 0);
         }
-      } else if (!task) {
-        // Idle child plays (anim 46, 9f) or stands (anim 14)
-        setUnitAnim(id, Math.random() < 0.45 ? 46 : 14, 0);
+        continue;
       }
-      continue;
-    }
 
-    if (task?.kind === 'rest' || task?.kind === 'eat' || task?.kind === 'courtship') continue;
+      if (task?.kind === 'rest' || task?.kind === 'eat' || task?.kind === 'courtship') continue;
+      if (task?.kind === 'workBuilding' && task.target?.targetType === 7 && (task.insideSlot?.slotIdx ?? 0) > 0) continue;
 
-    const working = Boolean(task);
-    let satiety = Math.max(0, (e[2121 + id] & 0xff) - (working ? 2 : 1));
-    let energy = Math.max(0, (e[2020 + id] & 0xff) - (working ? 2 : 1));
-    e[2121 + id] = satiety;
-    e[2020 + id] = energy;
-    e[505 + id] = Math.max(10, Math.min(100, Math.round((satiety + energy) / 2))); // sync Panel 4 mood face
+      const working = Boolean(task);
+      const satiety = Math.max(0, (e[2121 + id] & 0xff) - (working ? 2 : 1));
+      const energy = Math.max(0, (e[2020 + id] & 0xff) - (working ? 2 : 1));
+      const mood = Math.max(0, (e[505 + id] & 0xff) - 1);
+      e[2121 + id] = satiety;
+      e[2020 + id] = energy;
+      e[505 + id] = mood;
 
-    // Authentic thought bubble (b.java:1998-2003): only show when genuinely exhausted or starving!
-    if (energy <= 20) e[3333 + id] = 0; // exhausted/sleepy thought bubble
-    else if (satiety <= 20) e[3333 + id] = 2; // starving thought bubble
-    else e[3333 + id] = -1; // none when content/idle
+      // Authentic thought bubbles (b.java:1998-2003): 0=sleepy, 1=bored, 2=hungry
+      if (satiety <= 20) e[3333 + id] = 2;
+      else if (energy <= 20) e[3333 + id] = 0;
+      else if (mood <= 25) e[3333 + id] = 1;
+      else e[3333 + id] = -1;
 
-    // Auto self-care when idle
-    if (!task) {
-      if (satiety <= 38 && state.food > 0 && foodSpots.length > 0) {
-        if (assignEatTask(id, foodSpots[0])) changed = true;
-      } else if (energy <= 38 && finishedHuts.length > 0) {
-        if (assignRestTask(id, finishedHuts[0])) changed = true;
+      // Autonomous self-care:
+      // - Hungry -> seek Bếp (if Bếp exists & food > 0); otherwise just keep showing thought bubble!
+      // - Sleepy -> seek Lều (if Lều exists); otherwise just keep showing thought bubble!
+      // - Bored  -> seek Sàn disco (if Sàn disco exists); otherwise just keep showing thought bubble!
+      const canInterrupt = !task || (task.kind === 'gather' && (satiety <= 15 || energy <= 15 || mood <= 15));
+      if (canInterrupt && !isUnitInsideBuilding(d, id)) {
+        const ux = e[id] & 0xff;
+        const uy = e[101 + id] & 0xff;
+        if (satiety <= (task ? 15 : 38) && tribeFood > 0 && finishedKitchens.length > 0) {
+          const kitchen = pickNearestBld(finishedKitchens, ux, uy);
+          if (kitchen && assignEatTask(id, kitchen)) changed = true;
+        } else if (energy <= (task ? 15 : 38) && finishedHuts.length > 0) {
+          const hut = pickNearestBld(finishedHuts, ux, uy);
+          if (hut && assignRestTask(id, hut)) changed = true;
+        } else if (mood <= (task ? 15 : 38) && finishedDiscos.length > 0) {
+          const disco = pickNearestBld(finishedDiscos, ux, uy);
+          if (disco && assignWorkAtBuilding(id, disco, [1, 2, 3, 4, 5, 6])) changed = true;
+        }
       }
+      if (id === state.selectedUnit) changed = true;
     }
-    if (id === state.selectedUnit) changed = true;
   }
+  const finishedHuts = getPlayerBuildings().filter((b) => !b.underConstruction && b.targetType === 2);
 
   // Authentic berry bush & mushroom gradual regrowth (b.java:4660-4675)
   if (state.animTick % 112 === 0) {

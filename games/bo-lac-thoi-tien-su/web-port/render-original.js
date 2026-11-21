@@ -443,12 +443,13 @@ function drawEntitySprite(ctx, data, entityId, screenX, screenY, dir, fieldOffse
   if (!fo) return;
 
   const animId = e[fo[fieldOffsetIdx] + entityId] & 0xff;
-  const frameIdx = e[fo[fieldOffsetIdx + 1] + entityId] & 0xff;
   if (animId >= shorts[2].length || animId >= shorts[3].length) return;
+  const animLen = Math.max(1, bytes[4][animId] & 0xff);
+  const frameIdx = (e[fo[fieldOffsetIdx + 1] + entityId] & 0xff) % animLen;
 
   const dirMode = (shorts[3][animId] >>> 14) & 3;
   const mappedDir = dir >= 0 ? m[mo[99] + (dirMode << 3) + (dir & 7)] : 0;
-  const frameTableIdx = (shorts[2][animId] & 0xfff) + mappedDir * (bytes[4][animId] & 0xff) + frameIdx;
+  const frameTableIdx = (shorts[2][animId] & 0xfff) + mappedDir * animLen + frameIdx;
   if (frameTableIdx < 0 || frameTableIdx >= shorts[4].length) return;
 
   const poseId = shorts[4][frameTableIdx] & 0xffff;

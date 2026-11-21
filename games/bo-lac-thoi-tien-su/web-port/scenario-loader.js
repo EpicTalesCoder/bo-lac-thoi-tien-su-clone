@@ -396,7 +396,7 @@ export const SPELLS = [
   { id: 'plague', name: 'Bệnh dịch', bones: 3, desc: 'Làm suy yếu thú hoang & quân địch trên bản đồ.' },
 ];
 
-export function getBuildingSlotAnims(data, bType, slotIdx) {
+export function getBuildingSlotAnims(data, bType, slotIdx, weaponId = 9) {
   const mb = data?.mapTableData;
   const mo = data?.mapTableOffsets;
   const bytes = data?.byteSpriteTables;
@@ -421,6 +421,22 @@ export function getBuildingSlotAnims(data, bType, slotIdx) {
     anims.push({ animId: 117, frames: 12 });
     return { jobId, slotCount, anims };
   }
+  // Phòng tập (bType 1) slots 0 & 1: pick the single melee training animation matching equipped weaponId
+  if (bType === 1 && (clampedSlot === 0 || clampedSlot === 1)) {
+    const slot0Anims = { 0: 25, 2: 27, 3: 29, 4: 31, 5: 33 };
+    const slot1Anims = { 0: 24, 2: 26, 3: 28, 4: 30, 5: 32 };
+    const aId = (clampedSlot === 0 ? slot0Anims[weaponId] : slot1Anims[weaponId]) || (clampedSlot === 0 ? 25 : 24);
+    const frames = Math.max(1, (bytes[4]?.[aId] ?? 6) & 0xff);
+    anims.push({ animId: aId, frames });
+    return { jobId, slotCount, anims };
+  }
+  // Khu tập ném (bType 5) slots 0 & 1: pick the single throwing animation matching equipped weaponId
+  if (bType === 5 && (clampedSlot === 0 || clampedSlot === 1)) {
+    const aId = weaponId === 2 ? 91 : weaponId === 5 ? 92 : 93; // 91=spear, 92=axe, 93=stone
+    const frames = Math.max(1, (bytes[4]?.[aId] ?? 11) & 0xff);
+    anims.push({ animId: aId, frames });
+    return { jobId, slotCount, anims };
+  }
   for (let i = aStart; i < aEnd; i++) {
     const animId = mb[mo[164] + i] & 0xff;
     if (animId === 0) continue;
@@ -433,15 +449,37 @@ export function getBuildingSlotAnims(data, bType, slotIdx) {
   return { jobId, slotCount, anims };
 }
 
+function getUnlockedBuildingSlots(data, bType, bStage) {
+  const shorts = data?.shortSpriteTables;
+  const bytes = data?.byteSpriteTables;
+  if (!shorts || !bytes) return null;
+  const start = shorts[0]?.[bType + 1];
+  const cnt = (bytes[0]?.[bType + 1] ?? 0) & 0xff;
+  if (start === undefined || cnt === 0) return null;
+  const unlocked = new Set();
+  for (let i = 0; i < cnt; i++) {
+    const idx = start + i;
+    const kind = bytes[3][idx] & 7;
+    if (kind !== 3) continue;
+    const slotId = (bytes[3][idx] & 0x3f) >>> 3;
+    const stageReq = (bytes[3][idx] & 0xff) >>> 6;
+    if (stageReq <= bStage) unlocked.add(slotId);
+  }
+  return unlocked.size > 0 ? unlocked : null;
+}
+
 export function enterBuildingWorkSlot(data, bid, unitId, preferredSlots = null) {
   const e = data.entityData;
   const rawType = e[8749 + bid] & 0xff;
   const bType = rawType >= 12 && rawType <= 19 ? (e[9237 + bid] & 0xff) : rawType;
+  const bStage = e[9115 + bid] & 0xff;
+  const weaponId = e[6565 + unitId] & 0xff;
   const mb = data.mapTableData;
   const mo = data.mapTableOffsets;
   const base = mb && mo ? (mb[mo[174] + bType] & 0xff) : 0;
   const nextBase = mb && mo ? (mb[mo[174] + bType + 1] & 0xff) : 4;
   const slotCount = Math.max(1, nextBase - base);
+  const unlockedSlots = getUnlockedBuildingSlots(data, bType, bStage);
 
   const usedSlots = new Set();
   let cur = e[8993 + bid];
@@ -449,7 +487,7 @@ export function enterBuildingWorkSlot(data, bid, unitId, preferredSlots = null) 
   while (cur > 0 && guard++ < 16) {
     if (cur === unitId) {
       const existingSlot = e[4646 + cur];
-      const meta = getBuildingSlotAnims(data, bType, existingSlot);
+      const meta = getBuildingSlotAnims(data, bType, existingSlot, weaponId);
       return { slotIdx: existingSlot, bType, jobId: meta.jobId, anims: meta.anims };
     }
     usedSlots.add(e[4646 + cur]);
@@ -459,7 +497,7 @@ export function enterBuildingWorkSlot(data, bid, unitId, preferredSlots = null) 
   let freeSlot = -1;
   if (Array.isArray(preferredSlots) && preferredSlots.length > 0) {
     for (const s of preferredSlots) {
-      if (s >= 0 && s < slotCount && !usedSlots.has(s)) {
+      if (s >= 0 && s < slotCount && !usedSlots.has(s) && (!unlockedSlots || unlockedSlots.has(s))) {
         freeSlot = s;
         break;
       }
@@ -467,7 +505,7 @@ export function enterBuildingWorkSlot(data, bid, unitId, preferredSlots = null) 
   }
   if (freeSlot === -1) {
     for (let s = 0; s < slotCount; s++) {
-      if (!usedSlots.has(s)) {
+      if (!usedSlots.has(s) && (!unlockedSlots || unlockedSlots.has(s))) {
         freeSlot = s;
         break;
       }
@@ -487,7 +525,7 @@ export function enterBuildingWorkSlot(data, bid, unitId, preferredSlots = null) 
   e[303 + unitId] = 0;
   e[3535 + unitId] = 0;
   e[3636 + unitId] = 0;
-  const meta = getBuildingSlotAnims(data, bType, freeSlot);
+  const meta = getBuildingSlotAnims(data, bType, freeSlot, weaponId);
   return { slotIdx: freeSlot, bType, jobId: meta.jobId, anims: meta.anims };
 }
 
