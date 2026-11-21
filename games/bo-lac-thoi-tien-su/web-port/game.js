@@ -216,6 +216,7 @@ const state = {
   savedJobs: new Map(), // unitId -> previous primary job to resume automatically after eating/sleeping/dancing
   enemyTasks: new Map(),
   weaponQueues: new Map(), // bid -> [q0..q5] weapon forge orders (starts at 0)
+  shrineRituals: new Map(), // bid -> { spell, ticks, duration } active Shaman spell rituals
   siteMaterials: new Map(), // bid -> { wood, stone, tools, owner } pending material deliveries from Storage
   upgradingBuildings: new Map(), // bid -> { targetLevel, targetType } active builder-driven building upgrades
   treeWood: new Map(), // remaining wood per tree cell "x,y" (12 wood/tree; clears to grass when depleted)
@@ -2337,13 +2338,7 @@ function craftAndEquipWeapon(weapon) {
   render();
 }
 
-function castShamanSpell(spell) {
-  if (state.tools < spell.bones) {
-    state.message = `Cần ${spell.bones} xương để thi triển phép ${spell.name}.`;
-    render();
-    return;
-  }
-  state.tools -= spell.bones;
+function applyShamanSpellEffect(spell, bld) {
   const e = state.data.entityData;
   const ids = getVillagerIds();
   if (spell.id === 'heal') {
@@ -2351,14 +2346,14 @@ function castShamanSpell(spell) {
       e[1919 + id] = e[6767 + id];
       e[2222 + id] = 0;
     }
-    state.message = 'Pháp sư thi triển Chữa vết thương: toàn bộ bộ lạc đã hồi đầy máu!';
+    state.message = '✨ Pháp sư hoàn tất Chữa vết thương / Giải độc: toàn bộ bộ lạc đã hồi đầy máu!';
   } else if (spell.id === 'shield') {
     for (const id of ids) {
       const nextMax = Math.min(120, (e[6767 + id] & 0xff) + 10);
       e[6767 + id] = nextMax;
       e[1919 + id] = Math.min(nextMax, (e[1919 + id] & 0xff) + 10);
     }
-    state.message = 'Pháp sư thi triển Phòng thủ: +10 HP tối đa cho toàn bộ bộ lạc!';
+    state.message = '✨ Pháp sư hoàn tất Phòng thủ: +10 HP tối đa cho toàn bộ bộ lạc!';
   } else if (spell.id === 'love') {
     for (const id of ids) {
       e[2222 + id] = 0;
@@ -2368,8 +2363,8 @@ function castShamanSpell(spell) {
     }
     const started = startCourtshipPair(true);
     state.message = started
-      ? 'Pháp sư thi triển Thuốc tình yêu: một cặp đôi đang hái hoa hẹn hò trước Lều!'
-      : 'Pháp sư thi triển Thuốc tình yêu: tinh thần bộ lạc dâng cao 100%!';
+      ? '✨ Pháp sư hoàn tất Thuốc tình yêu: một cặp đôi đang hái hoa hẹn hò trước Lều!'
+      : '✨ Pháp sư hoàn tất Thuốc tình yêu: tinh thần bộ lạc dâng cao 100%!';
   } else if (spell.id === 'plague') {
     let hit = 0;
     for (const eid of getEnemyIds()) {
@@ -2382,11 +2377,37 @@ function castShamanSpell(spell) {
       e[9513 + a.aid] = Math.max(1, Math.floor(a.hp / 2));
       hit++;
     }
-    state.message = `Pháp sư thi triển Bệnh dịch: làm suy yếu ${hit} chiến binh địch & thú hoang trên bản đồ!`;
+    state.message = `✨ Pháp sư hoàn tất Bệnh dịch: làm suy yếu ${hit} chiến binh địch & thú hoang trên bản đồ!`;
   }
   syncResourcesToData();
-  const bld = getPlayerBuildings().find((b) => b.bid === state.selectedBuildingBid);
   if (bld) addPopup(bld.x + 1, bld.y, `✨ ${spell.name}!`, '#b79eff');
+}
+
+function castShamanSpell(spell, bldArg = null) {
+  const bld = bldArg || getPlayerBuildings().find((b) => b.bid === state.selectedBuildingBid);
+  if (!bld || bld.targetType !== 8) {
+    showWarning('⚠ Hãy chọn Khu thánh địa để thi triển phép!');
+    return;
+  }
+  if (!isBuildingSlot0Occupied(bld.bid)) {
+    showWarning('⚠ Khu thánh địa chưa có Pháp sư! Hãy cử dân làng vào hành lễ trước.');
+    return;
+  }
+  const activeRitual = state.shrineRituals.get(bld.bid);
+  if (activeRitual) {
+    state.message = `🥁 Pháp sư đang múa trống thi triển phép ${activeRitual.spell.name}, vui lòng chờ xong!`;
+    render();
+    return;
+  }
+  if (state.tools < spell.bones) {
+    showWarning(`⚠ Cần ${spell.bones} xương trong kho để thi triển phép ${spell.name}!`);
+    return;
+  }
+  state.tools -= spell.bones;
+  syncResourcesToData();
+  // Queue active ritual so the Shaman wakes up from napping (anim 39) and performs the drum dance!
+  state.shrineRituals.set(bld.bid, { spell, ticks: 0, duration: 45 });
+  state.message = `🥁 Pháp sư bắt đầu múa trống thi triển phép ${spell.name}...`;
   render();
 }
 
@@ -2831,8 +2852,9 @@ function commandUnitTo(tx, ty, overrideIds = null, owner = state.localTribe ?? 0
       }
       return;
     } else if (bld && [0, 8, 9, 11].includes(bld.targetType)) {
-      // Kho vũ khí (bType 0) only has 1 Blacksmith slot (slot 0) — if already staffed, open the weapon forge queue menu!
-      if (bld.targetType === 0 && isBuildingSlot0Occupied(bld.bid)) {
+      // Kho vũ khí (bType 0) and Khu thánh địa (bType 8) only have 1 staff slot (slot 0) —
+      // if already staffed, open the weapon forge / Shaman spell menu directly!
+      if ((bld.targetType === 0 || bld.targetType === 8) && isBuildingSlot0Occupied(bld.bid)) {
         if (!overrideIds) {
           openCanvasBuildingMenu(bld);
         }
@@ -2840,7 +2862,7 @@ function commandUnitTo(tx, ty, overrideIds = null, owner = state.localTribe ?? 0
       }
       let sent = 0;
       for (const uid of adultIds) {
-        if (bld.targetType === 0 && sent >= 1) break;
+        if ((bld.targetType === 0 || bld.targetType === 8) && sent >= 1) break;
         if (assignWorkAtBuilding(uid, bld)) sent++;
       }
       if (sent > 0) {
@@ -4900,6 +4922,17 @@ function stepSimulation() {
         continue;
       }
 
+      // Authentic Khu thánh địa (bType 8): Shaman lies down and naps (anim 39, 8f) when NO spell ritual is ordered!
+      // Only wakes up to beat the drum & dance (slotAnims) while actively casting a spell from state.shrineRituals!
+      if (bType === 8) {
+        const ritual = state.shrineRituals.get(bld.bid);
+        if (!ritual) {
+          setUnitCarry(unitId, 0, 0);
+          setUnitAnim(unitId, 39, Math.floor(task.workTicks / 3) % 8);
+          continue;
+        }
+      }
+
       // Play authentic per-building, per-slot animation decoded from /a (mo[174]/mo[58]/mo[166]/mo[164]):
       const slotAnims = task.insideSlot.anims || [{ animId: 81, frames: 6 }];
       let totalFrames = 0;
@@ -5036,11 +5069,17 @@ function stepSimulation() {
             uiChanged = true;
           }
         }
-      } else if (bType === 8 && task.workTicks % 70 === 0) {
-        // Khu thánh địa: Shaman meditates & generates +1 bone/mana
-        state.tools += 1;
-        syncResourcesToData();
-        uiChanged = true;
+      } else if (bType === 8) {
+        // Khu thánh địa: Shaman beats the drum while casting an ordered spell, then triggers its effect & returns to napping!
+        const ritual = state.shrineRituals.get(bld.bid);
+        if (ritual) {
+          ritual.ticks = (ritual.ticks || 0) + 1;
+          if (ritual.ticks >= (ritual.duration || 45)) {
+            state.shrineRituals.delete(bld.bid);
+            applyShamanSpellEffect(ritual.spell, bld);
+            uiChanged = true;
+          }
+        }
       } else if ((bType === 9 || bType === 11) && task.workTicks === 10) {
         // Trung tâm PIA / Chòi canh: expands fog of war radius!
         revealFog(d, bld.x + Math.floor(bld.w / 2), bld.y + Math.floor(bld.h / 2), bType === 11 ? 8 : 7);
@@ -6052,30 +6091,50 @@ function openCanvasBuildingMenu(bld) {
       },
     });
   } else if (bld.targetType === 8) {
-    // Khu thánh địa: 4 spells with authentic animations 19..22 + shaman ritual slot
+    // Khu thánh địa: 4 spells with authentic animations 19..22 + Shaman occupant leave/assign slot
+    const hasShaman = isBuildingSlot0Occupied(bld.bid);
     SPELLS.forEach((sp, idx) => {
       items.push({
         label: sp.name.toUpperCase(),
         iconAnim: 19 + idx,
-        costText: `Cần ${sp.bones} Xương`,
-        canAfford: state.tools >= sp.bones,
+        costText: hasShaman ? `Cần ${sp.bones} Xương · ${sp.desc}` : `Cần Pháp sư trong thánh địa · ${sp.bones} Xương`,
+        canAfford: hasShaman && state.tools >= sp.bones,
         action: () => {
-          castShamanSpell(sp);
+          castShamanSpell(sp, bld);
           state.canvasMenu = null;
           render();
         },
       });
     });
-    items.push({
-      label: 'CỬ PHÁP SƯ HÀNH LỄ',
-      iconAnim: 13,
-      action: () => {
-        const uid = state.selectedUnit || findNearestVillager(bld.x, bld.y, true);
-        if (uid) assignWorkAtBuilding(uid, bld, [0]);
-        state.canvasMenu = null;
-        render();
-      },
-    });
+    const shrineOccupants = getBuildingOccupants(bld.bid);
+    if (shrineOccupants.length > 0) {
+      for (const uid of shrineOccupants) {
+        const info = getVillagerInfo(uid);
+        items.push({
+          label: `RỜI THÁNH ĐỊA: ${info.role.toUpperCase()}`,
+          unitId: uid,
+          costText: 'Click/Enter: Cho Pháp sư rời khỏi Khu thánh địa',
+          canAfford: true,
+          action: () => {
+            state.shrineRituals.delete(bld.bid);
+            evictUnitFromBuilding(uid, bld);
+            state.canvasMenu = null;
+            render();
+          },
+        });
+      }
+    } else {
+      items.push({
+        label: 'CỬ PHÁP SƯ HÀNH LỄ',
+        iconAnim: 13,
+        action: () => {
+          const uid = state.selectedUnit || findNearestVillager(bld.x, bld.y, true);
+          if (uid) assignWorkAtBuilding(uid, bld, [0]);
+          state.canvasMenu = null;
+          render();
+        },
+      });
+    }
   } else if (bld.targetType === 6) {
     // Kho chứa: allow swapping to any weapon stored in stock (resources[owner][5..10])
     const owner = state.localTribe ?? 0;
@@ -7493,10 +7552,12 @@ function confirm() {
         bld?.targetType === 6 &&
         WEAPONS.some((w) => (state.data.resources?.[myTribe]?.[5 + w.id] || 0) > 0);
       const workshopAlreadyStaffed = bld?.targetType === 0 && !bld.underConstruction && isBuildingSlot0Occupied(bld.bid);
+      const shrineAlreadyStaffed = bld?.targetType === 8 && !bld.underConstruction && isBuildingSlot0Occupied(bld.bid);
       if (
         bld &&
         hasSel &&
         !workshopAlreadyStaffed &&
+        !shrineAlreadyStaffed &&
         (bld.underConstruction || (bld.targetType !== 6 && bld.targetType !== 3) || (!storageHasWeapons && bld.targetType === 3))
       ) {
         commandUnitTo(x, y);
@@ -8363,6 +8424,7 @@ Promise.all([
       state.enemyTasks.clear();
       state.weaponQueues.clear();
       state.siteMaterials.clear();
+      state.shrineRituals.clear();
       state.projectiles = [];
       state.dustEffects = [];
       state.selectedUnits.clear();
