@@ -1847,19 +1847,37 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
     let cursorAnim = 32;
     if (!state.canvasMenu && !state.showMinimap && !state.missionResult && (state.selectedUnit > 0 || state.selectedUnits?.size > 0)) {
       const targetOcc = hoverCellOcc;
-      const targetTile = curWY >= 0 && curWY < data.height && curWX >= 0 && curWX < data.width ? data.terrain[curWY][curWX] & 0xff : 0;
       const isEnemyUnit = myTribe === 1 ? (targetOcc >= 1 && targetOcc <= 50) : (targetOcc >= 51 && targetOcc <= 100);
       const isEnemyBld = buildingOwner(targetOcc) === (myTribe === 1 ? 0 : 1);
-      const isActiveItemProp =
-        isItemProp(targetOcc) &&
-        ((data.entityData[9833 + (-targetOcc - 61)] & 0xff) === 5 ||
-          (data.entityData[9883 + (-targetOcc - 61)] & 0xff) > 0);
+      const isGatherCell = (gx, gy, treesOnly = false) => {
+        if (gx < 0 || gy < 0 || gx >= data.width || gy >= data.height) return false;
+        const gTile = data.terrain[gy][gx] & 0xff;
+        const gOcc = data.occupancy[gy][gx] ?? 0;
+        if (treesOnly) return gOcc === -124 || (gTile >= 180 && gTile <= 231);
+        const activeProp =
+          isItemProp(gOcc) &&
+          ((data.entityData[9833 + (-gOcc - 61)] & 0xff) === 5 ||
+            (data.entityData[9883 + (-gOcc - 61)] & 0xff) > 0);
+        return (
+          activeProp ||
+          gOcc === -124 ||
+          gOcc === -125 ||
+          gOcc === -127 ||
+          (gTile >= 180 && gTile <= 231) ||
+          gTile === 178
+        );
+      };
+      const worldPxX = state.pointerPos.x + camXFull * CELL_WIDTH;
+      const subX = (((worldPxX % CELL_WIDTH) + CELL_WIDTH) % CELL_WIDTH) / CELL_WIDTH;
+      const hasExpandedGatherable =
+        isGatherCell(curWX, curWY) ||
+        (targetOcc === 0 &&
+          (isGatherCell(curWX, curWY + 1) ||
+            isGatherCell(curWX, curWY + 2, true) ||
+            (subX < 0.38 && (isGatherCell(curWX - 1, curWY) || isGatherCell(curWX - 1, curWY + 1))) ||
+            (subX > 0.62 && (isGatherCell(curWX + 1, curWY) || isGatherCell(curWX + 1, curWY + 1)))));
       const isHostileOrGatherable =
-        isActiveItemProp ||
-        targetOcc === -124 ||
-        targetOcc === -125 ||
-        targetOcc === -127 ||
-        (targetTile >= 180 && targetTile <= 231) ||
+        hasExpandedGatherable ||
         isEnemyBld ||
         isEnemyUnit ||
         isWildAnimal(targetOcc);

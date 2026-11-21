@@ -1876,6 +1876,46 @@ function classifyGatherable(x, y) {
   return null;
 }
 
+function getPointerSubX() {
+  if (!state.pointerPos?.visible) return 0.5;
+  const camXFull = state.smoothCamX ?? state.cameraX ?? state.data?.cameraX ?? 0;
+  const worldPxX = state.pointerPos.x + camXFull * CELL_WIDTH;
+  return (((worldPxX % CELL_WIDTH) + CELL_WIDTH) % CELL_WIDTH) / CELL_WIDTH;
+}
+
+// Expanded gatherable hitbox matching visual sprite silhouettes (trees extend 1-2 tiles UP + slight left/right overhang;
+// rocks, berry bushes, mushrooms, bones extend slightly UP + left/right). Matches render-original.js red cursor 1:1!
+function findGatherableAtCursor(tx, ty, subX = getPointerSubX()) {
+  const direct = classifyGatherable(tx, ty);
+  if (direct) return direct;
+  const d = state.data;
+  if (!d) return null;
+  const occ = d.occupancy[ty]?.[tx] ?? 0;
+  if (occ !== 0) return null; // Never override buildings, units, or wild animals on exact tile
+
+  // 1 tile below: clicking upper body / canopy of a tree, rock, bush, mushroom, bone, or fish shoreline
+  const below1 = classifyGatherable(tx, ty + 1);
+  if (below1) return below1;
+
+  // 2 tiles below: clicking the tall crown of a tree (trees are ~32-44px tall = 2+ tiles above trunk)
+  const below2 = classifyGatherable(tx, ty + 2);
+  if (below2 && below2.type === 'wood') return below2;
+
+  // Slight horizontal overhang when clicking near left/right edge of an adjacent resource sprite
+  if (subX < 0.38) {
+    const left0 = classifyGatherable(tx - 1, ty);
+    if (left0) return left0;
+    const left1 = classifyGatherable(tx - 1, ty + 1);
+    if (left1) return left1;
+  } else if (subX > 0.62) {
+    const right0 = classifyGatherable(tx + 1, ty);
+    if (right0) return right0;
+    const right1 = classifyGatherable(tx + 1, ty + 1);
+    if (right1) return right1;
+  }
+  return null;
+}
+
 function depleteGatherTarget(gt, amount) {
   const d = state.data;
   if (!d || !gt) return false;
@@ -2724,7 +2764,7 @@ function commandUnitTo(tx, ty, overrideIds = null, owner = state.localTribe ?? 0
     isEnemyBldOcc ||
     isOwnBldOcc ||
     (occ >= 101 && occ <= 122) ||
-    Boolean(classifyGatherable(tx, ty));
+    Boolean(findGatherableAtCursor(tx, ty));
   if (isWorkOrCombatTarget && adultIds.length === 0) {
     if (!overrideIds) {
       showWarning('⚠ Trẻ em (dưới 12 tuổi) chưa thể xây nhà, lao động hay chiến đấu!');
@@ -2956,8 +2996,8 @@ function commandUnitTo(tx, ty, overrideIds = null, owner = state.localTribe ?? 0
     }
   }
 
-  // Click a tree or resource item to gather & haul back to camp
-  const gatherTarget = classifyGatherable(tx, ty);
+  // Click a tree or resource item (including expanded canopy/sprite hitbox!) to gather & haul back to camp
+  const gatherTarget = findGatherableAtCursor(tx, ty);
   if (gatherTarget) {
     let gatherers = 0;
     for (const uid of activeIds) {
