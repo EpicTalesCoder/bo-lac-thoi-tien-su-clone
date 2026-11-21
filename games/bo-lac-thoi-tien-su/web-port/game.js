@@ -1269,14 +1269,29 @@ function assignEatTask(unitId, foodBuilding) {
   return true;
 }
 
-function assignWorkAtBuilding(unitId, bld) {
+function assignWorkAtBuilding(unitId, bld, preferredSlots = null) {
   ensureUnitOutside(unitId);
   setUnitCarry(unitId, 0, 0);
   const planned = planUnitPath(unitId, bld.x, bld.y, false, bld);
   if (planned === null) return false;
   const bt = bld.targetType;
+  const isGuestOnly = Array.isArray(preferredSlots) && !preferredSlots.includes(0);
+  // Check if slot 0 is already occupied (so 2nd+ visitor to Bếp/Disco doesn't wear the Chef/DJ hat)
+  let slot0Taken = false;
+  if (state.data) {
+    const e = state.data.entityData;
+    let cur = e[8993 + bld.bid];
+    let g = 0;
+    while (cur > 0 && g++ < 16) {
+      if (e[4646 + cur] === 0 && cur !== unitId) {
+        slot0Taken = true;
+        break;
+      }
+      cur = e[4545 + cur];
+    }
+  }
   // Authentic job hats: 4=Bếp (54 Chef hat), 7=Sàn Disco (86 DJ hat), 8=Khu thánh địa (57 Shaman hat)
-  const hatJob = bt === 4 ? 54 : bt === 7 ? 86 : bt === 8 ? 57 : 69;
+  const hatJob = !isGuestOnly && !slot0Taken ? (bt === 4 ? 54 : bt === 7 ? 86 : bt === 8 ? 57 : 69) : 69;
   const curHat = state.data.entityData[6464 + unitId] & 0xff;
   const needPutHat = hatJob !== 69 && curHat !== hatJob;
   const needRemoveHat = hatJob === 69 && isWearingJobHat(unitId);
@@ -1286,6 +1301,7 @@ function assignWorkAtBuilding(unitId, bld) {
     stepProgress: planned.stepProgress,
     target: bld,
     insideSlot: null,
+    preferredSlots,
     workTicks: 0,
     hatJob,
     hatPutFrame: needPutHat ? 0 : 14,
@@ -1559,7 +1575,7 @@ function commandUnitTo(tx, ty) {
         render();
         return;
       }
-    } else if (bld && [1, 4, 5, 7, 8, 9, 11].includes(bld.targetType)) {
+    } else if (bld && [0, 1, 4, 5, 7, 8, 9, 11].includes(bld.targetType)) {
       if (assignWorkAtBuilding(unitId, bld)) {
         const info = getVillagerInfo(unitId);
         state.message = `${info.role} đang đi tới làm việc tại ${bld.spec.name}.`;
@@ -2563,10 +2579,26 @@ function stepSimulation() {
       }
     } else if (task.kind === 'eat') {
       const bld = task.target;
-      e[606 + unitId] = directionFromDelta(bld.x - ux, bld.y - uy);
-      setUnitAnim(unitId, 16, Math.floor(task.workTicks / 2) % 8);
+      // Enter Bếp (bType 4) dining slots 1..6 to play authentic sitting & eating animations (anim 83/84, 12 frames)
+      if (bld.targetType === 4 && !task.insideSlot && !task.eatOutside) {
+        const slot = enterBuildingWorkSlot(d, bld.bid, unitId, [1, 2, 3, 4, 5, 6]);
+        if (slot) {
+          task.insideSlot = slot;
+        } else {
+          task.eatOutside = true;
+        }
+      }
+      if (task.insideSlot && task.insideSlot.anims?.length) {
+        const animEntry = task.insideSlot.anims[0];
+        setUnitAnim(unitId, animEntry.animId, task.workTicks % animEntry.frames);
+        e[3030 + unitId] = task.workTicks & 0xff;
+      } else {
+        e[606 + unitId] = directionFromDelta(bld.x - ux, bld.y - uy);
+        setUnitAnim(unitId, 16, Math.floor(task.workTicks / 2) % 8);
+      }
       task.workTicks++;
-      if (task.workTicks >= 16) {
+      const eatDuration = task.insideSlot ? 24 : 16;
+      if (task.workTicks >= eatDuration) {
         if (state.food > 0) {
           state.food = Math.max(0, state.food - 1);
           syncResourcesToData();
@@ -2575,7 +2607,9 @@ function stepSimulation() {
           e[1919 + unitId] = Math.min(maxHp, (e[1919 + unitId] & 0xff) + 6);
           e[2222 + unitId] = 0;
           e[3333 + unitId] = -1;
-          addPopup(ux, uy, 'Ăn no!', '#c5f285');
+        }
+        if (task.insideSlot) {
+          exitBuildingSlot(d, unitId);
         }
         setUnitAnim(unitId, 8, 0);
         state.tasks.delete(unitId);
@@ -2584,11 +2618,26 @@ function stepSimulation() {
     } else if (task.kind === 'workBuilding') {
       const bld = task.target;
       if (!task.insideSlot) {
-        const slot = enterBuildingWorkSlot(d, bld.bid, unitId);
+        const slot = enterBuildingWorkSlot(d, bld.bid, unitId, task.preferredSlots || null);
         if (slot) {
           task.insideSlot = slot;
           const info = getVillagerInfo(unitId);
-          state.message = `${info.role} đã vào làm việc tại ${bld.spec.name}!`;
+          const bt = bld.targetType;
+          const roleVerb =
+            bt === 4
+              ? slot.slotIdx === 0
+                ? 'đã vào Bếp nấu ăn'
+                : 'đã vào Bếp dùng bữa'
+              : bt === 7
+                ? slot.slotIdx === 0
+                  ? 'đã lên bàn DJ chơi nhạc'
+                  : 'đã vào Sàn disco nhảy múa'
+                : bt === 8
+                  ? 'đã vào Khu thánh địa hành lễ'
+                  : bt === 0
+                    ? 'đã vào Kho vũ khí rèn đồ'
+                    : `đã vào làm việc tại ${bld.spec.name}`;
+          state.message = `${info.role} ${roleVerb}!`;
           uiChanged = true;
         } else {
           setUnitAnim(unitId, 8, 0);
@@ -2598,16 +2647,52 @@ function stepSimulation() {
         }
       }
       task.workTicks++;
-      setUnitAnim(unitId, 53, Math.floor(task.workTicks / 3) % 3);
+      // Play authentic per-building, per-slot animation decoded from /a (mo[174]/mo[57]/mo[166]/mo[164]):
+      // e.g. Bếp slot 0 = anim 105 (16f cooking), slots 1..6 = anim 83/84 (12f eating);
+      // Sàn disco slot 0 = anim 117 (30f DJ), slots 1..6 = anim 126..136/137/138/125 (dancing/party);
+      // Phòng tập = anim 23..33/72/74; Khu tập ném = anim 91..93; Kho vũ khí / Thánh địa = anim 105 (16f);
+      // Trung tâm PIA = anim 151..153; Chòi canh = anim 109/110.
+      const slotAnims = task.insideSlot.anims || [{ animId: 105, frames: 16 }];
+      let totalFrames = 0;
+      for (let ai = 0; ai < slotAnims.length; ai++) totalFrames += slotAnims[ai].frames;
+      let cursor = totalFrames > 0 ? task.workTicks % totalFrames : 0;
+      let chosenAnim = slotAnims[0];
+      for (let ai = 0; ai < slotAnims.length; ai++) {
+        if (cursor < slotAnims[ai].frames) {
+          chosenAnim = slotAnims[ai];
+          break;
+        }
+        cursor -= slotAnims[ai].frames;
+      }
+      setUnitAnim(unitId, chosenAnim.animId, cursor % chosenAnim.frames);
+      // Advance building's animated interior prop (kind === 4 in render-original.js: cooking pot, disco lights/turntable, altar)
+      e[3030 + unitId] = task.workTicks & 0xff;
 
       // Authentic per-building production & training effects!
       const bType = bld.targetType;
-      if (bType === 4 && task.workTicks % 60 === 0) {
-        // Bếp: Chef cooks meals (+2 food)
-        state.food += 2;
-        syncResourcesToData();
-        addPopup(bld.x + 1, bld.y, '🍳 +2 Thức ăn!', '#ffd84d');
-        uiChanged = true;
+      const slotIdx = task.insideSlot.slotIdx;
+      if (bType === 4) {
+        if (slotIdx === 0 && task.workTicks % 60 === 0) {
+          // Bếp slot 0: Chef cooks meals (+2 food)
+          state.food += 2;
+          syncResourcesToData();
+          uiChanged = true;
+        } else if (slotIdx > 0 && task.workTicks >= 24) {
+          // Bếp slots 1..6: Diner finishes meal & exits
+          if (state.food > 0) {
+            state.food = Math.max(0, state.food - 1);
+            syncResourcesToData();
+            e[2121 + unitId] = 100;
+            const maxHp = e[6767 + unitId] & 0xff;
+            e[1919 + unitId] = Math.min(maxHp, (e[1919 + unitId] & 0xff) + 6);
+            e[2222 + unitId] = 0;
+            e[3333 + unitId] = -1;
+          }
+          exitBuildingSlot(d, unitId);
+          setUnitAnim(unitId, 8, 0);
+          state.tasks.delete(unitId);
+          uiChanged = true;
+        }
       } else if ((bType === 1 || bType === 5) && task.workTicks >= 55) {
         // Phòng tập / Khu tập ném: trains warrior (+8 maxHp) then exits!
         const nextMax = Math.min(120, (e[6767 + unitId] & 0xff) + 8);
@@ -2617,28 +2702,37 @@ function stepSimulation() {
         setUnitAnim(unitId, 8, 0);
         state.tasks.delete(unitId);
         const info = getVillagerInfo(unitId);
-        addPopup(info.x, info.y, '💪 +8 HP tối đa!', '#9cff7b');
         state.message = `${info.role} đã hoàn thành huấn luyện tại ${bld.spec.name} (HP tối đa ${nextMax})!`;
         uiChanged = true;
-      } else if (bType === 7 && task.workTicks % 45 === 0) {
-        // Sàn Disco: DJ boosts tribe mood & energy!
-        for (const id of getVillagerIds()) {
-          e[2222 + id] = 0;
-          e[2020 + id] = Math.min(100, (e[2020 + id] & 0xff) + 8);
-          e[3333 + id] = -1;
+      } else if (bType === 7) {
+        if (slotIdx === 0 && task.workTicks % 45 === 0) {
+          // Sàn Disco slot 0: DJ boosts tribe mood & energy!
+          for (const id of getVillagerIds()) {
+            e[2222 + id] = 0;
+            e[2020 + id] = Math.min(100, (e[2020 + id] & 0xff) + 8);
+            e[3333 + id] = -1;
+          }
+          uiChanged = true;
+        } else if (slotIdx > 0 && task.workTicks % 16 === 0) {
+          // Sàn Disco slots 1..6: Dancers enjoy music & recover mood/energy
+          e[2222 + unitId] = 0;
+          e[2020 + unitId] = Math.min(100, (e[2020 + unitId] & 0xff) + 10);
+          e[3333 + unitId] = -1;
+          if (task.workTicks >= 96) {
+            exitBuildingSlot(d, unitId);
+            setUnitAnim(unitId, 8, 0);
+            state.tasks.delete(unitId);
+            uiChanged = true;
+          }
         }
-        addPopup(bld.x + 2, bld.y, '🎵 Disco +Vui vẻ!', '#ff9ee5');
-        uiChanged = true;
       } else if (bType === 8 && task.workTicks % 70 === 0) {
         // Khu thánh địa: Shaman meditates & generates +1 bone/mana
         state.tools += 1;
         syncResourcesToData();
-        addPopup(bld.x + 1, bld.y, '✨ +1 Phép/Xương', '#b79eff');
         uiChanged = true;
       } else if ((bType === 9 || bType === 11) && task.workTicks === 10) {
         // Trung tâm PIA / Chòi canh: expands fog of war radius!
         revealFog(d, bld.x + Math.floor(bld.w / 2), bld.y + Math.floor(bld.h / 2), bType === 11 ? 8 : 7);
-        addPopup(bld.x, bld.y, '👁 Mở rộng tầm nhìn!', '#6cc6f0');
       }
     }
   }
@@ -3062,7 +3156,7 @@ function openCanvasBuildingMenu(bld) {
   const items = [];
 
   if (bld.targetType === 0) {
-    // Ổ vũ khí: 6 weapons with authentic 659+id icons
+    // Ổ vũ khí: 6 weapons with authentic 659+id icons + weaponsmith slot
     for (const w of WEAPONS) {
       const afford = state.wood >= w.wood && state.stone >= w.stone && state.tools >= w.bones;
       const parts = [];
@@ -3083,8 +3177,18 @@ function openCanvasBuildingMenu(bld) {
         },
       });
     }
+    items.push({
+      label: 'CỬ THỢ RÈN VŨ KHÍ',
+      iconAnim: 13,
+      action: () => {
+        const uid = state.selectedUnit || findNearestVillager(bld.x, bld.y, true);
+        if (uid) assignWorkAtBuilding(uid, bld, [0]);
+        state.canvasMenu = null;
+        render();
+      },
+    });
   } else if (bld.targetType === 8) {
-    // Khu thánh địa: 4 spells with authentic animations 19..22
+    // Khu thánh địa: 4 spells with authentic animations 19..22 + shaman ritual slot
     SPELLS.forEach((sp, idx) => {
       items.push({
         label: sp.name.toUpperCase(),
@@ -3098,6 +3202,16 @@ function openCanvasBuildingMenu(bld) {
         },
       });
     });
+    items.push({
+      label: 'CỬ PHÁP SƯ HÀNH LỄ',
+      iconAnim: 13,
+      action: () => {
+        const uid = state.selectedUnit || findNearestVillager(bld.x, bld.y, true);
+        if (uid) assignWorkAtBuilding(uid, bld, [0]);
+        state.canvasMenu = null;
+        render();
+      },
+    });
   } else if (bld.targetType === 2) {
     // Lều: rest/sleep
     items.push({
@@ -3110,12 +3224,54 @@ function openCanvasBuildingMenu(bld) {
         render();
       },
     });
-  } else if ([1, 4, 5, 7, 9, 11].includes(bld.targetType)) {
+  } else if (bld.targetType === 4) {
+    // Bếp / Nhà ăn: Chef (slot 0, anim 105) + Diner (slots 1..6, anim 83/84)
+    items.push({
+      label: 'CỬ ĐẦU BẾP NẤU ĂN',
+      iconAnim: 13,
+      action: () => {
+        const uid = state.selectedUnit || findNearestVillager(bld.x, bld.y, true);
+        if (uid) assignWorkAtBuilding(uid, bld, [0]);
+        state.canvasMenu = null;
+        render();
+      },
+    });
+    items.push({
+      label: 'VÀO NHÀ ĂN DÙNG BỮA',
+      iconAnim: 13,
+      action: () => {
+        const uid = state.selectedUnit || findNearestVillager(bld.x, bld.y, true);
+        if (uid) assignEatTask(uid, bld);
+        state.canvasMenu = null;
+        render();
+      },
+    });
+  } else if (bld.targetType === 7) {
+    // Sàn disco: DJ (slot 0, anim 117) + Dancers (slots 1..6, anim 126..136)
+    items.push({
+      label: 'CỬ DJ CHƠI NHẠC',
+      iconAnim: 13,
+      action: () => {
+        const uid = state.selectedUnit || findNearestVillager(bld.x, bld.y, true);
+        if (uid) assignWorkAtBuilding(uid, bld, [0]);
+        state.canvasMenu = null;
+        render();
+      },
+    });
+    items.push({
+      label: 'VÀO SÀN NHẢY DISCO',
+      iconAnim: 13,
+      action: () => {
+        const uid = state.selectedUnit || findNearestVillager(bld.x, bld.y, true);
+        if (uid) assignWorkAtBuilding(uid, bld, [1, 2, 3, 4, 5, 6]);
+        state.canvasMenu = null;
+        render();
+      },
+    });
+  } else if ([1, 5, 9, 11].includes(bld.targetType)) {
     const workLabels = {
       1: 'LUYỆN CẬN CHIẾN (+8 HP)',
-      4: 'CỬ ĐẦU BẾP NẤU ĂN',
       5: 'LUYỆN NÉM (+8 HP)',
-      7: 'CỬ DJ MỞ TIỆC DISCO',
       9: 'CỬ TRINH SÁT (R=7)',
       11: 'LÍNH GÁC CHÒI CANH',
     };

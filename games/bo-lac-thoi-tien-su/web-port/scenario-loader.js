@@ -382,21 +382,71 @@ export const SPELLS = [
   { id: 'plague', name: 'Bệnh dịch', bones: 3, desc: 'Làm suy yếu thú hoang & quân địch trên bản đồ.' },
 ];
 
-export function enterBuildingWorkSlot(data, bid, unitId) {
+export function getBuildingSlotAnims(data, bType, slotIdx) {
+  const mb = data?.mapTableData;
+  const mo = data?.mapTableOffsets;
+  const bytes = data?.byteSpriteTables;
+  if (!mb || !mo || !bytes) {
+    return { jobId: 0, slotCount: 1, anims: [{ animId: 105, frames: 16 }] };
+  }
+  const base = mb[mo[174] + bType] & 0xff;
+  const nextBase = mb[mo[174] + bType + 1] & 0xff;
+  const slotCount = Math.max(1, nextBase - base);
+  const clampedSlot = Math.max(0, Math.min(slotCount - 1, slotIdx));
+  const jobId = mb[mo[57] + base + clampedSlot] & 0xff;
+  const aStart = mb[mo[166] + jobId] & 0xff;
+  const aEnd = mb[mo[166] + jobId + 1] & 0xff;
+  const anims = [];
+  for (let i = aStart; i < aEnd; i++) {
+    const animId = mb[mo[164] + i] & 0xff;
+    if (animId === 0) continue;
+    const frames = Math.max(1, (bytes[4]?.[animId] ?? 1) & 0xff);
+    anims.push({ animId, frames });
+  }
+  if (anims.length === 0) {
+    anims.push({ animId: 105, frames: 16 });
+  }
+  return { jobId, slotCount, anims };
+}
+
+export function enterBuildingWorkSlot(data, bid, unitId, preferredSlots = null) {
   const e = data.entityData;
+  const rawType = e[8749 + bid] & 0xff;
+  const bType = rawType >= 12 && rawType <= 19 ? (e[9237 + bid] & 0xff) : rawType;
+  const mb = data.mapTableData;
+  const mo = data.mapTableOffsets;
+  const base = mb && mo ? (mb[mo[174] + bType] & 0xff) : 0;
+  const nextBase = mb && mo ? (mb[mo[174] + bType + 1] & 0xff) : 4;
+  const slotCount = Math.max(1, nextBase - base);
+
   const usedSlots = new Set();
   let cur = e[8993 + bid];
   let guard = 0;
   while (cur > 0 && guard++ < 16) {
-    if (cur === unitId) return { slotIdx: e[4646 + cur] };
+    if (cur === unitId) {
+      const existingSlot = e[4646 + cur];
+      const meta = getBuildingSlotAnims(data, bType, existingSlot);
+      return { slotIdx: existingSlot, bType, jobId: meta.jobId, anims: meta.anims };
+    }
     usedSlots.add(e[4646 + cur]);
     cur = e[4545 + cur];
   }
+
   let freeSlot = -1;
-  for (let s = 0; s < 4; s++) {
-    if (!usedSlots.has(s)) {
-      freeSlot = s;
-      break;
+  if (Array.isArray(preferredSlots) && preferredSlots.length > 0) {
+    for (const s of preferredSlots) {
+      if (s >= 0 && s < slotCount && !usedSlots.has(s)) {
+        freeSlot = s;
+        break;
+      }
+    }
+  }
+  if (freeSlot === -1) {
+    for (let s = 0; s < slotCount; s++) {
+      if (!usedSlots.has(s)) {
+        freeSlot = s;
+        break;
+      }
     }
   }
   if (freeSlot === -1) return null;
@@ -408,11 +458,13 @@ export function enterBuildingWorkSlot(data, bid, unitId) {
   e[4444 + unitId] = bid;
   e[4646 + unitId] = freeSlot;
   e[1313 + unitId] = 1; // active worker inside building (kind===3/4)
+  e[3030 + unitId] = 0; // building prop animation frame counter
   e[202 + unitId] = 0;
   e[303 + unitId] = 0;
   e[3535 + unitId] = 0;
   e[3636 + unitId] = 0;
-  return { slotIdx: freeSlot };
+  const meta = getBuildingSlotAnims(data, bType, freeSlot);
+  return { slotIdx: freeSlot, bType, jobId: meta.jobId, anims: meta.anims };
 }
 
 export function upgradeBuilding(data, bid) {
