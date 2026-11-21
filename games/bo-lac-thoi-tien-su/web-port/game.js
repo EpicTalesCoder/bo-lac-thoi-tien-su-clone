@@ -727,8 +727,8 @@ function findBestStorageWeaponForUnit(unitId, owner) {
   const r = d.resources?.[owner] || [];
   const curW = e[6565 + unitId] & 0xff;
   const curAtk = curW < WEAPONS.length ? WEAPONS[curW].atk : 0;
-  const meleeLv = e[1616 + unitId] & 0xff;
-  const throwLv = e[1717 + unitId] & 0xff;
+  const meleeLv = e[1717 + unitId] & 0xff; // Authentic mo[126][14]=17 -> 1717 = Melee (Phòng tập đánh)
+  const throwLv = e[1616 + unitId] & 0xff; // Authentic mo[126][15]=16 -> 1616 = Throwing (Trung tâm bia)
   const preferThrowing = throwLv > meleeLv;
 
   // Priority order matching the villager's highest combat skill!
@@ -2572,12 +2572,12 @@ function resumeSavedJob(unitId) {
   if (saved.kind === 'workBuilding') {
     const bld = getPlayerBuildings(owner).find((b) => !b.underConstruction && b.bid === saved.bid);
     if (bld) {
-      // For training buildings (Phòng tập=1, Khu tập ném=5), stop auto-resuming once warrior reaches max rank (9)
-      if (bld.targetType === 1 && (e[1616 + unitId] & 0xff) >= 9) {
+      // For training buildings (Phòng tập=1 -> e[1717], Khu tập ném=5 -> e[1616]), stop auto-resuming at max rank (9)
+      if (bld.targetType === 1 && (e[1717 + unitId] & 0xff) >= 9) {
         state.savedJobs.delete(unitId);
         return false;
       }
-      if (bld.targetType === 5 && (e[1717 + unitId] & 0xff) >= 9) {
+      if (bld.targetType === 5 && (e[1616 + unitId] & 0xff) >= 9) {
         state.savedJobs.delete(unitId);
         return false;
       }
@@ -2587,6 +2587,20 @@ function resumeSavedJob(unitId) {
     return false;
   }
   return false;
+}
+
+function syncTopCombatSkills(uid) {
+  const e = state.data?.entityData;
+  if (!e || !uid) return;
+  // Authentic /a mo[126] & mo[127] combat skill IDs:
+  // 14 = Melee (e[1717], bias 0), 15 = Throwing (e[1616], bias 0), 13 = Magic (e[7575], bias -1)
+  const candidates = [
+    { id: 14, val: e[1717 + uid] & 0xff },
+    { id: 15, val: e[1616 + uid] & 0xff },
+    { id: 13, val: Math.max(0, (e[7575 + uid] & 0xff) - 1) },
+  ].sort((a, b) => b.val - a.val || a.id - b.id);
+  e[2525 + uid] = candidates[0].id;
+  e[2626 + uid] = candidates[1].id;
 }
 
 function assignHuntTask(unitId, animalOcc) {
@@ -4966,28 +4980,35 @@ function stepSimulation() {
           uiChanged = true;
         }
       } else if (bType === 1 || bType === 5) {
-        // Authentic long training duration (like original game: ~30s for Lv1 ^, scaling up to ~58s for Lv5)
-        const curLvRaw = (bType === 1 ? e[1616 + unitId] : e[1717 + unitId]) & 0xff;
-        const curRank = Math.max(0, curLvRaw - 4);
-        const trainTarget = 320 + curRank * 80;
+        // Authentic /a mo[126]: bType 1 (Phòng tập đánh) -> skillId 14 -> e[1717];
+        // bType 5 (Trung tâm bia / Khu tập ném) -> skillId 15 -> e[1616]!
+        const curLvRaw = (bType === 1 ? e[1717 + unitId] : e[1616 + unitId]) & 0xff;
+        const trainTarget = 220 + curLvRaw * 35;
         if (task.workTicks >= trainTarget) {
           const nextMax = Math.min(120, (e[6767 + unitId] & 0xff) + 8);
           e[6767 + unitId] = nextMax;
           e[1919 + unitId] = nextMax;
+          const nextLv = Math.min(9, curLvRaw + 1);
           if (bType === 1) {
-            e[1616 + unitId] = Math.min(9, Math.max(5, (e[1616 + unitId] & 0xff) + 1)); // Melee rank ^
+            e[1717 + unitId] = nextLv; // Melee skill (skillId 14)
           } else {
-            e[1717 + unitId] = Math.min(9, Math.max(5, (e[1717 + unitId] & 0xff) + 1)); // Throwing rank ^
+            e[1616 + unitId] = nextLv; // Throwing skill (skillId 15)
           }
-          exitBuildingSlot(d, unitId);
-          state.tasks.delete(unitId);
-          if (!resumeSavedJob(unitId)) {
-            setUnitAnim(unitId, 8, 0);
-          }
+          syncTopCombatSkills(unitId);
           if ((unitId > 50 ? 1 : 0) === (state.localTribe ?? 0)) {
             const info = getVillagerInfo(unitId);
-            const lv = bType === 1 ? (e[1616 + unitId] & 0xff) : (e[1717 + unitId] & 0xff);
-            state.message = `${info.role} đã lên cấp kỹ năng ${bType === 1 ? 'Cận chiến' : 'Ném'} (Cấp ${lv - 4} ^, HP ${nextMax})!`;
+            const skName = bType === 1 ? 'Cận chiến' : 'Ném';
+            addPopup(bld.x + Math.floor(bld.w / 2), bld.y, `${skName} Lv.${nextLv}!`, '#fff37b');
+            state.message = `${info.role} đã lên kỹ năng ${skName} cấp ${nextLv} (HP ${nextMax})!`;
+          }
+          if (nextLv >= 9) {
+            exitBuildingSlot(d, unitId);
+            state.tasks.delete(unitId);
+            state.savedJobs.delete(unitId);
+            setUnitAnim(unitId, 8, 0);
+          } else {
+            // Continue training inside until max Lv 9, hungry/sleepy, or evicted by player
+            task.workTicks = 0;
           }
           uiChanged = true;
         }
@@ -6196,7 +6217,7 @@ function openCanvasBuildingMenu(bld) {
       const occupants = getBuildingOccupants(bld.bid);
       for (const uid of occupants) {
         const info = getVillagerInfo(uid);
-        const rank = bld.targetType === 5 ? e[1717 + uid] & 0xff : e[1616 + uid] & 0xff;
+        const rank = bld.targetType === 5 ? e[1616 + uid] & 0xff : e[1717 + uid] & 0xff;
         const hp = e[1919 + uid] & 0xff;
         const maxHp = Math.max(1, e[6767 + uid] & 0xff);
         items.push({
@@ -7015,7 +7036,7 @@ function updatePanel() {
             const occupants = getBuildingOccupants(bld.bid);
             for (const uid of occupants) {
               const info = getVillagerInfo(uid);
-              const rank = bld.targetType === 5 ? e[1717 + uid] & 0xff : e[1616 + uid] & 0xff;
+              const rank = bld.targetType === 5 ? e[1616 + uid] & 0xff : e[1717 + uid] & 0xff;
               const hp = e[1919 + uid] & 0xff;
               const maxHp = Math.max(1, e[6767 + uid] & 0xff);
               addChoiceButton(

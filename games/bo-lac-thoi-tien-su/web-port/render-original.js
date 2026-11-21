@@ -646,8 +646,8 @@ function drawEntitySprite(ctx, data, entityId, screenX, screenY, dir, fieldOffse
       }
 
       // Authentic original rank chevrons (^, ^^, ^^^) from f.java:1399-1402 (composites 602..606)
-      const meleeLv = e[1616 + entityId] & 0xff;
-      const throwLv = e[1717 + entityId] & 0xff;
+      const throwLv = e[1616 + entityId] & 0xff; // mo[126][15]=16 -> 1616 (Throwing)
+      const meleeLv = e[1717 + entityId] & 0xff; // mo[126][14]=17 -> 1717 (Melee)
       const magicLv = e[7575 + entityId] & 0xff;
       if (meleeLv >= 5 || throwLv >= 5 || magicLv > 5) {
         const bestLv = Math.max(meleeLv, throwLv, magicLv - 1);
