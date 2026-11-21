@@ -4849,9 +4849,9 @@ function stepSimulation() {
           else setUnitAnim(unitId, 113, (signFrame - 13) % 12);
           continue;
         }
-        // No weapons queued: Blacksmith stands idle at the anvil (anim 8) waiting for forge orders — NEVER anim 85 (eating)!
+        // No weapons queued: Blacksmith lies down and naps (authentic anim 39, 8f — b.java:1652) until a weapon is ordered!
         setUnitCarry(unitId, 0, 0);
-        setUnitAnim(unitId, 8, 0);
+        setUnitAnim(unitId, 39, Math.floor(task.workTicks / 3) % 8);
         continue;
       }
 
