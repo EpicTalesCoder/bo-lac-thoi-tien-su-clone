@@ -193,6 +193,7 @@ const state = {
   mpMode: true,
   localTribe: 0, // 0 = Host (Blue Tribe 1..50), 1 = Guest (Red Tribe 51..100)
   mpWinner: null,
+  tribeUseRawWeapon: [true, true], // Per-tribe toggle: allow taking 1 Stone/Wood from Storage when no crafted weapons exist
   pointerPos: { x: 0, y: 0, visible: false },
   warningBanner: null,
   food: 0,
@@ -542,8 +543,8 @@ function findBestStorageWeaponForUnit(unitId, owner) {
       return { weaponId: wid, fromStock: true };
     }
   }
-  // If unarmed and no crafted weapon in stock, allow grabbing 1 Stone (thrower) or 1 Wood (melee) basic weapon
-  if (curW === 9) {
+  // If unarmed and no crafted weapon in stock, ONLY grab 1 Stone/Wood if this tribe's "Use Stone/Wood weapon" option is enabled!
+  if (curW === 9 && state.tribeUseRawWeapon[owner] !== false) {
     const stoneAmt = owner === (state.localTribe ?? 0) ? state.stone : (r[2] || 0);
     const woodAmt = owner === (state.localTribe ?? 0) ? state.wood : (r[1] || 0);
     if (preferThrowing && stoneAmt >= 1) return { weaponId: 1, fromStock: false, resType: 'stone' };
@@ -1750,7 +1751,10 @@ function assignTrainOrFetchWeapon(unitId, bld, owner = state.localTribe ?? 0, si
   if (curWeapon !== 9) {
     return assignWorkAtBuilding(unitId, bld);
   }
-  // Unarmed: Phòng tập (1) needs 1 Wood -> Dùi cui (weaponId 0); Khu tập ném (5) needs 1 Stone -> Đá ném (weaponId 1)
+  // Unarmed: if tribe disabled raw Stone/Wood weapons, enter training unarmed; otherwise take 1 Stone/Wood from Storage
+  if (state.tribeUseRawWeapon[owner] === false) {
+    return assignWorkAtBuilding(unitId, bld);
+  }
   const r = d.resources?.[owner];
   const needResIdx = isThrowing ? 2 : 1; // 2=Stone, 1=Wood
   const curRes = owner === (state.localTribe ?? 0) ? (isThrowing ? state.stone : state.wood) : (r?.[needResIdx] || 0);
@@ -3648,6 +3652,41 @@ function stepSimulation() {
   if (stepProjectiles()) uiChanged = true;
   if (!state.mpMode && stepEnemyAI()) uiChanged = true;
 
+  // Per-unit aggro scan radius: idle or marching adult villagers automatically attack nearby enemies!
+  if (state.animTick % 6 === 0) {
+    const tribesToScan = state.mpMode ? [0, 1] : [0];
+    for (const owner of tribesToScan) {
+      const allies = getVillagerIds(owner);
+      const enemies = getEnemyIds(owner);
+      if (enemies.length === 0) continue;
+      for (const uid of allies) {
+        if ((e[1414 + uid] & 0xff) < 12) continue; // children don't fight
+        if (isUnitInsideBuilding(d, uid)) continue;
+        const curTask = state.tasks.get(uid);
+        // Only auto-engage when idle or casually walking (never interrupt active gathering, building, courtship, or existing combat)
+        if (curTask && curTask.kind !== 'move') continue;
+        const ux = e[uid] & 0xff;
+        const uy = e[101 + uid] & 0xff;
+        const hasWeapon = (e[6565 + uid] & 0xff) < 9;
+        const scanRadius = getUnitRange(uid) > 1 ? 6 : hasWeapon ? 5 : 4;
+        let nearestEnemy = 0;
+        let bestDist = scanRadius + 0.01;
+        for (const eid of enemies) {
+          if (isUnitInsideBuilding(d, eid)) continue;
+          const dist = Math.hypot((e[eid] & 0xff) - ux, (e[101 + eid] & 0xff) - uy);
+          if (dist <= bestDist) {
+            bestDist = dist;
+            nearestEnemy = eid;
+          }
+        }
+        if (nearestEnemy > 0) {
+          assignAttackTask(uid, 'unit', nearestEnemy);
+          uiChanged = true;
+        }
+      }
+    }
+  }
+
   // Periodic villager survival needs, thought bubbles, auto self-care & tribe births
   if (state.animTick % 28 === 0) {
     if (stepVillagerNeeds()) uiChanged = true;
@@ -4041,12 +4080,18 @@ function openCanvasActionsMenu() {
       action: () => openCanvasVillagersMenu(),
     },
     {
-      label: state.autoAI ? 'AI TỰ ĐỘNG: ĐANG BẬT' : 'AI TỰ ĐỘNG: ĐANG TẮT',
-      iconAnim: state.autoAI ? 25 : 23,
+      label: state.tribeUseRawWeapon[state.localTribe ?? 0] !== false ? 'VŨ KHÍ THÔ (ĐÁ/GỖ): BẬT' : 'VŨ KHÍ THÔ (ĐÁ/GỖ): TẮT',
+      iconAnim: state.tribeUseRawWeapon[state.localTribe ?? 0] !== false ? 25 : 23,
       action: () => {
-        state.autoAI = !state.autoAI;
-        if (state.autoAI) runTribeAutoAI();
-        state.message = state.autoAI ? 'Đã bật AI bộ lạc tự động.' : 'Đã tắt AI bộ lạc tự động.';
+        const myTribe = state.localTribe ?? 0;
+        const nextVal = state.tribeUseRawWeapon[myTribe] === false;
+        state.tribeUseRawWeapon[myTribe] = nextVal;
+        if (state.mpMode && myTribe === 1) {
+          mpClient?.sendCommand({ kind: 'setUseRawWeapon', value: nextVal });
+        }
+        state.message = nextVal
+          ? '🪨 Đã BẬT: khi kho hết vũ khí, dân sẽ lấy Đá/Gỗ làm vũ khí chiến đấu.'
+          : '🚫 Đã TẮT: dân sẽ không lấy Đá/Gỗ làm vũ khí (giữ nguyên liệu để xây nhà).';
         openCanvasActionsMenu();
       },
     },
@@ -6242,6 +6287,8 @@ Promise.all([
         confirmBuildAtCursor(1, cmd);
       } else if (cmd.kind === 'flagCommand') {
         confirmFlagAtCursor(1, cmd);
+      } else if (cmd.kind === 'setUseRawWeapon') {
+        state.tribeUseRawWeapon[1] = Boolean(cmd.value);
       }
     };
 
