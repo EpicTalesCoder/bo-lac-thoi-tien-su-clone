@@ -1,0 +1,7 @@
+body { background:#111; color:#eee; font-family:monospace; text-align:center; padding:20px; }
+h1 { font-size:20px; color:#9cff7b; margin-bottom:8px; }
+h1 .sub { font-size:11px; color:#888; }
+canvas { border:2px solid #444; image-rendering:pixelated; image-rendering:crisp-edges;
+  width:min(92vw, 360px); height:auto; background:#000; }
+.hint { font-size:11px; color:#aaa; }
+a { color:#9cff7b; }

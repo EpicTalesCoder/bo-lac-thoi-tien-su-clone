@@ -18,21 +18,24 @@
     ]
   },
   {
-    "slug": "green-farm-3",
-    "title": "Green Farm 3",
-    "originalTitle": "Green Farm 3",
-    "vendor": "Gameloft",
+    "slug": "total-tournament",
+    "title": "Total Tournament",
+    "originalTitle": "Total Tournament",
+    "vendor": "Net Lizard",
     "resolution": "240×320",
-    "genre": "Mô phỏng nông trại",
-    "jarFile": "games/green-farm-3/original/green-farm-3-240x320.jar",
-    "playUrl": "./games/green-farm-3/web-port/index.html",
-    "directGameUrl": "./games/green-farm-3/web-port/index.html",
-    "coverImage": "./games/green-farm-3/web-port/assets/icon.png",
-    "status": "in-progress",
+    "genre": "Top-down team action (shooter)",
+    "jarFile": "games/total-tournament/original/total-tournament.jar",
+    "playUrl": "./games/total-tournament/web-port/index.html",
+    "directGameUrl": "./games/total-tournament/web-port/index.html",
+    "coverImage": "./games/total-tournament/web-port/assets/li1.png",
+    "status": "playable",
     "features": [
-      "Original JAR preserved (SHA-256 verified)",
-      "44.307 dòng decompiled (CFR) + bytecode evidence",
-      "Web-port Phaser 3 shell — port in-progress"
+      "Phaser 3 WebGL pipeline · canvas 240×320 · sim tick 120ms như MIDP",
+      "5 chế độ: Tử chiến (DM), Đồng đội 4v4, Sinh tồn theo đợt, Cướp cờ (CTF), Anh hùng cuối",
+      "6 loại vũ khí: cưa điện, súng máy, shotgun, bazooka (nổ lan), plasma, beam",
+      "AI bot tấn công/trinh sát với LOS raycast · radar minimap · âm thanh WebAudio tổng hợp",
+      "Song ngữ VI/EN lưu localStorage · kỷ lục theo chế độ",
+      "Sprite giải mã từ JAR gốc (XOR 3 tầng) — analysis/ có source decompiled"
     ]
   }
 ]
