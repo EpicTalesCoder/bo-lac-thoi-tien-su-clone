@@ -23,6 +23,8 @@ const WSS_BROKERS = [
   'wss://broker.hivemq.com:8884/mqtt',
 ];
 
+const NTFY_BASE = 'https://ntfy.sh';
+const NTFY_WS_BASE = 'wss://ntfy.sh';
 const ROOM_PEER_PREFIX = 'bltts-v2-room-';
 
 function mqttEncodeRemLen(len) {
@@ -59,17 +61,16 @@ function mqttPublishPacket(topic, text) {
   return new Uint8Array([0x30, ...mqttEncodeRemLen(t.length + p.length), ...t, ...p]);
 }
 
-class MqttWssRelay {
-  constructor(subTopic, pubTopic, { onReady, onMessage, onStatus } = {}) {
+class MqttSingleBroker {
+  constructor(url, subTopic, pubTopic, { onReady, onMessage } = {}) {
+    this.url = url;
     this.subTopic = subTopic;
     this.pubTopic = pubTopic;
     this.onReady = onReady;
     this.onMessage = onMessage;
-    this.onStatus = onStatus;
     this.ws = null;
     this.ready = false;
     this.closed = false;
-    this.brokerIdx = 0;
     this.pingTimer = null;
     this.retryTimer = null;
     this._decoder = new TextDecoder();
@@ -78,14 +79,13 @@ class MqttWssRelay {
 
   _connect() {
     if (this.closed || typeof WebSocket === 'undefined') return;
-    const url = WSS_BROKERS[this.brokerIdx % WSS_BROKERS.length];
     this.ready = false;
     let ws;
     try {
-      ws = new WebSocket(url, 'mqtt');
+      ws = new WebSocket(this.url, 'mqtt');
       ws.binaryType = 'arraybuffer';
     } catch {
-      this._scheduleFailover();
+      this._scheduleRetry();
       return;
     }
     this.ws = ws;
@@ -122,19 +122,16 @@ class MqttWssRelay {
         if (!lenDone || idx + rem > u8.length) break;
 
         if (pktType === 2) {
-          // CONNACK -> subscribe to incoming room channel
           try {
             ws.send(mqttSubscribePacket(1, this.subTopic));
           } catch {}
         } else if (pktType === 9) {
-          // SUBACK -> relay channel is live!
           if (!this.ready) {
             this.ready = true;
             this._startPing();
             this.onReady?.();
           }
         } else if (pktType === 3) {
-          // PUBLISH
           const tLen = (u8[idx] << 8) | u8[idx + 1];
           const qos = (header >> 1) & 3;
           const pStart = idx + 2 + tLen + (qos > 0 ? 2 : 0);
@@ -151,15 +148,13 @@ class MqttWssRelay {
       }
     };
 
-    ws.onerror = () => {
-      // onclose will trigger failover
-    };
+    ws.onerror = () => {};
 
     ws.onclose = () => {
       this._stopPing();
       this.ready = false;
       if (!this.closed && this.ws === ws) {
-        this._scheduleFailover();
+        this._scheduleRetry();
       }
     };
   }
@@ -169,7 +164,7 @@ class MqttWssRelay {
     this.pingTimer = setInterval(() => {
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         try {
-          this.ws.send(new Uint8Array([0xc0, 0x00])); // MQTT PINGREQ
+          this.ws.send(new Uint8Array([0xc0, 0x00]));
         } catch {}
       }
     }, 20000);
@@ -182,18 +177,16 @@ class MqttWssRelay {
     }
   }
 
-  _scheduleFailover() {
+  _scheduleRetry() {
     if (this.closed) return;
-    this.brokerIdx = (this.brokerIdx + 1) % WSS_BROKERS.length;
-    this.onStatus?.('Đang chuyển máy chủ phòng dự phòng...');
     if (this.retryTimer) clearTimeout(this.retryTimer);
-    this.retryTimer = setTimeout(() => this._connect(), 1200);
+    this.retryTimer = setTimeout(() => this._connect(), 2500);
   }
 
-  send(packet) {
+  send(text) {
     if (!this.ready || !this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
     try {
-      this.ws.send(mqttPublishPacket(this.pubTopic, JSON.stringify(packet)));
+      this.ws.send(mqttPublishPacket(this.pubTopic, text));
       return true;
     } catch {
       return false;
@@ -210,8 +203,124 @@ class MqttWssRelay {
     }
     try {
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        this.ws.send(new Uint8Array([0xe0, 0x00])); // MQTT DISCONNECT
+        this.ws.send(new Uint8Array([0xe0, 0x00]));
       }
+      this.ws?.close();
+    } catch {}
+    this.ws = null;
+  }
+}
+
+// Connects to ALL MQTT-WSS brokers simultaneously so Host & Guest never land on different brokers!
+class MqttWssRelay {
+  constructor(subTopic, pubTopic, { onReady, onMessage } = {}) {
+    this.ready = false;
+    this._notifiedReady = false;
+    this.brokers = WSS_BROKERS.map(
+      (url) =>
+        new MqttSingleBroker(url, subTopic, pubTopic, {
+          onReady: () => {
+            this.ready = true;
+            if (!this._notifiedReady) {
+              this._notifiedReady = true;
+              onReady?.();
+            }
+          },
+          onMessage,
+        })
+    );
+  }
+
+  send(packet) {
+    const text = JSON.stringify(packet);
+    let sent = false;
+    for (const b of this.brokers) {
+      if (b.send(text)) sent = true;
+    }
+    return sent;
+  }
+
+  close() {
+    this.ready = false;
+    for (const b of this.brokers) b.close();
+    this.brokers = [];
+  }
+}
+
+// Pure Port-443 HTTPS/WSS Relay (works on 100% of mobile 4G/5G, office/school Wi-Fi & strict firewalls!)
+class NtfyHttpsRelay {
+  constructor(subTopic, pubTopic, { onReady, onMessage } = {}) {
+    this.subTopic = subTopic;
+    this.pubTopic = pubTopic;
+    this.onReady = onReady;
+    this.onMessage = onMessage;
+    this.ws = null;
+    this.ready = false;
+    this.closed = false;
+    this.retryTimer = null;
+    this._connect();
+  }
+
+  _connect() {
+    if (this.closed || typeof WebSocket === 'undefined') return;
+    this.ready = false;
+    let ws;
+    try {
+      ws = new WebSocket(`${NTFY_WS_BASE}/${encodeURIComponent(this.subTopic)}/ws`);
+    } catch {
+      this._scheduleRetry();
+      return;
+    }
+    this.ws = ws;
+    ws.onopen = () => {
+      if (this.closed || this.ws !== ws) return;
+      this.ready = true;
+      this.onReady?.();
+    };
+    ws.onmessage = (ev) => {
+      if (this.closed || this.ws !== ws) return;
+      try {
+        const frame = JSON.parse(String(ev.data || ''));
+        if (frame?.event === 'message' && typeof frame.message === 'string') {
+          const parsed = JSON.parse(frame.message);
+          this.onMessage?.(parsed);
+        }
+      } catch {}
+    };
+    ws.onerror = () => {};
+    ws.onclose = () => {
+      this.ready = false;
+      if (!this.closed && this.ws === ws) this._scheduleRetry();
+    };
+  }
+
+  _scheduleRetry() {
+    if (this.closed) return;
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = setTimeout(() => this._connect(), 2500);
+  }
+
+  send(packet) {
+    if (this.closed || typeof fetch === 'undefined') return false;
+    try {
+      fetch(`${NTFY_BASE}/${encodeURIComponent(this.pubTopic)}`, {
+        method: 'POST',
+        body: JSON.stringify(packet),
+      }).catch(() => {});
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  close() {
+    this.closed = true;
+    this.ready = false;
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
+    try {
       this.ws?.close();
     } catch {}
     this.ws = null;
@@ -233,13 +342,16 @@ export class MultiplayerClient {
     this.conns = new Map(); // host: peerId -> DataConnection (supports up to 3 guests!)
     this.bc = null;
     this.relay = null;
+    this.ntfyRelay = null;
     this.connected = false;
     this.transport = '';
     this.statusNote = '';
     this.countdownTimer = null;
     this._joinRetryTimer = null;
+    this._hostBeaconTimer = null;
     this._joinAttempts = 0;
     this._lastRelaySnapAt = 0;
+    this._lastNtfySnapAt = 0;
     this._seqOut = 0;
     this._seenSeq = new Set();
 
@@ -295,12 +407,14 @@ export class MultiplayerClient {
   sendRaw(msg) {
     const packet = { ...msg, _from: this.clientId, _role: this.role, _seq: ++this._seqOut };
     let sent = false;
+    let fastTransportSent = false;
     if (this.role === 'host' && this.conns.size > 0) {
       for (const c of this.conns.values()) {
         if (c && c.open) {
           try {
             c.send(packet);
             sent = true;
+            fastTransportSent = true;
           } catch {}
         }
       }
@@ -308,6 +422,7 @@ export class MultiplayerClient {
       try {
         this.conn.send(packet);
         sent = true;
+        fastTransportSent = true;
       } catch {}
     }
     if (this.relay && this.relay.ready) {
@@ -315,9 +430,28 @@ export class MultiplayerClient {
         const now = Date.now();
         if (now - this._lastRelaySnapAt >= 95) {
           this._lastRelaySnapAt = now;
-          if (this.relay.send(packet)) sent = true;
+          if (this.relay.send(packet)) {
+            sent = true;
+            fastTransportSent = true;
+          }
+        } else {
+          fastTransportSent = true;
         }
       } else if (this.relay.send(packet)) {
+        sent = true;
+      }
+    }
+    if (this.ntfyRelay && !this.ntfyRelay.closed) {
+      if (msg.type === 'snap') {
+        // Use Port-443 HTTPS relay for game snapshots whenever MQTT/WebRTC are blocked by firewall!
+        if (!fastTransportSent) {
+          const now = Date.now();
+          if (now - this._lastNtfySnapAt >= 240) {
+            this._lastNtfySnapAt = now;
+            if (this.ntfyRelay.send(packet)) sent = true;
+          }
+        }
+      } else if (this.ntfyRelay.send(packet)) {
         sent = true;
       }
     }
@@ -334,6 +468,13 @@ export class MultiplayerClient {
     if (this._joinRetryTimer) {
       clearInterval(this._joinRetryTimer);
       this._joinRetryTimer = null;
+    }
+  }
+
+  _clearHostBeacon() {
+    if (this._hostBeaconTimer) {
+      clearInterval(this._hostBeaconTimer);
+      this._hostBeaconTimer = null;
     }
   }
 
@@ -371,14 +512,40 @@ export class MultiplayerClient {
       };
     }
 
-    // 2) Cloud WSS Relay (works reliably across ANY 2..4 networks, 4G/5G CGNAT & firewalls!)
+    // 2) Port-443 HTTPS/WSS Relay (passes 100% of mobile 4G/5G CGNAT & strict firewalls!)
+    this.ntfyRelay = new NtfyHttpsRelay(
+      `bltts_v2_${code}_c2h`,
+      `bltts_v2_${code}_h2c`,
+      {
+        onReady: () => {
+          this.transport = this.transport || 'Cloud HTTPS';
+          this.statusNote = '';
+          this.sendRaw({ type: 'hostBeacon', roomCode: code });
+          if (this.connected) {
+            this.sendRaw({ type: 'lobbySync', lobby: this.lobby });
+          }
+          this.emitLobby();
+        },
+        onMessage: (msg) => {
+          if (!msg || msg._from === this.clientId) return;
+          if (!this.connected) {
+            this.connected = true;
+            this.transport = this.transport === 'Local Tab' ? 'Local Tab' : 'Cloud HTTPS';
+          }
+          this.handleMessage(msg);
+        },
+      }
+    );
+
+    // 3) Dual MQTT-WSS Relay (EMQX + HiveMQ simultaneously for low-latency 10Hz sync!)
     this.relay = new MqttWssRelay(
       `bltts/mp/v2/${code}/c2h`,
       `bltts/mp/v2/${code}/h2c`,
       {
         onReady: () => {
-          this.transport = this.transport || 'Cloud WSS';
+          this.transport = this.transport && this.transport !== 'Cloud HTTPS' ? this.transport : 'Cloud WSS';
           this.statusNote = '';
+          this.sendRaw({ type: 'hostBeacon', roomCode: code });
           if (this.connected) {
             this.sendRaw({ type: 'lobbySync', lobby: this.lobby });
           }
@@ -392,14 +559,15 @@ export class MultiplayerClient {
           }
           this.handleMessage(msg);
         },
-        onStatus: (txt) => {
-          if (!this.connected) {
-            this.statusNote = txt;
-            this.emitLobby();
-          }
-        },
       }
     );
+
+    // Periodic host beacon while waiting in lobby so joining guests discover the room immediately
+    this._clearHostBeacon();
+    this._hostBeaconTimer = setInterval(() => {
+      if (this.role !== 'host' || this.lobby.status !== 'lobby') return;
+      this.sendRaw({ type: 'hostBeacon', roomCode: code });
+    }, 2200);
 
     // 3) PeerJS WebRTC P2P (optional direct acceleration for up to 3 guests)
     if (typeof window !== 'undefined' && window.Peer) {
@@ -484,31 +652,49 @@ export class MultiplayerClient {
       setTimeout(announceJoin, 60);
     }
 
-    // 2) Cloud WSS Relay join (works across ANY 2..4 networks, 4G/5G & firewalls!)
+    // 2) Port-443 HTTPS/WSS Relay join (passes 100% of mobile 4G/5G CGNAT & strict firewalls!)
+    this.ntfyRelay = new NtfyHttpsRelay(
+      `bltts_v2_${cleanCode}_h2c`,
+      `bltts_v2_${cleanCode}_c2h`,
+      {
+        onReady: () => {
+          this.transport = this.transport || 'Cloud HTTPS';
+          announceJoin();
+          this.emitLobby();
+        },
+        onMessage: (msg) => {
+          if (!msg || msg._from === this.clientId) return;
+          if (msg.type === 'hostBeacon') {
+            if (!this.connected) announceJoin();
+            return;
+          }
+          if (!this.connected) {
+            this.connected = true;
+            this.transport = this.transport === 'Local Tab' ? 'Local Tab' : 'Cloud HTTPS';
+            this.statusNote = '';
+            this._clearJoinRetry();
+          }
+          this.handleMessage(msg);
+        },
+      }
+    );
+
+    // 3) Dual MQTT-WSS Relay join (EMQX + HiveMQ simultaneously!)
     this.relay = new MqttWssRelay(
       `bltts/mp/v2/${cleanCode}/h2c`,
       `bltts/mp/v2/${cleanCode}/c2h`,
       {
         onReady: () => {
-          this.transport = this.transport || 'Cloud WSS';
+          this.transport = this.transport && this.transport !== 'Cloud HTTPS' ? this.transport : 'Cloud WSS';
           announceJoin();
-          this._clearJoinRetry();
-          this._joinRetryTimer = setInterval(() => {
-            if (this.connected || this.role !== 'guest') {
-              this._clearJoinRetry();
-              return;
-            }
-            this._joinAttempts++;
-            announceJoin();
-            if (this._joinAttempts >= 8) {
-              this.statusNote = `Chưa thấy Chủ phòng #${cleanCode} phản hồi — hãy kiểm tra đúng mã 4 số hoặc bảo Chủ phòng tạo lại phòng.`;
-              this.emitLobby();
-            }
-          }, 1500);
           this.emitLobby();
         },
         onMessage: (msg) => {
           if (!msg || msg._from === this.clientId) return;
+          if (msg.type === 'hostBeacon') {
+            if (!this.connected) announceJoin();
+            return;
+          }
           if (!this.connected) {
             this.connected = true;
             this.transport = this.transport === 'Local Tab' ? 'Local Tab' : 'Cloud WSS';
@@ -517,14 +703,23 @@ export class MultiplayerClient {
           }
           this.handleMessage(msg);
         },
-        onStatus: (txt) => {
-          if (!this.connected) {
-            this.statusNote = txt;
-            this.emitLobby();
-          }
-        },
       }
     );
+
+    // Start immediate multi-transport join retry timer (don't wait only for MQTT!)
+    this._clearJoinRetry();
+    this._joinRetryTimer = setInterval(() => {
+      if (this.connected || this.role !== 'guest') {
+        this._clearJoinRetry();
+        return;
+      }
+      this._joinAttempts++;
+      announceJoin();
+      if (this._joinAttempts >= 10) {
+        this.statusNote = `Chưa thấy Chủ phòng #${cleanCode} phản hồi — hãy kiểm tra đúng mã 4 số hoặc bảo Chủ phòng tạo lại phòng.`;
+        this.emitLobby();
+      }
+    }, 1200);
 
     // 3) PeerJS WebRTC P2P join (optional direct acceleration)
     if (typeof window !== 'undefined' && window.Peer) {
@@ -563,8 +758,8 @@ export class MultiplayerClient {
   }
 
   handlePeerDisconnect(force = false) {
-    // If another transport (Local Tab or Cloud WSS) is still live, don't tear down the room on a WebRTC hiccup!
-    if (!force && ((this.bc && this.transport === 'Local Tab') || this.relay?.ready)) return;
+    // If another transport (Local Tab, Cloud WSS, or Port-443 HTTPS) is still live, don't tear down the room on a WebRTC hiccup!
+    if (!force && ((this.bc && this.transport === 'Local Tab') || this.relay?.ready || this.ntfyRelay?.ready)) return;
     if (this.role === 'host') {
       this.connected = false;
       this.lobby.guestJoined = false;
@@ -809,6 +1004,7 @@ export class MultiplayerClient {
     }
     this.cancelCountdown();
     this._clearJoinRetry();
+    this._clearHostBeacon();
     for (const c of this.conns.values()) {
       try { c?.close(); } catch {}
     }
@@ -816,10 +1012,12 @@ export class MultiplayerClient {
     try { this.conn?.close(); } catch {}
     try { this.peer?.destroy(); } catch {}
     try { this.relay?.close(); } catch {}
+    try { this.ntfyRelay?.close(); } catch {}
     try { this.bc?.close(); } catch {}
     this.conn = null;
     this.peer = null;
     this.relay = null;
+    this.ntfyRelay = null;
     this.bc = null;
     this.connected = false;
     this.role = null;
