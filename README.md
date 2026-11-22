@@ -1,6 +1,8 @@
-# J2ME Native Web Ports Monorepo
+# J2ME Native Web Ports + REA Monorepo
 
-Hệ thống Monorepo dùng để dịch ngược (reverse-engineer) và chuyển đổi trực tiếp các tựa game J2ME (`.jar` MIDP 2.0) sang **HTML5 Canvas + ES Modules + Web Audio API** chạy trực tiếp trên trình duyệt (không dùng giả lập Java).
+Hệ thống Monorepo hợp nhất **nền tảng dịch ngược REA** (`src/`, `bridge/`, `AGENTS.md`, `docs/`) và các tựa game J2ME (`.jar` MIDP 2.0) chuyển đổi trực tiếp sang **HTML5 Canvas + ES Modules + Web Audio API + Multiplayer 4 người / Discord Activity**.
+
+> **Tài liệu kiến trúc & định hướng phát triển cho cộng tác viên / AI Agent**: xem [docs/PROJECT_DESIGN_AND_ROADMAP.md](docs/PROJECT_DESIGN_AND_ROADMAP.md) và [AGENTS.md](AGENTS.md).
 
 ---
 
