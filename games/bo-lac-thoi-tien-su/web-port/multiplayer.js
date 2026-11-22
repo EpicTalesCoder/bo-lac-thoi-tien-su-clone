@@ -29,13 +29,25 @@ function isDiscordActivity() {
   return host.endsWith('.discordsays.com') || (window.location.search || '').includes('frame_id=');
 }
 
+function getMqttBrokers() {
+  if (isDiscordActivity()) {
+    const host = window.location.host;
+    return [
+      `wss://${host}/emqx/mqtt`,
+      `wss://${host}/.proxy/emqx/mqtt`,
+      `wss://${host}/hivemq/mqtt`,
+    ];
+  }
+  return WSS_BROKERS;
+}
+
 function getNtfyEndpoints() {
   if (isDiscordActivity()) {
     const origin = window.location.origin;
     const host = window.location.host;
     return {
-      httpBase: `${origin}/.proxy/ntfy`,
-      wsBase: `wss://${host}/.proxy/ntfy`,
+      httpBase: `${origin}/ntfy`,
+      wsBase: `wss://${host}/ntfy`,
       discordProxy: true,
     };
   }
@@ -232,12 +244,13 @@ class MqttSingleBroker {
   }
 }
 
-// Connects to ALL MQTT-WSS brokers simultaneously so Host & Guest never land on different brokers!
+// Connects to ALL MQTT-WSS brokers simultaneously (or Discord URL Mappings /emqx & /hivemq inside Discord Activity!)
 class MqttWssRelay {
   constructor(subTopic, pubTopic, { onReady, onMessage } = {}) {
     this.ready = false;
     this._notifiedReady = false;
-    this.brokers = WSS_BROKERS.map(
+    const urls = getMqttBrokers();
+    this.brokers = urls.map(
       (url) =>
         new MqttSingleBroker(url, subTopic, pubTopic, {
           onReady: () => {
@@ -316,7 +329,7 @@ class NtfyHttpsRelay {
     ws.onclose = () => {
       this.ready = false;
       if (!this.everOpened && this.endpoints.discordProxy) {
-        this.onError?.('⚠ Trong Discord Activity: hãy thêm URL Mapping "/ntfy" → "ntfy.sh" trong Discord Developer Portal (Activities → URL Mappings).');
+        this.onError?.('⚠ Trong Discord Activity: hãy thêm URL Mapping "/emqx" → "broker.emqx.io:8084" trong Discord Developer Portal (Activities → URL Mappings).');
       }
       if (!this.closed && this.ws === ws) this._scheduleRetry();
     };
@@ -567,7 +580,7 @@ export class MultiplayerClient {
           this.handleMessage(msg);
         },
         onError: (txt) => {
-          if (!this.connected) {
+          if (!this.connected && !this.relay?.ready) {
             this.statusNote = txt;
             this.emitLobby();
           }
@@ -575,32 +588,31 @@ export class MultiplayerClient {
       }
     );
 
-    // 3) Dual MQTT-WSS Relay (skip inside Discord Activity where external ports 8084/8884 are blocked by CSP)
-    if (!inDiscord) {
-      this.relay = new MqttWssRelay(
-        `bltts/mp/v2/${code}/c2h`,
-        `bltts/mp/v2/${code}/h2c`,
-        {
-          onReady: () => {
-            this.transport = this.transport && this.transport !== ntfyLabel ? this.transport : 'Cloud WSS';
-            this.statusNote = '';
-            this.sendRaw({ type: 'hostBeacon', roomCode: code });
-            if (this.connected) {
-              this.sendRaw({ type: 'lobbySync', lobby: this.lobby });
-            }
-            this.emitLobby();
-          },
-          onMessage: (msg) => {
-            if (!msg || msg._from === this.clientId) return;
-            if (!this.connected) {
-              this.connected = true;
-              this.transport = this.transport === 'Local Tab' ? 'Local Tab' : 'Cloud WSS';
-            }
-            this.handleMessage(msg);
-          },
-        }
-      );
-    }
+    // 3) Dual MQTT-WSS Relay (uses /emqx & /hivemq Discord URL Mappings when inside Discord Activity!)
+    const mqttLabel = inDiscord ? 'Discord WSS' : 'Cloud WSS';
+    this.relay = new MqttWssRelay(
+      `bltts/mp/v2/${code}/c2h`,
+      `bltts/mp/v2/${code}/h2c`,
+      {
+        onReady: () => {
+          this.transport = this.transport && this.transport !== ntfyLabel ? this.transport : mqttLabel;
+          this.statusNote = '';
+          this.sendRaw({ type: 'hostBeacon', roomCode: code });
+          if (this.connected) {
+            this.sendRaw({ type: 'lobbySync', lobby: this.lobby });
+          }
+          this.emitLobby();
+        },
+        onMessage: (msg) => {
+          if (!msg || msg._from === this.clientId) return;
+          if (!this.connected) {
+            this.connected = true;
+            this.transport = this.transport === 'Local Tab' ? 'Local Tab' : mqttLabel;
+          }
+          this.handleMessage(msg);
+        },
+      }
+    );
 
     // Periodic host beacon while waiting in lobby so joining guests discover the room immediately
     this._clearHostBeacon();
@@ -720,7 +732,7 @@ export class MultiplayerClient {
           this.handleMessage(msg);
         },
         onError: (txt) => {
-          if (!this.connected) {
+          if (!this.connected && !this.relay?.ready) {
             this.statusNote = txt;
             this.emitLobby();
           }
@@ -728,34 +740,34 @@ export class MultiplayerClient {
       }
     );
 
-    // 3) Dual MQTT-WSS Relay join (skip inside Discord Activity where external ports 8084/8884 are blocked by CSP)
-    if (!inDiscord) {
-      this.relay = new MqttWssRelay(
-        `bltts/mp/v2/${cleanCode}/h2c`,
-        `bltts/mp/v2/${cleanCode}/c2h`,
-        {
-          onReady: () => {
-            this.transport = this.transport && this.transport !== ntfyLabel ? this.transport : 'Cloud WSS';
-            announceJoin();
-            this.emitLobby();
-          },
-          onMessage: (msg) => {
-            if (!msg || msg._from === this.clientId) return;
-            if (msg.type === 'hostBeacon') {
-              if (!this.connected) announceJoin();
-              return;
-            }
-            if (!this.connected) {
-              this.connected = true;
-              this.transport = this.transport === 'Local Tab' ? 'Local Tab' : 'Cloud WSS';
-              this.statusNote = '';
-              this._clearJoinRetry();
-            }
-            this.handleMessage(msg);
-          },
-        }
-      );
-    }
+    // 3) Dual MQTT-WSS Relay join (uses /emqx & /hivemq Discord URL Mappings when inside Discord Activity!)
+    const mqttLabel = inDiscord ? 'Discord WSS' : 'Cloud WSS';
+    this.relay = new MqttWssRelay(
+      `bltts/mp/v2/${cleanCode}/h2c`,
+      `bltts/mp/v2/${cleanCode}/c2h`,
+      {
+        onReady: () => {
+          this.transport = this.transport && this.transport !== ntfyLabel ? this.transport : mqttLabel;
+          this.statusNote = '';
+          announceJoin();
+          this.emitLobby();
+        },
+        onMessage: (msg) => {
+          if (!msg || msg._from === this.clientId) return;
+          if (msg.type === 'hostBeacon') {
+            if (!this.connected) announceJoin();
+            return;
+          }
+          if (!this.connected) {
+            this.connected = true;
+            this.transport = this.transport === 'Local Tab' ? 'Local Tab' : mqttLabel;
+            this.statusNote = '';
+            this._clearJoinRetry();
+          }
+          this.handleMessage(msg);
+        },
+      }
+    );
 
     // Start immediate multi-transport join retry timer (don't wait only for MQTT!)
     this._clearJoinRetry();
