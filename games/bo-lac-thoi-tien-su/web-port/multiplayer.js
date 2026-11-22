@@ -368,6 +368,102 @@ class NtfyHttpsRelay {
   }
 }
 
+// 100% Same-Origin HTTPS Relay via /api/mp on our own Vercel deployment!
+// Works inside Discord Activity (through the "/" root mapping — ZERO extra URL Mappings, ZERO CSP issues!)
+// AND across any web/mobile browser on any 4G/5G firewall!
+class SameOriginHttpRelay {
+  constructor(roomCode, subDir, pubDir, clientId, { onReady, onMessage } = {}) {
+    this.roomCode = roomCode;
+    this.subDir = subDir;
+    this.pubDir = pubDir;
+    this.clientId = clientId;
+    this.onReady = onReady;
+    this.onMessage = onMessage;
+    this.ready = false;
+    this.closed = false;
+    this.afterSeq = 0;
+    this.afterSnapSeq = 0;
+    this.pollTimer = null;
+    this.endpoint =
+      typeof window !== 'undefined' && window.location?.origin?.startsWith('http')
+        ? `${window.location.origin}/api/mp`
+        : '';
+    if (this.endpoint && typeof fetch !== 'undefined') {
+      this._poll();
+    }
+  }
+
+  async _poll() {
+    if (this.closed || !this.endpoint) return;
+    let nextDelay = 240;
+    try {
+      const url = `${this.endpoint}?room=${encodeURIComponent(this.roomCode)}&dir=${this.subDir}&after=${this.afterSeq}&afterSnap=${this.afterSnapSeq}&from=${encodeURIComponent(this.clientId)}`;
+      const res = await fetch(url, { cache: 'no-store' });
+      if (this.closed) return;
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.ok) {
+          if (!this.ready) {
+            this.ready = true;
+            this.onReady?.();
+          }
+          if (typeof data.seq === 'number' && data.seq > this.afterSeq) {
+            this.afterSeq = data.seq;
+          }
+          if (typeof data.snapSeq === 'number' && data.snapSeq > this.afterSnapSeq) {
+            this.afterSnapSeq = data.snapSeq;
+          }
+          if (Array.isArray(data.msgs)) {
+            for (const m of data.msgs) {
+              if (m?.packet) this.onMessage?.(m.packet);
+            }
+          }
+          if (data.snap?.packet) {
+            this.onMessage?.(data.snap.packet);
+          }
+          nextDelay = data.snap ? 150 : 210;
+        }
+      } else {
+        // e.g. local python static http.server without /api/mp -> back off gracefully
+        nextDelay = 5000;
+      }
+    } catch {
+      nextDelay = 1200;
+    }
+    if (!this.closed) {
+      this.pollTimer = setTimeout(() => this._poll(), nextDelay);
+    }
+  }
+
+  send(packet) {
+    if (this.closed || !this.endpoint || !this.ready || typeof fetch === 'undefined') return false;
+    try {
+      fetch(this.endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          room: this.roomCode,
+          dir: this.pubDir,
+          from: this.clientId,
+          packet,
+        }),
+      }).catch(() => {});
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  close() {
+    this.closed = true;
+    this.ready = false;
+    if (this.pollTimer) {
+      clearTimeout(this.pollTimer);
+      this.pollTimer = null;
+    }
+  }
+}
+
 export function generateRoomCode() {
   return String(Math.floor(1000 + Math.random() * 9000));
 }
@@ -384,6 +480,7 @@ export class MultiplayerClient {
     this.bc = null;
     this.relay = null;
     this.ntfyRelay = null;
+    this.apiRelay = null;
     this.connected = false;
     this.transport = '';
     this.statusNote = '';
@@ -393,6 +490,7 @@ export class MultiplayerClient {
     this._joinAttempts = 0;
     this._lastRelaySnapAt = 0;
     this._lastNtfySnapAt = 0;
+    this._lastApiSnapAt = 0;
     this._seqOut = 0;
     this._seenSeq = new Set();
 
@@ -482,6 +580,19 @@ export class MultiplayerClient {
         sent = true;
       }
     }
+    if (this.apiRelay && this.apiRelay.ready) {
+      if (msg.type === 'snap') {
+        if (!fastTransportSent) {
+          const now = Date.now();
+          if (now - this._lastApiSnapAt >= 165) {
+            this._lastApiSnapAt = now;
+            if (this.apiRelay.send(packet)) sent = true;
+          }
+        }
+      } else if (this.apiRelay.send(packet)) {
+        sent = true;
+      }
+    }
     if (this.ntfyRelay && !this.ntfyRelay.closed) {
       if (msg.type === 'snap') {
         // Use Port-443 HTTPS relay (or Discord /.proxy/ntfy) for game snapshots whenever MQTT/WebRTC are unavailable!
@@ -555,7 +666,29 @@ export class MultiplayerClient {
     }
 
     const inDiscord = isDiscordActivity();
+    const apiLabel = inDiscord ? 'Discord API' : 'Cloud API';
     const ntfyLabel = inDiscord ? 'Discord Proxy' : 'Cloud HTTPS';
+
+    // 1b) Same-Origin /api/mp Serverless Relay (100% same-origin: works inside Discord Activity with ZERO extra URL Mappings!)
+    this.apiRelay = new SameOriginHttpRelay(code, 'c2h', 'h2c', this.clientId, {
+      onReady: () => {
+        this.transport = this.transport || apiLabel;
+        this.statusNote = '';
+        this.sendRaw({ type: 'hostBeacon', roomCode: code });
+        if (this.connected) {
+          this.sendRaw({ type: 'lobbySync', lobby: this.lobby });
+        }
+        this.emitLobby();
+      },
+      onMessage: (msg) => {
+        if (!msg || msg._from === this.clientId) return;
+        if (!this.connected) {
+          this.connected = true;
+          this.transport = this.transport === 'Local Tab' ? 'Local Tab' : apiLabel;
+        }
+        this.handleMessage(msg);
+      },
+    });
 
     // 2) Port-443 HTTPS/WSS Relay (passes 100% of mobile 4G/5G CGNAT, firewalls, AND Discord Activity via /.proxy/ntfy!)
     this.ntfyRelay = new NtfyHttpsRelay(
@@ -580,7 +713,7 @@ export class MultiplayerClient {
           this.handleMessage(msg);
         },
         onError: (txt) => {
-          if (!this.connected && !this.relay?.ready) {
+          if (!this.connected && !this.relay?.ready && !this.apiRelay?.ready) {
             this.statusNote = txt;
             this.emitLobby();
           }
@@ -705,7 +838,31 @@ export class MultiplayerClient {
     }
 
     const inDiscord = isDiscordActivity();
+    const apiLabel = inDiscord ? 'Discord API' : 'Cloud API';
     const ntfyLabel = inDiscord ? 'Discord Proxy' : 'Cloud HTTPS';
+
+    // 1b) Same-Origin /api/mp Serverless Relay join (100% same-origin: works inside Discord Activity with ZERO extra URL Mappings!)
+    this.apiRelay = new SameOriginHttpRelay(cleanCode, 'h2c', 'c2h', this.clientId, {
+      onReady: () => {
+        this.transport = this.transport || apiLabel;
+        announceJoin();
+        this.emitLobby();
+      },
+      onMessage: (msg) => {
+        if (!msg || msg._from === this.clientId) return;
+        if (msg.type === 'hostBeacon') {
+          if (!this.connected) announceJoin();
+          return;
+        }
+        if (!this.connected) {
+          this.connected = true;
+          this.transport = this.transport === 'Local Tab' ? 'Local Tab' : apiLabel;
+          this.statusNote = '';
+          this._clearJoinRetry();
+        }
+        this.handleMessage(msg);
+      },
+    });
 
     // 2) Port-443 HTTPS/WSS Relay join (passes 100% of mobile 4G/5G CGNAT, firewalls, AND Discord Activity via /.proxy/ntfy!)
     this.ntfyRelay = new NtfyHttpsRelay(
@@ -732,7 +889,7 @@ export class MultiplayerClient {
           this.handleMessage(msg);
         },
         onError: (txt) => {
-          if (!this.connected && !this.relay?.ready) {
+          if (!this.connected && !this.relay?.ready && !this.apiRelay?.ready) {
             this.statusNote = txt;
             this.emitLobby();
           }
@@ -821,8 +978,8 @@ export class MultiplayerClient {
   }
 
   handlePeerDisconnect(force = false) {
-    // If another transport (Local Tab, Cloud WSS, or Port-443 HTTPS) is still live, don't tear down the room on a WebRTC hiccup!
-    if (!force && ((this.bc && this.transport === 'Local Tab') || this.relay?.ready || this.ntfyRelay?.ready)) return;
+    // If another transport (Local Tab, Same-Origin API, Cloud WSS, or Port-443 HTTPS) is still live, don't tear down the room!
+    if (!force && ((this.bc && this.transport === 'Local Tab') || this.apiRelay?.ready || this.relay?.ready || this.ntfyRelay?.ready)) return;
     if (this.role === 'host') {
       this.connected = false;
       this.lobby.guestJoined = false;
@@ -1078,11 +1235,13 @@ export class MultiplayerClient {
     try { this.peer?.destroy(); } catch {}
     try { this.relay?.close(); } catch {}
     try { this.ntfyRelay?.close(); } catch {}
+    try { this.apiRelay?.close(); } catch {}
     try { this.bc?.close(); } catch {}
     this.conn = null;
     this.peer = null;
     this.relay = null;
     this.ntfyRelay = null;
+    this.apiRelay = null;
     this.bc = null;
     this.connected = false;
     this.role = null;
