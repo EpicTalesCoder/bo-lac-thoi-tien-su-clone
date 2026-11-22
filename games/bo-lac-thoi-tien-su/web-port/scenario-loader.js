@@ -197,11 +197,11 @@ export function placeConstructionSite(data, targetBType, x, y, owner = 0) {
   const spec = getBuildingSpec(data, targetBType);
   const scaffoldType = getScaffoldTypeForSize(spec.width, spec.height);
   const e = data.entityData;
-  const startId = owner === 0 ? 1 : 31;
+  const [startId, endId] = getBldRangeForTribe(data, owner);
   let bid = -1;
-  for (let i = 0; i < 30; i++) {
-    if (e[8505 + startId + i] === 0) {
-      bid = startId + i;
+  for (let i = startId; i <= endId; i++) {
+    if (e[8505 + i] === 0) {
+      bid = i;
       break;
     }
   }
@@ -400,6 +400,45 @@ export const SPELLS = [
   { id: 'love', name: 'Thuốc tình yêu', bones: 3, desc: 'Tăng 100% vui vẻ & kích thích sinh thêm dân.' },
   { id: 'plague', name: 'Bệnh dịch', bones: 3, desc: 'Làm suy yếu thú hoang & quân địch trên bản đồ.' },
 ];
+
+export const FACTIONS = [
+  { id: 0, name: 'Bộ lạc Xanh', short: 'Xanh dương', color: '#45a3ff', border: '#1d5da8', icon: '🔵' },
+  { id: 1, name: 'Bộ lạc Đỏ', short: 'Đỏ', color: '#ff5252', border: '#9c2424', icon: '🔴' },
+  { id: 2, name: 'Bộ lạc Vàng', short: 'Vàng', color: '#ffd23f', border: '#a67608', icon: '🟡' },
+  { id: 3, name: 'Bộ lạc Tím', short: 'Tím', color: '#c76bff', border: '#6c24a8', icon: '🟣' },
+];
+
+export function getUnitRangeForTribe(data, tribe = 0) {
+  if (data?.tribeCount === 4) {
+    const t = Math.max(0, Math.min(3, tribe | 0));
+    return [t * 25 + 1, t * 25 + 25];
+  }
+  return tribe === 1 ? [51, 100] : [1, 50];
+}
+
+export function getBldRangeForTribe(data, tribe = 0) {
+  if (data?.tribeCount === 4) {
+    const t = Math.max(0, Math.min(3, tribe | 0));
+    return [t * 15 + 1, t * 15 + 15];
+  }
+  return tribe === 1 ? [31, 60] : [1, 30];
+}
+
+export function getUnitOwner(data, uid) {
+  if (uid < 1 || uid > 100) return -1;
+  if (data?.tribeCount === 4) {
+    return Math.max(0, Math.min(3, Math.floor((uid - 1) / 25)));
+  }
+  return uid > 50 ? 1 : 0;
+}
+
+export function getBuildingOwner(data, bid) {
+  if (bid < 1 || bid > 60) return -1;
+  if (data?.tribeCount === 4) {
+    return Math.max(0, Math.min(3, Math.floor((bid - 1) / 15)));
+  }
+  return bid > 30 ? 1 : 0;
+}
 
 export function getBuildingSlotAnims(data, bType, slotIdx, weaponId = 9) {
   const mb = data?.mapTableData;
@@ -679,8 +718,7 @@ export function syncUnitAvatar(data, uid, seed = uid) {
 export function spawnNewbornVillager(data, x, y, owner = 0) {
   const e = data.entityData;
   const fo = data.entityFieldOffsets;
-  const startId = owner === 0 ? 1 : 51;
-  const endId = owner === 0 ? 50 : 100;
+  const [startId, endId] = getUnitRangeForTribe(data, owner);
   let uid = -1;
   for (let i = startId; i <= endId; i++) {
     if ((e[1919 + i] & 0xff) === 0) {
@@ -743,11 +781,11 @@ export function finishConstructionSite(data, bid) {
 export function placeBuilding(data, bType, x, y, owner = 0, stage = 1) {
   const spec = getBuildingSpec(data, bType);
   const e = data.entityData;
-  const startId = owner === 0 ? 1 : 31;
+  const [startId, endId] = getBldRangeForTribe(data, owner);
   let bid = -1;
-  for (let i = 0; i < 30; i++) {
-    if (e[8505 + startId + i] === 0) {
-      bid = startId + i;
+  for (let i = startId; i <= endId; i++) {
+    if (e[8505 + i] === 0) {
+      bid = i;
       break;
     }
   }
@@ -847,11 +885,11 @@ function spawnItemProp(data, kind, x, y, amount) {
 
 function spawnUnit(data, owner, x, y, indexSeed) {
   const e = data.entityData;
-  const startId = owner === 0 ? 1 : 51;
+  const [startId, endId] = getUnitRangeForTribe(data, owner);
   let uid = -1;
-  for (let i = 0; i < 50; i++) {
-    if ((e[1919 + startId + i] & 0xff) === 0) {
-      uid = startId + i;
+  for (let i = startId; i <= endId; i++) {
+    if ((e[1919 + i] & 0xff) === 0) {
+      uid = i;
       break;
     }
   }
@@ -1403,13 +1441,17 @@ export const MP_MAPS = [
   { scenarioIndex: 9, name: 'Mảnh đất (96×48 · Hai bờ)' },
 ];
 
-export function prepareMultiplayerMatch(baseData, maBytes, scenarioIndex = 1, localTribe = 0) {
+export function prepareMultiplayerMatch(baseData, maBytes, scenarioIndex = 1, localTribe = 0, activeTribes = [0, 1]) {
   const data = loadScenarioFromMa(baseData, maBytes, scenarioIndex);
   const e = data.entityData;
   const w = data.width;
   const h = data.height;
+  const tribesList = Array.isArray(activeTribes) && activeTribes.length > 0 ? [...new Set(activeTribes)].sort((a, b) => a - b) : [0, 1];
+  const isFourTribeLayout = tribesList.length > 2 || tribesList.some((t) => t >= 2);
+  data.tribeCount = isFourTribeLayout ? 4 : 2;
+  data.activeTribes = tribesList;
 
-  // 1. Discover opposite base anchors for Tribe 0 and Tribe 1 from the map's natural spawn areas
+  // 1. Discover opposite base anchors for up to 4 tribes across the 4 corners of the map
   let a0 = null;
   let a1 = null;
   for (let bid = 1; bid <= 30; bid++) {
@@ -1424,8 +1466,11 @@ export function prepareMultiplayerMatch(baseData, maBytes, scenarioIndex = 1, lo
       break;
     }
   }
-  if (!a0) a0 = { x: Math.max(5, Math.min(w - 10, data.cursorX || 8)), y: Math.max(5, Math.min(h - 10, data.cursorY || 8)) };
-  if (!a1) a1 = { x: Math.max(5, Math.min(w - 10, w - 10)), y: Math.max(5, Math.min(h - 10, h - 10)) };
+  if (!a0) a0 = { x: Math.max(6, Math.min(w - 10, data.cursorX || 8)), y: Math.max(6, Math.min(h - 10, data.cursorY || 8)) };
+  if (!a1) a1 = { x: Math.max(6, Math.min(w - 10, w - 10)), y: Math.max(6, Math.min(h - 10, h - 10)) };
+  const a2 = { x: Math.max(6, w - 10), y: Math.min(h - 10, 8) }; // Top-Right (Tribe 2 - Vàng)
+  const a3 = { x: Math.min(w - 10, 8), y: Math.max(6, h - 10) }; // Bottom-Left (Tribe 3 - Tím)
+  const anchors = [a0, a1, a2, a3];
 
   // 2. Clear asymmetric campaign buildings & units so both sides start 100% fair and balanced
   for (let y = 0; y < h; y++) {
@@ -1534,16 +1579,19 @@ export function prepareMultiplayerMatch(baseData, maBytes, scenarioIndex = 1, lo
     data.resources[owner][3] = 5;  // Bones
     data.resources[owner][11] = count;
     data.resources[owner][16] = hutBid > 0 ? 12 : 6;
-    data.resources[owner][17] = firstUid || (owner === 0 ? 1 : 51);
+    const [uStart] = getUnitRangeForTribe(data, owner);
+    data.resources[owner][17] = firstUid || uStart;
     return { baseX, baseY, firstUid };
   };
 
-  const t0 = setupTribe(0, a0);
-  const t1 = setupTribe(1, a1);
-  data.mpBases = [t0, t1];
+  const mpBases = {};
+  for (const tId of tribesList) {
+    mpBases[tId] = setupTribe(tId, anchors[tId] || a0);
+  }
+  data.mpBases = mpBases;
   populateForestWildlife(data, 12);
 
-  // Reset fogOfWar AFTER placing both bases (placeBuilding reveals fog during placement!)
+  // Reset fogOfWar AFTER placing all bases (placeBuilding reveals fog during placement!)
   // so each player ONLY sees their own side of the map until they scout!
   if (Array.isArray(data.fogOfWar)) {
     for (let layer = 0; layer < data.fogOfWar.length; layer++) {
@@ -1554,10 +1602,9 @@ export function prepareMultiplayerMatch(baseData, maBytes, scenarioIndex = 1, lo
   }
 
   // Reveal fog of war ONLY for localTribe's own base & units
-  const myBase = localTribe === 1 ? t1 : t0;
+  const myBase = mpBases[localTribe] || mpBases[tribesList[0]] || { baseX: a0.x, baseY: a0.y, firstUid: 1 };
   revealFog(data, myBase.baseX + 1, myBase.baseY + 1, 8);
-  const startU = localTribe === 1 ? 51 : 1;
-  const endU = localTribe === 1 ? 100 : 50;
+  const [startU, endU] = getUnitRangeForTribe(data, localTribe);
   for (let uid = startU; uid <= endU; uid++) {
     if ((e[1919 + uid] & 0xff) > 0) {
       revealFog(data, e[uid] & 0xff, e[101 + uid] & 0xff, 5);

@@ -9,10 +9,76 @@ export function setLogicalViewport(w, h) {
 }
 
 const HP_BAR_COLORS = ['#ef2b1d', '#f5c724', '#22d422', '#22d422'];
+export const FACTION_COLORS = ['#45a3ff', '#ff5252', '#ffd23f', '#c76bff'];
 
 function toSignedByte(v) {
   const b = v & 0xff;
   return b > 127 ? b - 256 : b;
+}
+
+// Lazy 1:1 crisp pixel-art palette-swapped sprite sheet generator for extra factions (Red child, Gold=2, Purple=3)
+function getFactionRecoloredSheet(imageCache, sheetIndex, factionCode) {
+  if (!imageCache._recolor) imageCache._recolor = new Map();
+  const key = `${factionCode}:${sheetIndex}`;
+  const cached = imageCache._recolor.get(key);
+  if (cached) return cached;
+  const baseImg = imageCache.get(0, sheetIndex);
+  if (!baseImg || !baseImg.complete || !baseImg.naturalWidth) return baseImg;
+  if (typeof document === 'undefined') return baseImg;
+  const c = document.createElement('canvas');
+  c.width = baseImg.naturalWidth;
+  c.height = baseImg.naturalHeight;
+  const g = c.getContext('2d');
+  g.imageSmoothingEnabled = false;
+  g.drawImage(baseImg, 0, 0);
+  const imgData = g.getImageData(0, 0, c.width, c.height);
+  const px = imgData.data;
+  // Target RGB tint per factionCode: 10=Red, 20=Gold, 30=Purple
+  const tint =
+    factionCode === 10
+      ? [235, 62, 54]
+      : factionCode === 20
+        ? [250, 205, 48]
+        : [194, 96, 255];
+  const isClothingSheet = sheetIndex === 5 || sheetIndex === 20;
+  for (let i = 0; i < px.length; i += 4) {
+    const a = px[i + 3];
+    if (a < 16) continue;
+    const r = px[i];
+    const gr = px[i + 1];
+    const b = px[i + 2];
+    const lum = (r * 0.299 + gr * 0.587 + b * 0.114) / 255;
+    // Keep crisp black/dark outlines untouched!
+    if (r + gr + b < 75) continue;
+    // Detect warm skin pixels so we don't tint faces/arms into neon colors
+    const isSkin = r > 150 && gr > 95 && gr < r - 12 && b < gr - 8 && b > 45;
+    if (isClothingSheet) {
+      if (isSkin && sheetIndex === 20) continue;
+      // Blend strongly toward faction color while preserving pixel-art luminance shading
+      const mix = 0.72;
+      const tr = Math.min(255, Math.round(tint[0] * (0.45 + lum * 0.85)));
+      const tg = Math.min(255, Math.round(tint[1] * (0.45 + lum * 0.85)));
+      const tb = Math.min(255, Math.round(tint[2] * (0.45 + lum * 0.85)));
+      px[i] = Math.round(r * (1 - mix) + tr * mix);
+      px[i + 1] = Math.round(gr * (1 - mix) + tg * mix);
+      px[i + 2] = Math.round(b * (1 - mix) + tb * mix);
+    } else if (sheetIndex === 9 && !isSkin) {
+      // Hair / headband tint on head sheet
+      const mix = 0.45;
+      const tr = Math.min(255, Math.round(tint[0] * (0.35 + lum * 0.85)));
+      const tg = Math.min(255, Math.round(tint[1] * (0.35 + lum * 0.85)));
+      const tb = Math.min(255, Math.round(tint[2] * (0.35 + lum * 0.85)));
+      px[i] = Math.round(r * (1 - mix) + tr * mix);
+      px[i + 1] = Math.round(gr * (1 - mix) + tg * mix);
+      px[i + 2] = Math.round(b * (1 - mix) + tb * mix);
+    }
+  }
+  g.putImageData(imgData, 0, 0);
+  c.complete = true;
+  c.naturalWidth = c.width;
+  c.naturalHeight = c.height;
+  imageCache._recolor.set(key, c);
+  return c;
 }
 
 export function createImageCache(onLoad) {
@@ -37,10 +103,13 @@ export function createImageCache(onLoad) {
   };
 }
 
-function buildingOwner(occ) {
-  if (occ <= -1 && occ >= -30) return 0;
-  if (occ <= -31 && occ >= -60) return 1;
-  return 2;
+function buildingOwner(occ, data = null) {
+  if (occ <= -1 && occ >= -60) {
+    const bid = -occ;
+    if (data?.tribeCount === 4) return Math.max(0, Math.min(3, Math.floor((bid - 1) / 15)));
+    return bid <= 30 ? 0 : 1;
+  }
+  return -1;
 }
 
 function isItemProp(occ) {
@@ -58,8 +127,10 @@ function isWildAnimal(occ) {
   return occ >= 101 && occ <= 122;
 }
 
-function unitOwner(id) {
-  return id >= 1 && id <= 50 ? 0 : 1;
+function unitOwner(id, data = null) {
+  if (id < 1 || id > 100) return -1;
+  if (data?.tribeCount === 4) return Math.max(0, Math.min(3, Math.floor((id - 1) / 25)));
+  return id <= 50 ? 0 : 1;
 }
 
 export function getFogState(data, x, y) {
@@ -106,7 +177,10 @@ export function drawLeaf(ctx, data, spriteIndex, x, y, imageCache, paletteSwap =
 
   if (sheetIndex < 27) {
     let useAltGroup = false;
-    if (paletteSwap > -1) {
+    let img = null;
+    if (paletteSwap >= 10 && (sheetIndex === 5 || sheetIndex === 9 || sheetIndex === 20)) {
+      img = getFactionRecoloredSheet(imageCache, sheetIndex, paletteSwap);
+    } else if (paletteSwap > -1 && paletteSwap < 10) {
       if (paletteSwap === 0) {
         if (sheetIndex === 5) {
           sheetIndex = 0;
@@ -125,7 +199,7 @@ export function drawLeaf(ctx, data, spriteIndex, x, y, imageCache, paletteSwap =
         useAltGroup = true;
       }
     }
-    const img = imageCache.get(useAltGroup ? 1 : 0, sheetIndex);
+    if (!img) img = imageCache.get(useAltGroup ? 1 : 0, sheetIndex);
     if (!img.complete || !img.naturalWidth) return;
     if (sw <= 0 || sh <= 0 || sx >= img.naturalWidth || sy >= img.naturalHeight) return;
     const cw = Math.min(sw, img.naturalWidth - sx);
@@ -264,7 +338,7 @@ function drawMapObject(ctx, data, n, layer, ah, ai, camX, camY, originY, animTic
   const flagI = new Array(8).fill(0);
   const flagH = new Array(8).fill(0);
 
-  if (buildingOwner(n) !== 2) {
+  if (buildingOwner(n, data) >= 0) {
     n8 = e[8749 + n9];
     const bWidth = m[mo[138] + 104 + n8];
     n7 = e[9115 + n9];
@@ -532,27 +606,32 @@ function drawEntitySprite(ctx, data, entityId, screenX, screenY, dir, fieldOffse
               imageCache
             );
           } else if (isHovered) {
-            spriteOffset = entityId >= 51 ? 3 : 1;
+            spriteOffset = unitOwner(entityId, data) !== (uiState.localTribe ?? 0) ? 3 : 1;
           }
         }
       }
 
+      const uOwner = unitOwner(entityId, data);
       if (e[1414 + entityId] >= 12) {
-        if (entityId >= 51) paletteSwap = 4;
+        if (uOwner === 1) paletteSwap = 4;
 
         if (partKind === 0) {
           bodyPartIdx = az;
           let style = (e[5151 + entityId] >>> 2) & 3;
           if (style > 1) {
             style -= 2;
-            paletteSwap = 0;
+            if (uOwner === 0) paletteSwap = 0;
           }
-          spriteOffset = style * 72 + (entityId >= 51 ? 36 : 0) + e[1515 + entityId] * 18;
+          if (uOwner === 2) paletteSwap = 20;
+          else if (uOwner === 3) paletteSwap = 30;
+          spriteOffset = style * 72 + (uOwner === 1 ? 36 : 0) + e[1515 + entityId] * 18;
         } else if (partKind === 9) {
           headPartIdx = az;
           const hairStyle = e[5151 + entityId] & 3;
-          if (entityId >= 51) paletteSwap = 3; // Enemy tribe only: dark skin + black hair (pi9/03.png)
-          else if (hairStyle === 1 || hairStyle === 2) paletteSwap = hairStyle; // Player tribe: strictly 0/1/2, NEVER enemy palette 3!
+          if (uOwner === 1) paletteSwap = 3; // Red tribe: dark skin + black hair (pi9/03.png)
+          else if (uOwner === 2) paletteSwap = 20; // Gold tribe: golden hair accent
+          else if (uOwner === 3) paletteSwap = 30; // Purple tribe: violet hair accent
+          else if (hairStyle === 1 || hairStyle === 2) paletteSwap = hairStyle; // Blue tribe: strictly 0/1/2
           const age = e[1414 + entityId];
           const sex = e[1515 + entityId];
           const headGroup = sex === 1 ? 1 : age < 30 ? 3 : age < 50 ? 2 : 0;
@@ -561,7 +640,7 @@ function drawEntitySprite(ctx, data, entityId, screenX, screenY, dir, fieldOffse
           const hatCode = m[mo[42] + m[mo[41] + (e[6464 + entityId] & 0xff)]];
           if (hatCode > 0) {
             spriteOffset += hatCode - 1;
-          } else if (entityId === chiefId) {
+          } else if (entityId === chiefId || (data.resources?.[uOwner]?.[17] === entityId && entityId > 0)) {
             spriteOffset += 2;
           } else {
             skip = true;
@@ -603,10 +682,13 @@ function drawEntitySprite(ctx, data, entityId, screenX, screenY, dir, fieldOffse
           else spriteOffset += job;
         }
       } else {
+        if (uOwner === 1) paletteSwap = 10;
+        else if (uOwner === 2) paletteSwap = 20;
+        else if (uOwner === 3) paletteSwap = 30;
         if (partKind === 7 && e[1515 + entityId] === 0) skip = true;
         else if (partKind === 0) {
           bodyPartIdx = az;
-          if (entityId >= 51) spriteOffset++;
+          if (uOwner === 1) spriteOffset++;
         } else if (partKind === 9) {
           headPartIdx = az;
           spriteOffset = e[5151 + entityId] & 1;
@@ -637,7 +719,8 @@ function drawEntitySprite(ctx, data, entityId, screenX, screenY, dir, fieldOffse
     const hx = drawX + toSignedByte(bytes[12][headPartIdx]);
     const hy = drawY + toSignedByte(bytes[13][headPartIdx]);
 
-    const isOwnTribe = (entityId > 50 ? 1 : 0) === (uiState.localTribe ?? 0);
+    const uOwner2 = unitOwner(entityId, data);
+    const isOwnTribe = uOwner2 === (uiState.localTribe ?? 0);
     if (isOwnTribe) {
       const thought = toSignedByte(e[3333 + entityId]);
       if (thought > -1 && thought <= 13) {
@@ -668,8 +751,8 @@ function drawEntitySprite(ctx, data, entityId, screenX, screenY, dir, fieldOffse
       drawComposite(ctx, data, 607 + tier, hx, hy, imageCache);
       const barMaxW = m[mo[128] + tier] || 12;
       const barW = Math.max(1, Math.floor((barMaxW * hp) / maxHp));
-      const colorBucket = entityId > 50 ? 0 : Math.min(2, Math.max(0, Math.floor(((hp - 1) * 3) / maxHp)));
-      ctx.fillStyle = HP_BAR_COLORS[colorBucket];
+      const colorBucket = Math.min(2, Math.max(0, Math.floor(((hp - 1) * 3) / maxHp)));
+      ctx.fillStyle = isOwnTribe ? HP_BAR_COLORS[colorBucket] : (FACTION_COLORS[uOwner2] || '#ef2b1d');
       ctx.fillRect(hx + 2 - tier, hy - 4, barW, 2);
     }
   }
@@ -1314,7 +1397,7 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
   const curWY = state.cursor?.y ?? data.cursorY;
   if (curWY >= 0 && curWY < data.height && curWX >= 0 && curWX < data.width) {
     const curOcc = data.occupancy[curWY][curWX];
-    if (buildingOwner(curOcc) === (state.localTribe ?? 0)) {
+    if (buildingOwner(curOcc, data) === (state.localTribe ?? 0)) {
       const bid = -curOcc;
       const e = data.entityData;
       const m = data.mapTableData;
@@ -1373,7 +1456,8 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
             const bw = m[mo[138] + 104 + bTypeCur] || 2;
             const bh = m[mo[138] + 130 + bTypeCur] || 2;
             const myTribe = state.localTribe ?? 0;
-            const isMine = myTribe === 1 ? bid > 30 : bid <= 30;
+            const bOwner = buildingOwner(occ, data);
+            const isMine = bOwner === myTribe;
             const isUnderConst = e[8627 + bid] === 1;
             const cursorOver =
               state.cursor &&
@@ -1429,6 +1513,20 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
               const cy = originY + (e[8444 + bid] - camY) * CELL_HEIGHT + bh * 8 - 8;
               drawAnimation(ctx, data, 40, cx, cy, animTick, imageCache);
             }
+
+            // In multiplayer / 4-tribe mode, draw a crisp faction pennant on the building roof so all 4 factions are instantly clear!
+            if ((data.tribeCount === 4 || state.mpMode) && bOwner >= 0) {
+              const fx = (e[8383 + bid] - camX) * CELL_WIDTH + 3;
+              const fy = originY + (e[8444 + bid] - camY) * CELL_HEIGHT + 2;
+              const fCol = FACTION_COLORS[bOwner] || '#ffffff';
+              ctx.fillStyle = '#1a1206';
+              ctx.fillRect(fx, fy - 1, 2, 10);
+              ctx.fillRect(fx + 1, fy - 1, 8, 6);
+              ctx.fillStyle = fCol;
+              ctx.fillRect(fx + 2, fy, 6, 4);
+              ctx.fillStyle = '#ffffff';
+              ctx.fillRect(fx + 2, fy, 2, 1);
+            }
           }
         } else if (fog < 1 && isWildAnimal(occ)) {
           const aid = occ - 101;
@@ -1458,7 +1556,7 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
           if ((e[1919 + uid] & 0xff) <= 0) continue;
           if (toSignedByte(e[4646 + uid]) >= 0) continue; // inside a building slot
           if ((e[uid] & 0xff) !== wx || (e[101 + uid] & 0xff) !== wy) continue;
-          if (unitOwner(uid) !== 0 && (e[7979 + uid] & 2) !== 0) continue;
+          if (unitOwner(uid, data) !== (state.localTribe ?? 0) && (e[7979 + uid] & 2) !== 0) continue;
           if (data.occupancy[wy]?.[wx] === 0) {
             data.occupancy[wy][wx] = uid;
           }
@@ -1507,7 +1605,7 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
       if (drawnUnits.has(uid)) continue;
       if ((e[1919 + uid] & 0xff) <= 0) continue;
       if (toSignedByte(e[4646 + uid]) >= 0) continue; // inside a building slot
-      if (unitOwner(uid) !== 0 && (e[7979 + uid] & 2) !== 0) continue;
+      if (unitOwner(uid, data) !== (state.localTribe ?? 0) && (e[7979 + uid] & 2) !== 0) continue;
       const ux = e[uid] & 0xff;
       const uy = e[101 + uid] & 0xff;
       if (ux < camX - 1 || ux > camX + cols || uy < camY - 1 || uy > camY + rows + 2) continue;
@@ -1867,8 +1965,8 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
     let cursorAnim = 32;
     if (!state.canvasMenu && !state.showMinimap && !state.missionResult && (state.selectedUnit > 0 || state.selectedUnits?.size > 0)) {
       const targetOcc = hoverCellOcc;
-      const isEnemyUnit = myTribe === 1 ? (targetOcc >= 1 && targetOcc <= 50) : (targetOcc >= 51 && targetOcc <= 100);
-      const isEnemyBld = buildingOwner(targetOcc) === (myTribe === 1 ? 0 : 1);
+      const isEnemyUnit = targetOcc >= 1 && targetOcc <= 100 && unitOwner(targetOcc, data) !== myTribe;
+      const isEnemyBld = buildingOwner(targetOcc, data) >= 0 && buildingOwner(targetOcc, data) !== myTribe;
       const isGatherCell = (gx, gy, treesOnly = false) => {
         if (gx < 0 || gy < 0 || gx >= data.width || gy >= data.height) return false;
         const gTile = data.terrain[gy][gx] & 0xff;
@@ -1968,10 +2066,10 @@ function drawMinimapOverlay(ctx, data, state) {
       else if (occ === -124 || (tile >= 180 && tile <= 231)) color = '#1e6322'; // forest
       else if (tile >= 10 && tile < 29) color = '#a3843e'; // dirt/path
 
-      if (occ <= -1 && occ >= -30) color = '#f4d35e'; // player building
-      else if (occ <= -31 && occ >= -60) color = '#df4528'; // enemy building
-      else if (fog === 0 && occ >= 1 && occ <= 50) color = occ === chiefId ? '#ffff66' : '#5eff5a'; // player villager
-      else if (fog === 0 && occ >= 51 && occ <= 100) color = '#ff362e'; // enemy warrior
+      const bOwn = buildingOwner(occ, data);
+      const uOwn = occ >= 1 && occ <= 100 ? unitOwner(occ, data) : -1;
+      if (bOwn >= 0) color = FACTION_COLORS[bOwn] || '#f4d35e';
+      else if (fog === 0 && uOwn >= 0) color = occ === chiefId ? '#ffff66' : (FACTION_COLORS[uOwn] || '#5eff5a');
       else if (fog === 0 && occ >= 101 && occ <= 122) color = '#f09c3e'; // wild animal
 
       ctx.fillStyle = color;
@@ -1983,13 +2081,15 @@ function drawMinimapOverlay(ctx, data, state) {
     }
   }
 
-  // Highlight player villagers & visible enemies cleanly on top so dots stay crisp on large 96x96 maps
+  // Highlight all visible villagers in their faction color cleanly on top so dots stay crisp on large 96x96 maps
+  const myTribeMm = state.localTribe ?? 0;
   for (let id = 1; id <= 100; id++) {
     if ((e[1919 + id] & 0xff) <= 0) continue;
     const ux = e[id] & 0xff;
     const uy = e[101 + id] & 0xff;
-    if (id > 50 && getFogState(data, ux, uy) !== 0) continue;
-    ctx.fillStyle = id > 50 ? '#ff332b' : id === chiefId ? '#ffff66' : '#63ff5c';
+    const uo = unitOwner(id, data);
+    if (uo !== myTribeMm && getFogState(data, ux, uy) !== 0) continue;
+    ctx.fillStyle = id === chiefId ? '#ffff66' : (FACTION_COLORS[uo] || '#63ff5c');
     ctx.fillRect(mm.mapX + Math.floor(ux * mm.scale), mm.mapY + Math.floor(uy * mm.scale), Math.max(2, cellW), Math.max(2, cellH));
   }
 

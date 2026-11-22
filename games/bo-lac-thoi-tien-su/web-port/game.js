@@ -15,6 +15,11 @@ import {
   BUILDINGS,
   WEAPONS,
   SPELLS,
+  FACTIONS,
+  getUnitRangeForTribe,
+  getBldRangeForTribe,
+  getUnitOwner,
+  getBuildingOwner,
   getVillagerName,
   getBuildingSpec,
   getScaffoldSlots,
@@ -201,7 +206,7 @@ const state = {
   aiDifficulty: 'normal', // 'easy' | 'normal' | 'hard'
   localTribe: 0, // 0 = Host (Blue Tribe 1..50), 1 = Guest (Red Tribe 51..100)
   mpWinner: null,
-  tribeUseRawWeapon: [true, true], // Per-tribe toggle: allow taking 1 Stone/Wood from Storage when no crafted weapons exist
+  tribeUseRawWeapon: [true, true, true, true], // Per-tribe toggle: allow taking 1 Stone/Wood from Storage when no crafted weapons exist
   pointerPos: { x: 0, y: 0, visible: false },
   warningBanner: null,
   food: 0,
@@ -288,8 +293,7 @@ function pullLocalResourcesFromData() {
 function getVillagerIds(owner = state.localTribe ?? 0) {
   if (!state.data) return [];
   const e = state.data.entityData;
-  const start = owner === 1 ? 51 : 1;
-  const end = owner === 1 ? 100 : 50;
+  const [start, end] = getUnitRangeForTribe(state.data, owner);
   const ids = [];
   for (let id = start; id <= end; id++) {
     if ((e[1919 + id] & 0xff) > 0) ids.push(id);
@@ -298,11 +302,25 @@ function getVillagerIds(owner = state.localTribe ?? 0) {
 }
 
 function getEnemyIds(owner = state.localTribe ?? 0) {
-  return getVillagerIds(owner === 1 ? 0 : 1);
+  if (!state.data) return [];
+  const count = state.data.tribeCount === 4 ? 4 : 2;
+  const out = [];
+  for (let t = 0; t < count; t++) {
+    if (t === owner) continue;
+    out.push(...getVillagerIds(t));
+  }
+  return out;
 }
 
 function getEnemyBuildings(owner = state.localTribe ?? 0) {
-  return getPlayerBuildings(owner === 1 ? 0 : 1);
+  if (!state.data) return [];
+  const count = state.data.tribeCount === 4 ? 4 : 2;
+  const out = [];
+  for (let t = 0; t < count; t++) {
+    if (t === owner) continue;
+    out.push(...getPlayerBuildings(t));
+  }
+  return out;
 }
 
 function getActiveSelectionIds() {
@@ -798,7 +816,7 @@ function confirmFlagAtCursor(owner = state.localTribe ?? 0, overridePos = null) 
   }
 
   // If Guest in 1v1 Multiplayer, forward flag command to Host
-  if (state.mpMode && state.localTribe === 1 && !overridePos) {
+  if (state.mpMode && mpClient?.role === 'guest' && !overridePos) {
     mpClient?.sendCommand({ kind: 'flagCommand', flagKind: kind, x: fx, y: fy });
     state.message = kind === 'attack' ? `⚔ Đã cắm cờ chiến đấu tại (${fx}, ${fy})!` : `⚑ Đã cắm cờ tập hợp chiến binh tại (${fx}, ${fy})!`;
     render();
@@ -1170,8 +1188,7 @@ function attackNearestEnemy() {
 function getPlayerBuildings(owner = state.localTribe ?? 0) {
   if (!state.data) return [];
   const e = state.data.entityData;
-  const start = owner === 1 ? 31 : 1;
-  const end = owner === 1 ? 60 : 30;
+  const [start, end] = getBldRangeForTribe(state.data, owner);
   const list = [];
   for (let bid = start; bid <= end; bid++) {
     const hp = e[8505 + bid] & 0xff;
@@ -1439,7 +1456,7 @@ function getWeaponQueue(bid) {
 function adjustWeaponQueue(bid, weaponId, delta, fromRemote = false) {
   const q = getWeaponQueue(bid);
   q[weaponId] = Math.max(0, Math.min(20, (q[weaponId] || 0) + delta));
-  if (state.mpMode && state.localTribe === 1 && !fromRemote) {
+  if (state.mpMode && mpClient?.role === 'guest' && !fromRemote) {
     mpClient?.sendCommand({ kind: 'setWeaponQueue', bid, weaponId, delta });
   }
   if (!fromRemote && state.canvasMenu?.kind === 'building' && state.selectedBuildingBid === bid) {
@@ -1710,7 +1727,7 @@ function confirmBuildAtCursor(owner = state.localTribe ?? 0, overridePayload = n
     return;
   }
   // If Guest in 1v1 Multiplayer, forward build command to Host
-  if (state.mpMode && state.localTribe === 1 && !overridePayload) {
+  if (state.mpMode && mpClient?.role === 'guest' && !overridePayload) {
     mpClient?.sendCommand({
       kind: 'placeBuild',
       bType: bp.bType,
@@ -2726,16 +2743,16 @@ function commandUnitTo(tx, ty, overrideIds = null, owner = state.localTribe ?? 0
   if (!d || activeIds.length === 0) return;
 
   // If Guest in 1v1 Multiplayer, forward command to Host!
-  if (state.mpMode && state.localTribe === 1 && !overrideIds) {
+  if (state.mpMode && mpClient?.role === 'guest' && !overrideIds) {
     mpClient?.sendCommand({ kind: 'commandTo', tx, ty, unitIds: activeIds });
     return;
   }
 
   const unitId = activeIds[0];
   const occ = d.occupancy[ty]?.[tx] ?? 0;
-  const isEnemyUnitOcc = owner === 1 ? occ >= 1 && occ <= 50 : occ >= 51 && occ <= 100;
-  const isEnemyBldOcc = owner === 1 ? occ <= -1 && occ >= -30 : occ <= -31 && occ >= -60;
-  const isOwnBldOcc = owner === 1 ? occ <= -31 && occ >= -60 : occ <= -1 && occ >= -30;
+  const isEnemyUnitOcc = occ >= 1 && occ <= 100 && getUnitOwner(d, occ) !== owner;
+  const isEnemyBldOcc = occ <= -1 && occ >= -60 && getBuildingOwner(d, -occ) !== owner;
+  const isOwnBldOcc = occ <= -1 && occ >= -60 && getBuildingOwner(d, -occ) === owner;
   const adultIds = activeIds.filter((id) => (d.entityData[1414 + id] & 0xff) >= 12);
   const childIds = activeIds.filter((id) => (d.entityData[1414 + id] & 0xff) < 12);
 
@@ -3718,7 +3735,7 @@ function stepUnitMovement(unitId, task, isEnemy = false) {
 function stepSimulation() {
   if (!state.data || state.phase !== 'game' || state.paused || state.storyDialog || state.missionResult) return;
   // In 1v1 Multiplayer, Guest (Tribe 1) receives authoritative world snapshots from Host!
-  if (state.mpMode && state.localTribe === 1) return;
+  if (state.mpMode && mpClient?.role === 'guest') return;
   state.lastSimTime = performance.now();
   state.animTick++;
   const d = state.data;
@@ -5475,28 +5492,32 @@ function stepSimulation() {
     }
   }
 
-  // Evaluate 1v1 Multiplayer / Vs AI Victory OR Campaign Mission Victory
-  if ((state.mpMode || state.aiMode) && state.localTribe === 0 && state.mpWinner === null && state.animTick % 10 === 0) {
-    const t0Alive = getVillagerIds(0).length;
-    const t1Alive = getVillagerIds(1).length;
-    if (t1Alive === 0 || t0Alive === 0) {
-      state.mpWinner = t1Alive === 0 ? 0 : 1;
-      const hostWon = state.mpWinner === 0;
-      const redLabel = state.aiMode ? 'Máy AI (Bộ lạc Đỏ)' : 'Bộ lạc Đỏ';
+  // Evaluate 2-4 Player Multiplayer / Vs AI Victory OR Campaign Mission Victory
+  const isAuthoritativeMatch = (state.mpMode && mpClient?.role === 'host') || (state.aiMode && state.localTribe === 0);
+  if (isAuthoritativeMatch && state.mpWinner === null && state.animTick % 10 === 0) {
+    const active = d.activeTribes?.length ? d.activeTribes : [0, 1];
+    const aliveTribes = active.filter((t) => getVillagerIds(t).length > 0);
+    if (aliveTribes.length <= 1) {
+      const winner = aliveTribes[0] ?? (state.localTribe ?? 0);
+      state.mpWinner = winner;
+      const myTribe = state.localTribe ?? 0;
+      const iWon = winner === myTribe;
+      const winName = FACTIONS[winner]?.name || `Phe ${winner + 1}`;
+      const myAlive = getVillagerIds(myTribe).length;
       state.missionResult = {
-        status: hostWon ? 'victory' : 'defeat',
-        reason: hostWon ? `Bộ lạc Xanh đã đánh bại ${redLabel}!` : `${redLabel} đã chiến thắng trận đấu!`,
+        status: iWon ? 'victory' : 'defeat',
+        reason: iWon ? `${winName} đã đánh bại toàn bộ đối thủ!` : `${winName} đã chiến thắng trận đấu!`,
         epilogue: '',
         score: {
-          population: t0Alive,
+          population: myAlive,
           buildingsBuilt: state.missionStats.buildingsBuilt,
           enemiesKilled: state.missionStats.enemiesKilled,
           enemyBuildingsDestroyed: state.missionStats.enemyBuildingsDestroyed,
           resourcesTotal: state.food + state.wood + state.stone + state.tools,
-          totalScore: (t0Alive * 100) + (state.missionStats.enemiesKilled * 50),
+          totalScore: (myAlive * 100) + (state.missionStats.enemiesKilled * 50),
         },
       };
-      state.message = hostWon ? '🏆 CHIẾN THẮNG! Bộ lạc Xanh đã giành thắng lợi!' : `💀 THẤT BẠI! ${redLabel} đã chiến thắng!`;
+      state.message = iWon ? `🏆 CHIẾN THẮNG! ${winName} đã giành thắng lợi!` : `💀 THẤT BẠI! ${winName} đã chiến thắng!`;
       uiChanged = true;
     }
   } else if (!state.mpMode && !state.aiMode && !state.victoryDismissed && state.animTick % 12 === 0) {
@@ -5533,8 +5554,8 @@ function stepSimulation() {
     }
   }
 
-  // Broadcast authoritative world snapshot from Host -> Guest in 1v1 Multiplayer
-  if (state.mpMode && state.localTribe === 0 && mpClient?.connected) {
+  // Broadcast authoritative world snapshot from Host -> all Guests (2-4 players)
+  if (state.mpMode && mpClient?.role === 'host' && mpClient?.connected) {
     mpClient.sendSnapshot(packWorldSnapshot(d, state));
   }
 
@@ -5853,7 +5874,11 @@ function stepVillagerNeeds() {
   const d = state.data;
   if (!d) return false;
   const e = d.entityData;
-  const tribes = state.mpMode || state.aiMode ? [0, 1] : [state.localTribe ?? 0];
+  const tribes = state.mpMode
+    ? (d.activeTribes?.length ? d.activeTribes : [0, 1])
+    : state.aiMode
+      ? [0, 1]
+      : [state.localTribe ?? 0];
   let changed = false;
 
   const getHutOccupantCount = (bid) => {
@@ -6305,7 +6330,7 @@ function openCanvasActionsMenu() {
         const myTribe = state.localTribe ?? 0;
         const nextVal = state.tribeUseRawWeapon[myTribe] === false;
         state.tribeUseRawWeapon[myTribe] = nextVal;
-        if (state.mpMode && myTribe === 1) {
+        if (state.mpMode && mpClient?.role === 'guest') {
           mpClient?.sendCommand({ kind: 'setUseRawWeapon', value: nextVal });
         }
         state.message = nextVal
@@ -7920,10 +7945,10 @@ function confirm() {
     const { x, y } = state.cursor;
     const occ = state.data.occupancy[y]?.[x] ?? 0;
     const myTribe = state.localTribe ?? 0;
-    const isOwnUnitOcc = myTribe === 1 ? occ >= 51 && occ <= 100 : occ >= 1 && occ <= 50;
-    const isEnemyUnitOcc = myTribe === 1 ? occ >= 1 && occ <= 50 : occ >= 51 && occ <= 100;
-    const isOwnBldOcc = myTribe === 1 ? occ <= -31 && occ >= -60 : occ <= -1 && occ >= -30;
-    const isEnemyBldOcc = myTribe === 1 ? occ <= -1 && occ >= -30 : occ <= -31 && occ >= -60;
+    const isOwnUnitOcc = occ >= 1 && occ <= 100 && getUnitOwner(state.data, occ) === myTribe;
+    const isEnemyUnitOcc = occ >= 1 && occ <= 100 && getUnitOwner(state.data, occ) !== myTribe;
+    const isOwnBldOcc = occ <= -1 && occ >= -60 && getBuildingOwner(state.data, -occ) === myTribe;
+    const isEnemyBldOcc = occ <= -1 && occ >= -60 && getBuildingOwner(state.data, -occ) !== myTribe;
 
     if (isOwnUnitOcc) {
       selectUnit(occ);
@@ -8398,7 +8423,7 @@ function finishCanvasPointerDrag(event, cancelled = false) {
 
   if (isDoubleClick && activeIds.length > 0) {
     // Double left-click with villager(s) already selected -> SPRINT (e[7777]=1, authentic anim 7, ~2x speed)!
-    if (state.mpMode && state.localTribe === 1) {
+    if (state.mpMode && mpClient?.role === 'guest') {
       mpClient?.sendCommand({ kind: 'sprint', tx: cell.x, ty: cell.y, unitIds: activeIds });
       state.message =
         activeIds.length > 1
@@ -8766,20 +8791,26 @@ Promise.all([
     }
 
     const executeGuestCommand = (cmd) => {
-      if (!cmd || !state.data || state.localTribe !== 0) return;
+      if (!cmd || !state.data || mpClient?.role !== 'host') return;
       const e = state.data.entityData;
+      const guestTribe = Math.max(0, Math.min(3, cmd.tribe ?? 1));
+      if (guestTribe === state.localTribe) return;
       if (cmd.kind === 'commandTo') {
-        const ids = (cmd.unitIds || []).filter((id) => id >= 51 && id <= 100 && (e[1919 + id] & 0xff) > 0);
+        const ids = (cmd.unitIds || []).filter(
+          (id) => id >= 1 && id <= 100 && getUnitOwner(state.data, id) === guestTribe && (e[1919 + id] & 0xff) > 0
+        );
         for (const id of ids) {
           const t = state.tasks.get(id);
           if (!(t?.path?.length > 0 && (e[7777 + id] & 0xff) > 0)) e[7777 + id] = 0;
         }
-        if (ids.length > 0) commandUnitTo(cmd.tx, cmd.ty, ids, 1);
+        if (ids.length > 0) commandUnitTo(cmd.tx, cmd.ty, ids, guestTribe);
       } else if (cmd.kind === 'sprint') {
-        const ids = (cmd.unitIds || []).filter((id) => id >= 51 && id <= 100 && (e[1919 + id] & 0xff) > 0);
+        const ids = (cmd.unitIds || []).filter(
+          (id) => id >= 1 && id <= 100 && getUnitOwner(state.data, id) === guestTribe && (e[1919 + id] & 0xff) > 0
+        );
         if (ids.length > 0) {
           const anyMoving = ids.some((id) => state.tasks.get(id)?.path?.length > 0);
-          if (!anyMoving) commandUnitTo(cmd.tx, cmd.ty, ids, 1);
+          if (!anyMoving) commandUnitTo(cmd.tx, cmd.ty, ids, guestTribe);
           for (const id of ids) {
             if (state.tasks.get(id)?.path?.length > 0 && (e[1414 + id] & 0xff) >= 12 && (e[3535 + id] & 0xff) === 0) {
               e[7777 + id] = 1;
@@ -8787,17 +8818,17 @@ Promise.all([
           }
         }
       } else if (cmd.kind === 'placeBuild') {
-        confirmBuildAtCursor(1, cmd);
+        confirmBuildAtCursor(guestTribe, cmd);
       } else if (cmd.kind === 'flagCommand') {
-        confirmFlagAtCursor(1, cmd);
+        confirmFlagAtCursor(guestTribe, cmd);
       } else if (cmd.kind === 'setUseRawWeapon') {
-        state.tribeUseRawWeapon[1] = Boolean(cmd.value);
+        state.tribeUseRawWeapon[guestTribe] = Boolean(cmd.value);
       } else if (cmd.kind === 'setWeaponQueue') {
         adjustWeaponQueue(cmd.bid, cmd.weaponId, cmd.delta, true);
       }
     };
 
-    const startMatchCommon = (mapIdx, myTribe, { isMp, isAi, difficulty = 'normal' }) => {
+    const startMatchCommon = (mapIdx, myTribe, { isMp, isAi, difficulty = 'normal', activeTribes = [0, 1] }) => {
       state.mpMode = isMp;
       state.aiMode = isAi;
       state.aiDifficulty = difficulty;
@@ -8824,7 +8855,7 @@ Promise.all([
       state.selectedUnits.clear();
       state.scenarioIndex = mapIdx;
 
-      state.data = prepareMultiplayerMatch(baseData, maBytes, mapIdx, myTribe);
+      state.data = prepareMultiplayerMatch(baseData, maBytes, mapIdx, myTribe, activeTribes);
       pullLocalResourcesFromData();
       const myUnits = getVillagerIds(myTribe);
       state.selectedUnit = myUnits[0] || 0;
@@ -8837,18 +8868,19 @@ Promise.all([
       state.phase = 'game';
       state.paused = false;
       const diffLabel = difficulty === 'easy' ? 'Dễ' : difficulty === 'hard' ? 'Khó' : 'Thường';
+      const f = FACTIONS[myTribe] || FACTIONS[0];
       state.message = isAi
         ? `🤖 Chơi với Máy (${diffLabel})! Bạn điều khiển BỘ LẠC XANH đối đầu MÁY AI (BỘ LẠC ĐỎ).`
-        : myTribe === 0
-          ? '🟢 Trận đấu 1v1 bắt đầu! Bạn điều khiển BỘ LẠC XANH (Chủ phòng).'
-          : '🔴 Trận đấu 1v1 bắt đầu! Bạn điều khiển BỘ LẠC ĐỎ (Khách).';
+        : `${f.icon} Trận đấu ${activeTribes.length} người bắt đầu! Bạn điều khiển ${f.name.toUpperCase()}${mpClient?.role === 'host' ? ' (Chủ phòng)' : ''}.`;
       clampCamera();
       showMpLobby(false);
       render();
     };
 
-    const startMultiplayerMatch = (mapIdx, myTribe) => startMatchCommon(mapIdx, myTribe, { isMp: true, isAi: false });
-    const startAiMatch = (mapIdx, difficulty) => startMatchCommon(mapIdx, 0, { isMp: false, isAi: true, difficulty });
+    const startMultiplayerMatch = (mapIdx, myTribe, activeTribes = [0, 1]) =>
+      startMatchCommon(mapIdx, myTribe, { isMp: true, isAi: false, activeTribes });
+    const startAiMatch = (mapIdx, difficulty) =>
+      startMatchCommon(mapIdx, 0, { isMp: false, isAi: true, difficulty, activeTribes: [0, 1] });
 
     mpAiOpenBtn?.addEventListener('click', () => {
       if (mpAiPlayerNameEl) mpAiPlayerNameEl.textContent = (mpNameInput?.value || 'Tù trưởng').trim() || 'Tù trưởng';
@@ -8866,6 +8898,18 @@ Promise.all([
       startAiMatch(mapIdx, diff);
     });
 
+    const mpFactionsGrid = document.getElementById('mp-factions-grid');
+    if (mpFactionsGrid) {
+      mpFactionsGrid.addEventListener('click', (ev) => {
+        const btn = ev.target.closest('.mp-slot[data-tribe]');
+        if (!btn) return;
+        const tribeId = Number.parseInt(btn.dataset.tribe || '0', 10);
+        if (Number.isFinite(tribeId)) {
+          mpClient?.selectFaction(tribeId);
+        }
+      });
+    }
+
     const updateLobbyUI = (lob) => {
       if (!lob) return;
       const inRoom = lob.status !== 'idle';
@@ -8874,42 +8918,59 @@ Promise.all([
       mpRoomView?.classList.toggle('hidden', !inRoom);
       if (!inRoom) return;
 
+      const players = lob.players || [];
+      const me = players.find((p) => p.clientId === lob.clientId);
       if (mpRoomCodeDisplay) mpRoomCodeDisplay.textContent = lob.roomCode || '----';
-      if (mpHostNameEl) mpHostNameEl.textContent = lob.hostName || 'Tù trưởng Xanh';
-      if (mpHostStatusEl) {
-        mpHostStatusEl.textContent = lob.hostReady ? '✓ ĐÃ SẴN SÀNG' : 'Chưa sẵn sàng';
-        mpHostStatusEl.classList.toggle('ready', Boolean(lob.hostReady));
+
+      if (mpFactionsGrid) {
+        const slots = mpFactionsGrid.querySelectorAll('.mp-slot[data-tribe]');
+        slots.forEach((btn) => {
+          const tId = Number.parseInt(btn.dataset.tribe || '0', 10);
+          const ownerP = players.find((p) => p.tribe === tId);
+          const isMe = ownerP && ownerP.clientId === lob.clientId;
+          const nameEl = btn.querySelector('.mp-slot-name');
+          const badgeEl = btn.querySelector('.mp-ready-badge');
+          btn.classList.toggle('is-me', Boolean(isMe));
+          btn.classList.toggle('is-taken', Boolean(ownerP && !isMe));
+          btn.disabled = Boolean((ownerP && !isMe) || lob.status === 'countdown');
+          if (nameEl) {
+            nameEl.textContent = ownerP
+              ? `${ownerP.name}${ownerP.isHost ? ' ★' : ''}${isMe ? ' (Bạn)' : ''}`
+              : 'Trống — Click chọn phe';
+          }
+          if (badgeEl) {
+            badgeEl.textContent = !ownerP ? 'Còn trống' : ownerP.ready ? '✓ ĐÃ SẴN SÀNG' : 'Chưa sẵn sàng';
+            badgeEl.classList.toggle('ready', Boolean(ownerP && ownerP.ready));
+          }
+        });
       }
-      if (mpGuestNameEl) mpGuestNameEl.textContent = lob.guestJoined ? lob.guestName || 'Tù trưởng Đỏ' : 'Đang chờ đối thủ...';
-      if (mpGuestStatusEl) {
-        mpGuestStatusEl.textContent = !lob.guestJoined ? 'Trống' : lob.guestReady ? '✓ ĐÃ SẴN SÀNG' : 'Chưa sẵn sàng';
-        mpGuestStatusEl.classList.toggle('ready', Boolean(lob.guestJoined && lob.guestReady));
-      }
+
       if (mpMapSelect) {
         mpMapSelect.value = String(lob.mapIdx ?? 1);
         mpMapSelect.disabled = lob.role !== 'host' || lob.status === 'countdown';
       }
-      const myReady = lob.role === 'host' ? lob.hostReady : lob.guestReady;
+      const myReady = Boolean(me?.ready);
       if (mpReadyBtn) {
-        mpReadyBtn.disabled = !lob.guestJoined && lob.role === 'host';
-        mpReadyBtn.classList.toggle('is-ready', Boolean(myReady));
+        mpReadyBtn.disabled = players.length < 2 && lob.role === 'host';
+        mpReadyBtn.classList.toggle('is-ready', myReady);
         mpReadyBtn.textContent = myReady ? '✕ HỦY SẴN SÀNG' : '✓ SẴN SÀNG CHIẾN ĐẤU';
       }
       if (mpCountdownEl) {
         if (lob.status === 'countdown' && lob.countdown > 0) {
           mpCountdownEl.classList.remove('hidden');
-          mpCountdownEl.textContent = `⚔️ CẢ 2 ĐÃ SẴN SÀNG! BẮT ĐẦU SAU ${lob.countdown}...`;
+          mpCountdownEl.textContent = `⚔️ CẢ ${players.length} NGƯỜI ĐÃ SẴN SÀNG! BẮT ĐẦU SAU ${lob.countdown}...`;
         } else {
           mpCountdownEl.classList.add('hidden');
         }
       }
       if (mpRoomMsgEl) {
-        if (lob.statusNote && !lob.guestJoined) {
+        if (lob.statusNote && players.length < 2) {
           mpRoomMsgEl.textContent = lob.statusNote;
         } else {
-          mpRoomMsgEl.textContent = !lob.guestJoined
-            ? `Gửi mã phòng ${lob.roomCode} cho đối thủ qua mạng (${lob.transport || 'Đang mở kết nối...'}).`
-            : `Đã kết nối (${lob.transport || 'Cloud WSS'})! Cả 2 hãy bấm Sẵn sàng để bắt đầu trận đấu.`;
+          mpRoomMsgEl.textContent =
+            players.length < 2
+              ? `Phòng ${lob.roomCode} (${players.length}/4 người) · Gửi mã cho tối đa 3 người nữa (${lob.transport || 'Đang mở kết nối...'}).`
+              : `Phòng ${lob.roomCode} (${players.length}/4 người · ${lob.transport || 'Cloud WSS'})! Click ô trống để đổi phe, tất cả bấm Sẵn sàng để bắt đầu.`;
         }
       }
     };
@@ -8918,21 +8979,22 @@ Promise.all([
       onLobbyUpdate(lob) {
         updateLobbyUI(lob);
       },
-      onStartMatch(mapIdx, myTribe) {
-        startMultiplayerMatch(mapIdx, myTribe);
+      onStartMatch(mapIdx, myTribe, activeTribes) {
+        startMultiplayerMatch(mapIdx, myTribe, activeTribes);
       },
       onGuestCommand(cmd) {
         executeGuestCommand(cmd);
       },
       onSnapshot(snap) {
-        if (!state.data || state.localTribe !== 1) return;
+        if (!state.data || mpClient?.role !== 'guest') return;
         applyWorldSnapshot(state.data, state, snap, revealFog, getBuildingSpec);
         pullLocalResourcesFromData();
         if (snap.winner !== null && snap.winner !== undefined && !state.missionResult) {
-          const guestWon = snap.winner === 1;
+          const iWon = snap.winner === state.localTribe;
+          const winName = FACTIONS[snap.winner]?.name || `Phe ${snap.winner + 1}`;
           state.missionResult = {
-            status: guestWon ? 'victory' : 'defeat',
-            reason: guestWon ? 'Bộ lạc Đỏ đã đánh bại Bộ lạc Xanh!' : 'Bộ lạc Xanh đã chiến thắng trận đấu!',
+            status: iWon ? 'victory' : 'defeat',
+            reason: iWon ? `${winName} đã đánh bại toàn bộ đối thủ!` : `${winName} đã chiến thắng trận đấu!`,
             epilogue: '',
             score: {
               population: state.population,
@@ -8975,7 +9037,7 @@ Promise.all([
       mpClient.setMap(idx);
     });
     mpReadyBtn?.addEventListener('click', () => {
-      const myReady = mpClient.role === 'host' ? mpClient.lobby.hostReady : mpClient.lobby.guestReady;
+      const myReady = Boolean(mpClient.getMyPlayer()?.ready);
       mpClient.setReady(!myReady);
     });
     mpCopyBtn?.addEventListener('click', () => {

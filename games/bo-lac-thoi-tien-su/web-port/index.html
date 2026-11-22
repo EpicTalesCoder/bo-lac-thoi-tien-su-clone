@@ -112,22 +112,31 @@
                 </div>
               </div>
 
-              <div class="mp-versus">
-                <div class="mp-slot mp-slot-blue">
-                  <span class="mp-tribe-tag">🟢 BỘ LẠC XANH · TRIBE 1</span>
-                  <strong id="mp-host-name">Đang chờ...</strong>
-                  <span class="mp-ready-badge" id="mp-host-status">Chưa sẵn sàng</span>
-                </div>
-                <div class="mp-vs-badge">VS</div>
-                <div class="mp-slot mp-slot-red">
-                  <span class="mp-tribe-tag">🔴 BỘ LẠC ĐỎ · TRIBE 2</span>
-                  <strong id="mp-guest-name">Đang chờ đối thủ...</strong>
-                  <span class="mp-ready-badge" id="mp-guest-status">Trống</span>
-                </div>
+              <div class="mp-factions-grid" id="mp-factions-grid">
+                <button type="button" class="mp-slot mp-slot-0" data-tribe="0">
+                  <span class="mp-tribe-tag">🔵 BỘ LẠC XANH DƯƠNG</span>
+                  <strong class="mp-slot-name">Trống — Click chọn phe</strong>
+                  <span class="mp-ready-badge">Còn trống</span>
+                </button>
+                <button type="button" class="mp-slot mp-slot-1" data-tribe="1">
+                  <span class="mp-tribe-tag">🔴 BỘ LẠC ĐỎ</span>
+                  <strong class="mp-slot-name">Trống — Click chọn phe</strong>
+                  <span class="mp-ready-badge">Còn trống</span>
+                </button>
+                <button type="button" class="mp-slot mp-slot-2" data-tribe="2">
+                  <span class="mp-tribe-tag">🟡 BỘ LẠC VÀNG</span>
+                  <strong class="mp-slot-name">Trống — Click chọn phe</strong>
+                  <span class="mp-ready-badge">Còn trống</span>
+                </button>
+                <button type="button" class="mp-slot mp-slot-3" data-tribe="3">
+                  <span class="mp-tribe-tag">🟣 BỘ LẠC TÍM</span>
+                  <strong class="mp-slot-name">Trống — Click chọn phe</strong>
+                  <span class="mp-ready-badge">Còn trống</span>
+                </button>
               </div>
 
               <label class="mp-field">
-                <span>BẢN ĐỒ CHIẾN ĐẤU (2 BỘ LẠC ĐỐI ĐẦU CÂN BẰNG)</span>
+                <span>BẢN ĐỒ CHIẾN ĐẤU (2–4 BỘ LẠC ĐỐI ĐẦU CÂN BẰNG)</span>
                 <select id="mp-map-select"></select>
               </label>
 
@@ -136,7 +145,7 @@
               <button type="button" id="mp-ready-btn" class="mp-btn mp-btn-ready">
                 ✓ SẴN SÀNG CHIẾN ĐẤU
               </button>
-              <p class="mp-hint" id="mp-room-msg">Khi cả 2 người chơi đều bấm Sẵn sàng, trận đấu sẽ tự động bắt đầu!</p>
+              <p class="mp-hint" id="mp-room-msg">Click vào ô phe còn trống để đổi phe! Khi tất cả người chơi (2–4 người) đều Sẵn sàng, trận đấu sẽ bắt đầu.</p>
             </div>
           </div>
         </div>

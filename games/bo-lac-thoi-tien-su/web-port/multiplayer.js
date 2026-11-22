@@ -225,10 +225,12 @@ export function generateRoomCode() {
 export class MultiplayerClient {
   constructor(callbacks = {}) {
     this.callbacks = callbacks;
+    this.clientId = `p_${Math.random().toString(36).slice(2, 10)}`;
     this.role = null; // 'host' | 'guest'
     this.roomCode = '';
     this.peer = null;
     this.conn = null;
+    this.conns = new Map(); // host: peerId -> DataConnection (supports up to 3 guests!)
     this.bc = null;
     this.relay = null;
     this.connected = false;
@@ -249,15 +251,41 @@ export class MultiplayerClient {
       hostReady: false,
       guestReady: false,
       guestJoined: false,
+      players: [], // up to 4: [{ clientId, name, tribe: 0..3, ready: boolean, isHost: boolean }]
       status: 'idle', // 'idle' | 'lobby' | 'countdown' | 'playing'
       countdown: 0,
     };
   }
 
+  getMyPlayer() {
+    return (this.lobby.players || []).find((p) => p.clientId === this.clientId) || null;
+  }
+
+  getMyTribe() {
+    const me = this.getMyPlayer();
+    if (me) return me.tribe;
+    return this.role === 'host' ? 0 : 1;
+  }
+
+  _syncLegacyLobbyFields() {
+    const list = this.lobby.players || [];
+    const hostP = list.find((p) => p.isHost) || list[0];
+    const guestP = list.find((p) => !p.isHost);
+    this.lobby.hostName = hostP?.name || this.lobby.hostName || 'Tù trưởng Xanh';
+    this.lobby.hostReady = Boolean(hostP?.ready);
+    this.lobby.guestJoined = list.length >= 2;
+    this.lobby.guestName = guestP?.name || '';
+    this.lobby.guestReady = Boolean(guestP?.ready);
+  }
+
   emitLobby() {
+    this._syncLegacyLobbyFields();
     this.callbacks.onLobbyUpdate?.({
       ...this.lobby,
+      players: (this.lobby.players || []).map((p) => ({ ...p })),
       role: this.role,
+      clientId: this.clientId,
+      myTribe: this.getMyTribe(),
       connected: this.connected,
       transport: this.transport,
       statusNote: this.statusNote,
@@ -265,9 +293,18 @@ export class MultiplayerClient {
   }
 
   sendRaw(msg) {
-    const packet = { ...msg, _from: this.role, _seq: ++this._seqOut };
+    const packet = { ...msg, _from: this.clientId, _role: this.role, _seq: ++this._seqOut };
     let sent = false;
-    if (this.conn && this.conn.open) {
+    if (this.role === 'host' && this.conns.size > 0) {
+      for (const c of this.conns.values()) {
+        if (c && c.open) {
+          try {
+            c.send(packet);
+            sent = true;
+          } catch {}
+        }
+      }
+    } else if (this.conn && this.conn.open) {
       try {
         this.conn.send(packet);
         sent = true;
@@ -303,27 +340,29 @@ export class MultiplayerClient {
   createRoom(hostName = 'Tù trưởng Xanh', mapIdx = 1) {
     this.leaveRoom();
     const code = generateRoomCode();
+    const cleanName = hostName.trim() || 'Tù trưởng Xanh';
     this.role = 'host';
     this.roomCode = code;
     this.statusNote = 'Đang mở phòng trên máy chủ đám mây...';
     this.lobby = {
       roomCode: code,
       mapIdx,
-      hostName: hostName.trim() || 'Tù trưởng Xanh',
+      hostName: cleanName,
       guestName: '',
       hostReady: false,
       guestReady: false,
       guestJoined: false,
+      players: [{ clientId: this.clientId, name: cleanName, tribe: 0, ready: false, isHost: true }],
       status: 'lobby',
       countdown: 0,
     };
 
-    // 1) BroadcastChannel for instant local 2-tab play
+    // 1) BroadcastChannel for instant local multi-tab play (up to 4 tabs!)
     if (typeof BroadcastChannel !== 'undefined') {
       this.bc = new BroadcastChannel(`pt-mp-room-${code}`);
       this.bc.onmessage = (ev) => {
         const msg = ev.data;
-        if (!msg || msg._from === this.role) return;
+        if (!msg || msg._from === this.clientId) return;
         if (!this.connected) {
           this.connected = true;
           this.transport = 'Local Tab';
@@ -332,7 +371,7 @@ export class MultiplayerClient {
       };
     }
 
-    // 2) Cloud WSS Relay (works reliably across ANY 2 networks, 4G/5G CGNAT & firewalls!)
+    // 2) Cloud WSS Relay (works reliably across ANY 2..4 networks, 4G/5G CGNAT & firewalls!)
     this.relay = new MqttWssRelay(
       `bltts/mp/v2/${code}/c2h`,
       `bltts/mp/v2/${code}/h2c`,
@@ -346,7 +385,7 @@ export class MultiplayerClient {
           this.emitLobby();
         },
         onMessage: (msg) => {
-          if (!msg || msg._from === this.role) return;
+          if (!msg || msg._from === this.clientId) return;
           if (!this.connected) {
             this.connected = true;
             this.transport = this.transport === 'Local Tab' ? 'Local Tab' : 'Cloud WSS';
@@ -362,7 +401,7 @@ export class MultiplayerClient {
       }
     );
 
-    // 3) PeerJS WebRTC P2P (optional direct acceleration when NAT allows)
+    // 3) PeerJS WebRTC P2P (optional direct acceleration for up to 3 guests)
     if (typeof window !== 'undefined' && window.Peer) {
       try {
         this.peer = new window.Peer(`${ROOM_PEER_PREFIX}${code}`, PEER_CONFIG);
@@ -371,6 +410,7 @@ export class MultiplayerClient {
           this.emitLobby();
         });
         this.peer.on('connection', (conn) => {
+          this.conns.set(conn.peer, conn);
           this.conn = conn;
           conn.on('open', () => {
             this.connected = true;
@@ -379,10 +419,12 @@ export class MultiplayerClient {
             this.emitLobby();
           });
           conn.on('data', (msg) => this.handleMessage(msg));
-          conn.on('close', () => this.handlePeerDisconnect());
+          conn.on('close', () => {
+            this.conns.delete(conn.peer);
+            this.handlePeerDisconnect();
+          });
         });
         this.peer.on('error', () => {
-          // Cloud WSS & BroadcastChannel continue working seamlessly!
           this.emitLobby();
         });
       } catch {}
@@ -396,6 +438,7 @@ export class MultiplayerClient {
     this.leaveRoom();
     const cleanCode = String(code || '').replace(/[^0-9A-Za-z]/g, '').slice(0, 6);
     if (!cleanCode) return false;
+    const cleanName = guestName.trim() || 'Tù trưởng Đỏ';
     this.role = 'guest';
     this.roomCode = cleanCode;
     this.statusNote = `Đang tìm phòng #${cleanCode} qua mạng...`;
@@ -404,25 +447,32 @@ export class MultiplayerClient {
       roomCode: cleanCode,
       mapIdx: 1,
       hostName: 'Đang kết nối...',
-      guestName: guestName.trim() || 'Tù trưởng Đỏ',
+      guestName: cleanName,
       hostReady: false,
       guestReady: false,
       guestJoined: false,
+      players: [],
       status: 'lobby',
       countdown: 0,
     };
 
     const announceJoin = () => {
       if (this.role !== 'guest' || this.connected) return;
-      this.sendRaw({ type: 'guestJoin', guestName: this.lobby.guestName, ready: this.lobby.guestReady });
+      this.sendRaw({
+        type: 'guestJoin',
+        clientId: this.clientId,
+        guestName: cleanName,
+        ready: false,
+      });
     };
 
-    // 1) BroadcastChannel for instant local 2-tab join
+    // 1) BroadcastChannel for instant local multi-tab join
     if (typeof BroadcastChannel !== 'undefined') {
       this.bc = new BroadcastChannel(`pt-mp-room-${cleanCode}`);
       this.bc.onmessage = (ev) => {
         const msg = ev.data;
-        if (!msg || msg._from === this.role) return;
+        if (!msg || msg._from === this.clientId) return;
+        if (msg._role !== 'host') return;
         if (!this.connected) {
           this.connected = true;
           this.transport = 'Local Tab';
@@ -434,7 +484,7 @@ export class MultiplayerClient {
       setTimeout(announceJoin, 60);
     }
 
-    // 2) Cloud WSS Relay join (works across ANY 2 networks, 4G/5G & firewalls!)
+    // 2) Cloud WSS Relay join (works across ANY 2..4 networks, 4G/5G & firewalls!)
     this.relay = new MqttWssRelay(
       `bltts/mp/v2/${cleanCode}/h2c`,
       `bltts/mp/v2/${cleanCode}/c2h`,
@@ -458,7 +508,7 @@ export class MultiplayerClient {
           this.emitLobby();
         },
         onMessage: (msg) => {
-          if (!msg || msg._from === this.role) return;
+          if (!msg || msg._from === this.clientId) return;
           if (!this.connected) {
             this.connected = true;
             this.transport = this.transport === 'Local Tab' ? 'Local Tab' : 'Cloud WSS';
@@ -491,7 +541,12 @@ export class MultiplayerClient {
             this.transport = 'WebRTC P2P';
             this.statusNote = '';
             this._clearJoinRetry();
-            this.sendRaw({ type: 'guestJoin', guestName: this.lobby.guestName, ready: this.lobby.guestReady });
+            this.sendRaw({
+              type: 'guestJoin',
+              clientId: this.clientId,
+              guestName: cleanName,
+              ready: false,
+            });
             this.emitLobby();
           });
           conn.on('data', (msg) => this.handleMessage(msg));
@@ -528,23 +583,52 @@ export class MultiplayerClient {
   setReady(ready) {
     const val = Boolean(ready);
     if (this.role === 'host') {
-      this.lobby.hostReady = val;
+      const me = this.getMyPlayer();
+      if (me) me.ready = val;
       if (!val) this.cancelCountdown();
       this.sendRaw({ type: 'lobbySync', lobby: this.lobby });
       this.emitLobby();
       this.checkStartCountdown();
     } else if (this.role === 'guest') {
-      this.lobby.guestReady = val;
-      this.sendRaw({ type: 'guestReady', ready: val, guestName: this.lobby.guestName });
+      const me = this.getMyPlayer();
+      if (me) me.ready = val;
+      this.sendRaw({
+        type: 'guestReady',
+        clientId: this.clientId,
+        ready: val,
+        guestName: this.lobby.guestName,
+      });
       this.emitLobby();
     }
+  }
+
+  selectFaction(tribeId) {
+    const t = Math.max(0, Math.min(3, tribeId | 0));
+    if (this.lobby.status === 'playing' || this.lobby.status === 'countdown') return false;
+    if (this.role === 'host') {
+      const taken = (this.lobby.players || []).some((p) => p.tribe === t && p.clientId !== this.clientId);
+      if (taken) return false;
+      const me = this.getMyPlayer();
+      if (!me || me.tribe === t) return false;
+      me.tribe = t;
+      me.ready = false;
+      this.cancelCountdown();
+      this.sendRaw({ type: 'lobbySync', lobby: this.lobby });
+      this.emitLobby();
+      return true;
+    } else if (this.role === 'guest') {
+      const taken = (this.lobby.players || []).some((p) => p.tribe === t && p.clientId !== this.clientId);
+      if (taken) return false;
+      this.sendRaw({ type: 'selectFaction', clientId: this.clientId, tribe: t });
+      return true;
+    }
+    return false;
   }
 
   setMap(mapIdx) {
     if (this.role !== 'host') return;
     this.lobby.mapIdx = mapIdx;
-    this.lobby.hostReady = false;
-    this.lobby.guestReady = false;
+    for (const p of this.lobby.players || []) p.ready = false;
     this.cancelCountdown();
     this.sendRaw({ type: 'lobbySync', lobby: this.lobby });
     this.emitLobby();
@@ -563,13 +647,16 @@ export class MultiplayerClient {
 
   checkStartCountdown() {
     if (this.role !== 'host') return;
-    if (this.lobby.guestJoined && this.lobby.hostReady && this.lobby.guestReady && this.lobby.status === 'lobby') {
+    const list = this.lobby.players || [];
+    const allReady = list.length >= 2 && list.every((p) => p.ready);
+    if (allReady && this.lobby.status === 'lobby') {
       this.lobby.status = 'countdown';
       this.lobby.countdown = 3;
       this.sendRaw({ type: 'lobbySync', lobby: this.lobby });
       this.emitLobby();
       this.countdownTimer = setInterval(() => {
-        if (!this.lobby.hostReady || !this.lobby.guestReady || !this.lobby.guestJoined) {
+        const curList = this.lobby.players || [];
+        if (curList.length < 2 || !curList.every((p) => p.ready)) {
           this.cancelCountdown();
           this.sendRaw({ type: 'lobbySync', lobby: this.lobby });
           this.emitLobby();
@@ -580,9 +667,10 @@ export class MultiplayerClient {
           clearInterval(this.countdownTimer);
           this.countdownTimer = null;
           this.lobby.status = 'playing';
-          this.sendRaw({ type: 'startMatch', mapIdx: this.lobby.mapIdx, lobby: this.lobby });
+          const activeTribes = curList.map((p) => p.tribe).sort((a, b) => a - b);
+          this.sendRaw({ type: 'startMatch', mapIdx: this.lobby.mapIdx, activeTribes, lobby: this.lobby });
           this.emitLobby();
-          this.callbacks.onStartMatch?.(this.lobby.mapIdx, 0);
+          this.callbacks.onStartMatch?.(this.lobby.mapIdx, this.getMyTribe(), activeTribes);
         } else {
           this.sendRaw({ type: 'lobbySync', lobby: this.lobby });
           this.emitLobby();
@@ -592,7 +680,7 @@ export class MultiplayerClient {
   }
 
   sendCommand(cmd) {
-    this.sendRaw({ type: 'cmd', cmd });
+    this.sendRaw({ type: 'cmd', cmd: { ...cmd, tribe: this.getMyTribe(), clientId: this.clientId } });
   }
 
   sendSnapshot(snapshot) {
@@ -603,8 +691,7 @@ export class MultiplayerClient {
   returnToLobby() {
     this.cancelCountdown();
     this.lobby.status = 'lobby';
-    this.lobby.hostReady = false;
-    this.lobby.guestReady = false;
+    for (const p of this.lobby.players || []) p.ready = false;
     if (this.role === 'host') {
       this.sendRaw({ type: 'returnLobby', lobby: this.lobby });
     }
@@ -613,45 +700,86 @@ export class MultiplayerClient {
 
   handleMessage(msg) {
     if (!msg || !msg.type) return;
-    // Deduplicate packets received over both WebRTC and BroadcastChannel
+    // Deduplicate packets received over multiple transports (Cloud WSS / WebRTC / BroadcastChannel)
     if (msg._seq && msg._from) {
       const key = `${msg._from}:${msg._seq}`;
       if (this._seenSeq.has(key)) return;
       this._seenSeq.add(key);
-      if (this._seenSeq.size > 400) this._seenSeq.clear();
+      if (this._seenSeq.size > 600) this._seenSeq.clear();
     }
 
     if (this.role === 'host') {
+      const cid = msg.clientId || msg._from || 'guest';
       if (msg.type === 'guestJoin') {
         this.connected = true;
-        const alreadyJoined = this.lobby.guestJoined;
-        this.lobby.guestJoined = true;
-        this.lobby.guestName = msg.guestName || this.lobby.guestName || 'Tù trưởng Đỏ';
-        // Never wipe guestReady on a secondary transport reconnect!
-        if (!alreadyJoined) {
-          this.lobby.guestReady = Boolean(msg.ready);
-        } else if (msg.ready) {
-          this.lobby.guestReady = true;
+        const list = this.lobby.players || [];
+        let player = list.find((p) => p.clientId === cid);
+        if (!player) {
+          if (list.length >= 4) {
+            // Room full (max 4 players)
+            this.sendRaw({ type: 'roomFull', targetClientId: cid });
+            return;
+          }
+          const used = new Set(list.map((p) => p.tribe));
+          const freeTribe = [0, 1, 2, 3].find((t) => !used.has(t)) ?? 1;
+          player = {
+            clientId: cid,
+            name: (msg.guestName || `Tù trưởng #${list.length + 1}`).slice(0, 18),
+            tribe: freeTribe,
+            ready: Boolean(msg.ready),
+            isHost: false,
+          };
+          list.push(player);
+        } else {
+          if (msg.guestName) player.name = msg.guestName.slice(0, 18);
+          if (msg.ready) player.ready = true;
         }
         this.sendRaw({ type: 'lobbySync', lobby: this.lobby });
         this.emitLobby();
         this.checkStartCountdown();
+      } else if (msg.type === 'selectFaction') {
+        const list = this.lobby.players || [];
+        const player = list.find((p) => p.clientId === cid);
+        const want = Math.max(0, Math.min(3, msg.tribe | 0));
+        if (player && !list.some((p) => p.tribe === want && p.clientId !== cid)) {
+          player.tribe = want;
+          player.ready = false;
+          this.cancelCountdown();
+          this.sendRaw({ type: 'lobbySync', lobby: this.lobby });
+          this.emitLobby();
+        }
       } else if (msg.type === 'guestReady') {
         this.connected = true;
-        this.lobby.guestJoined = true;
-        if (msg.guestName) this.lobby.guestName = msg.guestName;
-        this.lobby.guestReady = Boolean(msg.ready);
-        if (!this.lobby.guestReady) this.cancelCountdown();
-        this.sendRaw({ type: 'lobbySync', lobby: this.lobby });
-        this.emitLobby();
-        this.checkStartCountdown();
+        const list = this.lobby.players || [];
+        const player = list.find((p) => p.clientId === cid);
+        if (player) {
+          if (msg.guestName) player.name = msg.guestName.slice(0, 18);
+          player.ready = Boolean(msg.ready);
+          if (!player.ready) this.cancelCountdown();
+          this.sendRaw({ type: 'lobbySync', lobby: this.lobby });
+          this.emitLobby();
+          this.checkStartCountdown();
+        }
       } else if (msg.type === 'cmd') {
         this.callbacks.onGuestCommand?.(msg.cmd);
       } else if (msg.type === 'peerLeave') {
-        this.handlePeerDisconnect(true);
+        const list = this.lobby.players || [];
+        const idx = list.findIndex((p) => p.clientId === cid && !p.isHost);
+        if (idx >= 0) {
+          const left = list.splice(idx, 1)[0];
+          this.cancelCountdown();
+          if (list.length <= 1) this.connected = false;
+          this.sendRaw({ type: 'lobbySync', lobby: this.lobby });
+          this.emitLobby();
+          this.callbacks.onDisconnect?.(`${left.name} đã rời phòng.`);
+        }
       }
     } else if (this.role === 'guest') {
-      if (msg.type === 'lobbySync' && msg.lobby) {
+      if (msg.type === 'roomFull' && msg.targetClientId === this.clientId) {
+        this.statusNote = '⚠ Phòng đã đủ 4/4 người chơi!';
+        this._clearJoinRetry();
+        this.emitLobby();
+      } else if (msg.type === 'lobbySync' && msg.lobby) {
         this.connected = true;
         this.statusNote = '';
         this._clearJoinRetry();
@@ -661,14 +789,15 @@ export class MultiplayerClient {
         if (this.lobby.status === 'playing') return;
         this.lobby = { ...this.lobby, ...(msg.lobby || {}), status: 'playing' };
         this.emitLobby();
-        this.callbacks.onStartMatch?.(msg.mapIdx ?? this.lobby.mapIdx, 1);
+        const activeTribes = msg.activeTribes || (this.lobby.players || []).map((p) => p.tribe);
+        this.callbacks.onStartMatch?.(msg.mapIdx ?? this.lobby.mapIdx, this.getMyTribe(), activeTribes);
       } else if (msg.type === 'snap' && msg.snap) {
         this.callbacks.onSnapshot?.(msg.snap);
       } else if (msg.type === 'returnLobby' && msg.lobby) {
         this.lobby = { ...this.lobby, ...msg.lobby, status: 'lobby' };
         this.emitLobby();
         this.callbacks.onReturnLobby?.();
-      } else if (msg.type === 'peerLeave') {
+      } else if (msg.type === 'peerLeave' && msg._role === 'host') {
         this.handlePeerDisconnect(true);
       }
     }
@@ -676,10 +805,14 @@ export class MultiplayerClient {
 
   leaveRoom() {
     if (this.role && this.connected) {
-      try { this.sendRaw({ type: 'peerLeave' }); } catch {}
+      try { this.sendRaw({ type: 'peerLeave', clientId: this.clientId }); } catch {}
     }
     this.cancelCountdown();
     this._clearJoinRetry();
+    for (const c of this.conns.values()) {
+      try { c?.close(); } catch {}
+    }
+    this.conns.clear();
     try { this.conn?.close(); } catch {}
     try { this.peer?.destroy(); } catch {}
     try { this.relay?.close(); } catch {}
@@ -694,6 +827,7 @@ export class MultiplayerClient {
     this.transport = '';
     this.statusNote = '';
     this.lobby.status = 'idle';
+    this.lobby.players = [];
     this.lobby.guestJoined = false;
     this.lobby.hostReady = false;
     this.lobby.guestReady = false;
@@ -763,10 +897,12 @@ export function packWorldSnapshot(data, state) {
 
   return {
     tick: state.animTick,
+    tribeCount: data.tribeCount || 2,
     units,
     buildings,
     res0: (data.resources?.[0] || []).slice(0, 18),
     res1: (data.resources?.[1] || []).slice(0, 18),
+    resAll: [0, 1, 2, 3].map((t) => (data.resources?.[t] || []).slice(0, 18)),
     projectiles: (state.projectiles || []).map((p) => ({
       x0: p.x0, y0: p.y0, x1: p.x1, y1: p.y1, age: p.age, duration: p.duration, weaponId: p.weaponId,
     })),
@@ -778,7 +914,7 @@ export function packWorldSnapshot(data, state) {
 }
 
 /**
- * Apply authoritative world snapshot on Guest (Tribe 1)
+ * Apply authoritative world snapshot on Guest (any tribe 0..3)
  */
 export function applyWorldSnapshot(data, state, snap, revealFogFn, getBuildingSpecFn) {
   if (!data || !snap) return;
@@ -786,6 +922,10 @@ export function applyWorldSnapshot(data, state, snap, revealFogFn, getBuildingSp
   const fo = data.entityFieldOffsets;
   const w = data.width;
   const h = data.height;
+  if (snap.tribeCount) data.tribeCount = snap.tribeCount;
+  const myTribe = state.localTribe ?? 1;
+  const isMyBld = (bid) => (data.tribeCount === 4 ? Math.floor((bid - 1) / 15) === myTribe : (myTribe === 1 ? bid > 30 : bid <= 30));
+  const isMyUnit = (uid) => (data.tribeCount === 4 ? Math.floor((uid - 1) / 25) === myTribe : (myTribe === 1 ? uid > 50 : uid <= 50));
 
   state.animTick = snap.tick || state.animTick;
 
@@ -827,7 +967,7 @@ export function applyWorldSnapshot(data, state, snap, revealFogFn, getBuildingSp
         }
       }
     }
-    if (bid > 30) {
+    if (isMyBld(bid)) {
       revealFogFn(data, bx + Math.floor(spec.width / 2), by + Math.floor(spec.height / 2), spec.vision || 5);
     }
   }
@@ -876,20 +1016,29 @@ export function applyWorldSnapshot(data, state, snap, revealFogFn, getBuildingSp
     } else if (uy < h && ux < w && data.occupancy[uy][ux] === 0) {
       data.occupancy[uy][ux] = uid;
     }
-    if (uid > 50) {
+    if (isMyUnit(uid)) {
       revealFogFn(data, ux, uy, 4);
     }
   }
 
-  // Restore both tribes' resources
-  if (!data.resources) data.resources = [[], []];
-  if (snap.res0) {
-    if (!data.resources[0]) data.resources[0] = new Array(26).fill(0);
-    for (let i = 0; i < snap.res0.length; i++) data.resources[0][i] = snap.res0[i];
-  }
-  if (snap.res1) {
-    if (!data.resources[1]) data.resources[1] = new Array(26).fill(0);
-    for (let i = 0; i < snap.res1.length; i++) data.resources[1][i] = snap.res1[i];
+  // Restore all tribes' resources (0..3)
+  if (!data.resources) data.resources = [[], [], [], []];
+  if (Array.isArray(snap.resAll)) {
+    for (let t = 0; t < snap.resAll.length; t++) {
+      const arr = snap.resAll[t];
+      if (!arr) continue;
+      if (!data.resources[t]) data.resources[t] = new Array(26).fill(0);
+      for (let i = 0; i < arr.length; i++) data.resources[t][i] = arr[i];
+    }
+  } else {
+    if (snap.res0) {
+      if (!data.resources[0]) data.resources[0] = new Array(26).fill(0);
+      for (let i = 0; i < snap.res0.length; i++) data.resources[0][i] = snap.res0[i];
+    }
+    if (snap.res1) {
+      if (!data.resources[1]) data.resources[1] = new Array(26).fill(0);
+      for (let i = 0; i < snap.res1.length; i++) data.resources[1][i] = snap.res1[i];
+    }
   }
 
   state.projectiles = snap.projectiles || [];
