@@ -7446,21 +7446,35 @@ function drawFrameToCtx(targetCtx) {
     if (state.data) {
       state.selectedUnitName = state.selectedUnit ? getVillagerName(state.data, state.selectedUnit) : '';
       const bMap = new Map();
-      const chefSet = new Set();
+      const staffSet = new Set();
       for (const b of getPlayerBuildings(state.localTribe ?? 0)) {
         if (b.underConstruction) bMap.set(b.bid, getAssignedBuilderCount(b.bid));
-        else if (b.targetType === 4 && isBuildingSlot0Occupied(b.bid)) chefSet.add(b.bid);
+        else if ((b.targetType === 4 || b.targetType === 7) && isBuildingSlot0Occupied(b.bid)) staffSet.add(b.bid);
       }
       for (const [uid, t] of state.tasks.entries()) {
-        if (t.kind === 'chefFetch' && t.kitchen?.bid) chefSet.add(t.kitchen.bid);
-        else if (t.kind === 'workBuilding' && t.target?.targetType === 4 && t.preferredSlots?.[0] === 0) chefSet.add(t.target.bid);
-        else if (t.kind === 'armForBattle' || t.kind === 'attackUnit' || t.kind === 'attackBuilding') {
-          const saved = state.savedJobs.get(uid);
-          if (saved?.kind === 'workBuilding' && saved.preferredSlots?.[0] === 0 && saved.bid) chefSet.add(saved.bid);
+        if (t.kind === 'chefFetch' && t.kitchen?.bid) staffSet.add(t.kitchen.bid);
+        else if (
+          t.kind === 'workBuilding' &&
+          (t.target?.targetType === 4 || t.target?.targetType === 7) &&
+          (!t.preferredSlots || t.preferredSlots.includes(0))
+        ) {
+          staffSet.add(t.target.bid);
+        }
+      }
+      // Keep building marked as staffed while its slot-0 worker (DJ / Chef) temporarily steps out to eat, sleep, heal, or defend!
+      for (const [uid, saved] of state.savedJobs.entries()) {
+        if (
+          (state.data.entityData[1919 + uid] & 0xff) > 0 &&
+          saved?.kind === 'workBuilding' &&
+          saved.bid &&
+          (!saved.preferredSlots || saved.preferredSlots.includes(0))
+        ) {
+          staffSet.add(saved.bid);
         }
       }
       state.buildingBuilders = bMap;
-      state.kitchenHasChef = chefSet;
+      state.buildingHasStaff = staffSet;
+      state.kitchenHasChef = staffSet;
       renderOriginalMap(ctx, state.data, state, spriteCache);
     } else {
       ctx.fillStyle = '#18241b';

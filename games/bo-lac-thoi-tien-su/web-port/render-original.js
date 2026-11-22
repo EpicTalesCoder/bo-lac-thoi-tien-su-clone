@@ -53,7 +53,7 @@ function getFactionRecoloredSheet(imageCache, sheetIndex, factionCode) {
     // Detect warm skin pixels so we don't tint faces/arms into neon colors
     const isSkin = r > 150 && gr > 95 && gr < r - 12 && b < gr - 8 && b > 45;
     if (isClothingSheet) {
-      if (isSkin && sheetIndex === 20) continue;
+      if (isSkin) continue;
       // Blend strongly toward faction color while preserving pixel-art luminance shading
       const mix = 0.72;
       const tr = Math.min(255, Math.round(tint[0] * (0.45 + lum * 0.85)));
@@ -682,15 +682,16 @@ function drawEntitySprite(ctx, data, entityId, screenX, screenY, dir, fieldOffse
           else spriteOffset += job;
         }
       } else {
-        if (uOwner === 1) paletteSwap = 10;
+        if (uOwner === 1) paletteSwap = 4; // Authentic Red tribe dark skin (pi9/04.png & pi9/05.png)
         else if (uOwner === 2) paletteSwap = 20;
         else if (uOwner === 3) paletteSwap = 30;
         if (partKind === 7 && e[1515 + entityId] === 0) skip = true;
         else if (partKind === 0) {
           bodyPartIdx = az;
-          if (uOwner === 1) spriteOffset++;
+          if (uOwner === 1) spriteOffset++; // Authentic Red tribe child tunic
         } else if (partKind === 9) {
           headPartIdx = az;
+          if (uOwner === 1) paletteSwap = 3; // Authentic Red tribe dark-skin head (pi9/03.png)
           spriteOffset = e[5151 + entityId] & 1;
         } else if (partKind === 5) {
           skip = true;
@@ -1504,11 +1505,12 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
             }
 
             // Authentic original "!" alert animation d(40) centered on building (exact f.java:1773-1774):
-            // Shown when a construction site has 0 builders assigned, when Sàn disco (7) has no DJ in slot 0,
-            // OR when Nhà ăn / Bếp (4) has no Chef in slot 0 (nor a Chef fetching ingredients)!
-            const kitchenNeedsChef =
-              bTypeCur === 4 && !isUnderConst && !hasDj && !state.kitchenHasChef?.has?.(bid);
-            if (isMine && ((isUnderConst && assignedBuilders === 0) || (bTypeCur === 7 && !isUnderConst && !hasDj) || kitchenNeedsChef)) {
+            // Shown when a construction site has 0 builders assigned, when Sàn disco (7) has no DJ assigned to slot 0,
+            // OR when Nhà ăn / Bếp (4) has no Chef assigned to slot 0 (counting workers temporarily out to eat/sleep/fetch)!
+            const isStaffedSlot0 = hasDj || Boolean(state.buildingHasStaff?.has?.(bid) || state.kitchenHasChef?.has?.(bid));
+            const discoNeedsDj = bTypeCur === 7 && !isUnderConst && !isStaffedSlot0;
+            const kitchenNeedsChef = bTypeCur === 4 && !isUnderConst && !isStaffedSlot0;
+            if (isMine && ((isUnderConst && assignedBuilders === 0) || discoNeedsDj || kitchenNeedsChef)) {
               const cx = (e[8383 + bid] - camX) * CELL_WIDTH + bw * 11 - 11;
               const cy = originY + (e[8444 + bid] - camY) * CELL_HEIGHT + bh * 8 - 8;
               drawAnimation(ctx, data, 40, cx, cy, animTick, imageCache);
