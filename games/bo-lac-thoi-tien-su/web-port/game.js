@@ -45,7 +45,7 @@ import {
   MP_MAPS,
   prepareMultiplayerMatch,
 } from './scenario-loader.js';
-import { MultiplayerClient, packWorldSnapshot, applyWorldSnapshot } from './multiplayer.js';
+import { MultiplayerClient, packWorldSnapshot, applyWorldSnapshot } from './multiplayer.js?v=20261122b';
 import {
   DIFFICULTIES,
   parseStoryD0,

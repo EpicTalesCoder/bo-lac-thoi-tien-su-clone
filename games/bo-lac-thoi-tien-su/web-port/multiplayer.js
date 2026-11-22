@@ -384,10 +384,14 @@ class SameOriginHttpRelay {
     this.afterSeq = 0;
     this.afterSnapSeq = 0;
     this.pollTimer = null;
-    this.endpoint =
+    this.endpoints =
       typeof window !== 'undefined' && window.location?.origin?.startsWith('http')
-        ? `${window.location.origin}/api/mp`
-        : '';
+        ? isDiscordActivity()
+          ? [`${window.location.origin}/api/mp`, `${window.location.origin}/.proxy/api/mp`]
+          : [`${window.location.origin}/api/mp`]
+        : [];
+    this.endpointIdx = 0;
+    this.endpoint = this.endpoints[0] || '';
     if (this.endpoint && typeof fetch !== 'undefined') {
       this._poll();
     }
@@ -424,8 +428,14 @@ class SameOriginHttpRelay {
           nextDelay = data.snap ? 150 : 210;
         }
       } else {
-        // e.g. local python static http.server without /api/mp -> back off gracefully
-        nextDelay = 5000;
+        if (!this.ready && this.endpoints.length > 1) {
+          this.endpointIdx = (this.endpointIdx + 1) % this.endpoints.length;
+          this.endpoint = this.endpoints[this.endpointIdx];
+          nextDelay = 400;
+        } else {
+          // e.g. local python static http.server without /api/mp -> back off gracefully
+          nextDelay = 5000;
+        }
       }
     } catch {
       nextDelay = 1200;
@@ -666,7 +676,7 @@ export class MultiplayerClient {
     }
 
     const inDiscord = isDiscordActivity();
-    const apiLabel = inDiscord ? 'Discord API' : 'Cloud API';
+    const apiLabel = inDiscord ? 'Discord API v2.6' : 'Cloud API v2.6';
     const ntfyLabel = inDiscord ? 'Discord Proxy' : 'Cloud HTTPS';
 
     // 1b) Same-Origin /api/mp Serverless Relay (100% same-origin: works inside Discord Activity with ZERO extra URL Mappings!)
@@ -838,7 +848,7 @@ export class MultiplayerClient {
     }
 
     const inDiscord = isDiscordActivity();
-    const apiLabel = inDiscord ? 'Discord API' : 'Cloud API';
+    const apiLabel = inDiscord ? 'Discord API v2.6' : 'Cloud API v2.6';
     const ntfyLabel = inDiscord ? 'Discord Proxy' : 'Cloud HTTPS';
 
     // 1b) Same-Origin /api/mp Serverless Relay join (100% same-origin: works inside Discord Activity with ZERO extra URL Mappings!)
