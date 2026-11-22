@@ -2032,20 +2032,23 @@ function findCourtshipMeetSpot(hut) {
   return null;
 }
 
-function startCourtshipPair(force = false, preferredHut = null) {
+function startCourtshipPair(force = false, preferredHut = null, owner = 0) {
   const d = state.data;
   if (!d) return false;
-  if (state.population >= state.housingCap) return false;
+  const ownerPop = getVillagerIds(owner).length;
+  const ownerHuts = getPlayerBuildings(owner).filter((b) => !b.underConstruction && b.targetType === 2);
+  const ownerCap = owner === (state.localTribe ?? 0)
+    ? state.housingCap
+    : Math.max(6, 6 + ownerHuts.length * 6);
+  if (ownerPop >= ownerCap) return false;
 
-  // Allow 1 active courtship pair at a time unless forced
-  for (const t of state.tasks.values()) {
-    if (t.kind === 'courtship') return false;
+  // Allow 1 active courtship pair per tribe at a time
+  for (const [uid, t] of state.tasks.entries()) {
+    if (t.kind === 'courtship' && ((uid > 50 ? 1 : 0) === owner)) return false;
   }
 
   const e = d.entityData;
-  const huts = preferredHut
-    ? [preferredHut]
-    : getPlayerBuildings().filter((b) => !b.underConstruction && b.targetType === 2);
+  const huts = preferredHut ? [preferredHut] : ownerHuts;
   if (huts.length === 0) return false;
 
   // Pick a Lều with < 2 occupants and a clear meeting spot in front
@@ -2082,7 +2085,7 @@ function startCourtshipPair(force = false, preferredHut = null) {
     return task.kind === 'move';
   };
 
-  const ids = getVillagerIds();
+  const ids = getVillagerIds(owner);
   const males = ids.filter((id) => (e[1515 + id] & 0xff) === 0 && isEligible(id));
   const females = ids.filter((id) => (e[1515 + id] & 0xff) === 1 && isEligible(id));
   if (males.length === 0 || females.length === 0) return false;
@@ -3201,9 +3204,48 @@ function stepAiCommander() {
   const homeX = home ? home.x + Math.floor(home.w / 2) : (e[redUnits[0]] & 0xff);
   const homeY = home ? home.y + Math.floor(home.h / 2) : (e[101 + redUnits[0]] & 0xff);
   const adults = redUnits.filter((id) => (e[1414 + id] & 0xff) >= 12);
+  if (adults.length === 0) return false;
+
+  const redHuts = redBlds.filter((b) => !b.underConstruction && b.targetType === 2);
+  const redHousingCap = Math.max(6, 6 + redHuts.length * 6);
+  // Always keep a core home workforce (~55%, minimum 4 adults) running the village!
+  const minHomeReserve = Math.max(4, Math.ceil(adults.length * 0.55));
   let changed = false;
 
-  // 1. Base Defense: if any Blue unit is near a Red building, intercept with idle/gathering Red adults!
+  // Helper: check if an adult is staffing a vital village role (Chef, Blacksmith, Shaman, Builder, Courtship, Eating/Resting)
+  const isStaffedAtType = (id, bType) => {
+    const t = state.tasks.get(id);
+    const bid = isUnitInsideBuilding(d, id) ? (e[4444 + id] & 0xff) : (t?.target?.bid || t?.workshop?.bid || t?.trainBld?.bid || 0);
+    if (!bid) return false;
+    const bld = redBlds.find((b) => b.bid === bid);
+    return bld?.targetType === bType;
+  };
+  const isProtectedHomeWorker = (id) => {
+    const t = state.tasks.get(id);
+    if (t && (t.kind === 'build' || t.kind === 'buildFetch' || t.kind === 'courtship' || t.kind === 'eat' || t.kind === 'rest')) {
+      return true;
+    }
+    return isStaffedAtType(id, 4) || isStaffedAtType(id, 0) || isStaffedAtType(id, 8);
+  };
+  const getCombatScore = (id) => {
+    const wId = e[6565 + id] & 0xff;
+    const meleeLv = e[1717 + id] & 0xff;
+    const throwLv = e[1616 + id] & 0xff;
+    const hp = e[1919 + id] & 0xff;
+    return (wId < 6 ? 12 : 0) + Math.max(meleeLv, throwLv) * 4 + (hp >= 70 ? 3 : 0);
+  };
+  const pickWorkerForRole = (allowGatherer = true) => {
+    const idle = adults.find((id) => !state.tasks.has(id) && !isUnitInsideBuilding(d, id));
+    if (idle) return idle;
+    if (!allowGatherer) return 0;
+    return adults.find((id) => {
+      if (isUnitInsideBuilding(d, id) || isProtectedHomeWorker(id)) return false;
+      const t = state.tasks.get(id);
+      return t && (t.kind === 'gather' || t.kind === 'return');
+    }) || 0;
+  };
+
+  // 1. Smart Base Defense: if any Blue unit approaches Red's village, dispatch a measured defense squad (never pull the whole village)
   let intruder = null;
   for (const bu of blueUnits) {
     if (isUnitInsideBuilding(d, bu)) continue;
@@ -3215,45 +3257,52 @@ function stepAiCommander() {
     }
   }
   if (intruder) {
-    let defenders = 0;
-    for (const id of adults) {
+    const maxDefenders = Math.min(4, Math.max(2, Math.floor(adults.length * 0.5)));
+    let defenders = adults.filter((id) => {
       const t = state.tasks.get(id);
-      if (t && (t.kind === 'attackUnit' || t.kind === 'attackBuilding' || t.kind === 'armForBattle')) {
-        defenders++;
-        continue;
-      }
-      if (!t || t.kind === 'gather' || t.kind === 'return') {
-        if (defenders < 4) {
-          if (assignAttackTask(id, 'unit', intruder)) {
-            defenders++;
-            changed = true;
-          }
+      return t && (t.kind === 'attackUnit' || t.kind === 'attackBuilding' || t.kind === 'armForBattle');
+    }).length;
+    if (defenders < maxDefenders) {
+      const defCandidates = adults
+        .filter((id) => {
+          if (isUnitInsideBuilding(d, id)) return false;
+          if (adults.length > 3 && isProtectedHomeWorker(id)) return false;
+          const t = state.tasks.get(id);
+          return !t || t.kind === 'gather' || t.kind === 'return' || t.kind === 'workBuilding';
+        })
+        .sort((a, b) => getCombatScore(b) - getCombatScore(a));
+      for (const id of defCandidates) {
+        if (defenders >= maxDefenders) break;
+        if (assignAttackTask(id, 'unit', intruder)) {
+          defenders++;
+          changed = true;
         }
       }
     }
-    if (defenders > 0) return changed;
   }
 
-  // 2. Finish any under-construction Red buildings first
+  // 2. Construction: finish any under-construction Red buildings, or expand village naturally
   const unfinished = redBlds.find((b) => b.underConstruction);
   if (unfinished) {
     const builders = adults.filter((id) => state.tasks.get(id)?.kind === 'build' || state.tasks.get(id)?.kind === 'buildFetch');
     if (builders.length === 0) {
-      const idle = adults.find((id) => !state.tasks.has(id) && !isUnitInsideBuilding(d, id));
-      if (idle && assignBuildTask(idle, unfinished)) changed = true;
+      const worker = pickWorkerForRole(true);
+      if (worker && assignBuildTask(worker, unfinished)) changed = true;
     }
-  } else if (r1 && (r1[1] || 0) >= 14 && (r1[2] || 0) >= 6 && state.animTick % 88 === 0) {
-    // 3. Build key buildings in authentic order: Lều(2) -> Bếp(4) -> Kho vũ khí(0) -> Phòng tập(1) -> Khu tập ném(5)
-    const wantOrder = [2, 4, 0, 1, 5];
-    const desiredType = wantOrder.find((bt) => !redBlds.some((b) => b.targetType === bt));
+  } else if (r1 && (r1[1] || 0) >= 12 && (r1[2] || 0) >= 6 && state.animTick % 88 === 0) {
+    // Build key village buildings in authentic order, plus extra Lều when near housing cap
+    const wantOrder = [2, 4, 0, 1, 5, 7];
+    let desiredType = wantOrder.find((bt) => !redBlds.some((b) => b.targetType === bt));
+    if (desiredType === undefined && redUnits.length >= redHousingCap - 1 && redHuts.length < 3) {
+      desiredType = 2; // Build another Lều to keep growing
+    }
     if (desiredType !== undefined) {
       const spec = getBuildingSpec(d, desiredType);
       if ((r1[1] || 0) >= spec.wood && (r1[2] || 0) >= spec.stone && (r1[3] || 0) >= spec.bones) {
-        const idle = adults.find((id) => !state.tasks.has(id) && !isUnitInsideBuilding(d, id));
-        if (idle) {
-          // Search a valid build spot near Red home
+        const worker = pickWorkerForRole(true);
+        if (worker) {
           let placedBid = 0;
-          for (let r = 3; r <= 11 && !placedBid; r++) {
+          for (let r = 3; r <= 12 && !placedBid; r++) {
             for (let dy = -r; dy <= r && !placedBid; dy += 2) {
               for (let dx = -r; dx <= r && !placedBid; dx += 2) {
                 const bx = homeX + dx;
@@ -3274,7 +3323,7 @@ function stepAiCommander() {
                       owner: 1,
                     });
                     const newBld = getPlayerBuildings(1).find((b) => b.bid === placedBid);
-                    if (newBld) assignBuildTask(idle, newBld);
+                    if (newBld) assignBuildTask(worker, newBld);
                     changed = true;
                   }
                 }
@@ -3286,58 +3335,132 @@ function stepAiCommander() {
     }
   }
 
-  // 4. Staff Kho vũ khí (blacksmith) & queue weapons if Red has one
+  // 3. Village Life — Staff Bếp (Kitchen, type 4) with 1 Chef so Red villagers eat normally
+  const kitchen = redBlds.find((b) => !b.underConstruction && b.targetType === 4);
+  if (kitchen && adults.length >= 3) {
+    const hasChef = adults.some((id) => isStaffedAtType(id, 4));
+    if (!hasChef) {
+      const chef = pickWorkerForRole(adults.length >= 4);
+      if (chef && assignWorkAtBuilding(chef, kitchen, [0])) changed = true;
+    }
+  }
+
+  // 4. Village Life — Staff Kho vũ khí (Workshop, type 0) with 1 Blacksmith & craft weapons
   const workshop = redBlds.find((b) => !b.underConstruction && b.targetType === 0);
-  if (workshop) {
+  if (workshop && adults.length >= 4) {
     const q = getWeaponQueue(workshop.bid);
     const totalQueued = q.reduce((s, n) => s + n, 0);
     if (totalQueued === 0 && r1 && (r1[1] || 0) >= 6) {
-      q[0] = 2; // Queue 2 Dùi cui
-      if ((r1[2] || 0) >= 5) q[1] = 2; // Queue 2 Đá ném
+      q[0] = 2; // Dùi cui
+      if ((r1[2] || 0) >= 5) q[1] = 2; // Đá ném
+      if ((r1[1] || 0) >= 14 && (r1[2] || 0) >= 10) q[2] = 1; // Giáo
     }
-    const hasSmith = adults.some((id) => state.tasks.get(id)?.target?.bid === workshop.bid || state.tasks.get(id)?.workshop?.bid === workshop.bid);
+    const hasSmith = adults.some((id) => isStaffedAtType(id, 0));
     if (!hasSmith) {
-      const idle = adults.find((id) => !state.tasks.has(id) && !isUnitInsideBuilding(d, id));
-      if (idle && assignWorkAtBuilding(idle, workshop, [0])) changed = true;
+      const smith = pickWorkerForRole(adults.length >= 5);
+      if (smith && assignWorkAtBuilding(smith, workshop, [0])) changed = true;
     }
   }
 
-  // 5. Assign idle adult Red villagers to gather resources continuously (food, wood, stone)
+  // 5. Village Life — Train 1–2 warriors in Phòng tập đánh (1) / Khu tập ném (5) when economy is healthy
+  const trainingBlds = redBlds.filter((b) => !b.underConstruction && (b.targetType === 1 || b.targetType === 5));
+  if (trainingBlds.length > 0 && adults.length >= 5 && (r1?.[0] || 0) >= 8) {
+    const maxTrainees = diff === 'easy' ? 1 : 2;
+    const currentTrainees = adults.filter((id) => isStaffedAtType(id, 1) || isStaffedAtType(id, 5));
+    if (currentTrainees.length < maxTrainees) {
+      const trainBld = trainingBlds[currentTrainees.length % trainingBlds.length];
+      const trainee = adults.find((id) => {
+        if (isUnitInsideBuilding(d, id) || isProtectedHomeWorker(id)) return false;
+        if (isStaffedAtType(id, 1) || isStaffedAtType(id, 5)) return false;
+        const t = state.tasks.get(id);
+        if (t && t.kind !== 'gather' && t.kind !== 'return') return false;
+        const skillOff = trainBld.targetType === 5 ? 1616 : 1717;
+        return (e[skillOff + id] & 0xff) < 4;
+      });
+      if (trainee && assignWorkAtBuilding(trainee, trainBld, [0, 1])) changed = true;
+    }
+  }
+
+  // 6. Village Life — Natural Reproduction (Courtship in Lều) so Red replenishes population like a real tribe
+  if (redHuts.length > 0 && redUnits.length < redHousingCap && redUnits.length < 14 && (r1?.[0] || 0) >= 10 && state.animTick % 264 === 0) {
+    if (startCourtshipPair(false, null, 1)) changed = true;
+  }
+
+  // 7. Balanced Home Gathering: keep idle adults gathering Food, Wood, Stone around Red's home
   const idleAdults = adults.filter((id) => !state.tasks.has(id) && !isUnitInsideBuilding(d, id));
-  for (const id of idleAdults) {
-    const ux = e[id] & 0xff;
-    const uy = e[101 + id] & 0xff;
-    const preferType = (r1?.[0] || 0) < 15 ? 'food' : (r1?.[1] || 0) <= (r1?.[2] || 0) ? 'wood' : 'stone';
-    const bestNode =
-      findNearestGatherable(ux, uy, 14, preferType, true) ||
-      findNearestGatherable(ux, uy, 14, null, true);
-    if (bestNode && assignGatherTask(id, bestNode)) {
-      changed = true;
+  if (idleAdults.length > 0) {
+    let foodG = 0;
+    let woodG = 0;
+    let stoneG = 0;
+    for (const id of adults) {
+      const t = state.tasks.get(id);
+      if (t && (t.kind === 'gather' || t.kind === 'return')) {
+        if (t.resType === 'food') foodG++;
+        else if (t.resType === 'wood') woodG++;
+        else if (t.resType === 'stone') stoneG++;
+      }
+    }
+    for (const id of idleAdults) {
+      const ux = e[id] & 0xff;
+      const uy = e[101 + id] & 0xff;
+      let preferType = 'food';
+      if ((r1?.[0] || 0) < 18 || foodG < 2) {
+        preferType = 'food';
+        foodG++;
+      } else if (woodG <= stoneG || (r1?.[1] || 0) < (r1?.[2] || 0)) {
+        preferType = 'wood';
+        woodG++;
+      } else {
+        preferType = 'stone';
+        stoneG++;
+      }
+      const bestNode =
+        findNearestGatherable(ux, uy, 16, preferType, true) ||
+        findNearestGatherable(ux, uy, 16, null, true);
+      if (bestNode && assignGatherTask(id, bestNode)) {
+        changed = true;
+      }
     }
   }
 
-  // 6. Coordinated Attack Waves against Blue Tribe (scaled by difficulty)
-  const waveInterval = diff === 'easy' ? 820 : diff === 'hard' ? 340 : 520;
-  const waveSize = diff === 'easy' ? 2 : diff === 'hard' ? 5 : 3;
-  if (state.animTick >= 360 && state.animTick % waveInterval < 22) {
+  // 8. Small, Measured Raid Squads ONLY — NEVER send the whole tribe!
+  // Only raid when Red has enough spare adults above minHomeReserve (>= 2 spare soldiers).
+  const firstRaidTick = diff === 'easy' ? 720 : diff === 'hard' ? 420 : 560;
+  const waveInterval = diff === 'easy' ? 920 : diff === 'hard' ? 480 : 680;
+  const maxSquadSize = diff === 'easy' ? 2 : diff === 'hard' ? 4 : 3;
+  const spareForRaid = Math.max(0, adults.length - minHomeReserve);
+  const allowedSquad = Math.min(maxSquadSize, spareForRaid);
+
+  if (!intruder && allowedSquad >= 2 && state.animTick >= firstRaidTick && state.animTick % waveInterval < 22) {
     const attackers = adults.filter((id) => {
       const t = state.tasks.get(id);
       return t && (t.kind === 'attackUnit' || t.kind === 'attackBuilding' || t.kind === 'armForBattle');
     });
-    if (attackers.length < waveSize) {
-      const candidates = adults.filter((id) => {
-        if (isUnitInsideBuilding(d, id)) return false;
-        const t = state.tasks.get(id);
-        return !t || t.kind === 'gather' || t.kind === 'return';
-      });
+    if (attackers.length < allowedSquad) {
+      const candidates = adults
+        .filter((id) => {
+          if (isProtectedHomeWorker(id)) return false;
+          const t = state.tasks.get(id);
+          // Can draft spare idle/gathering adults, or trained warriors (Lv >= 2) finishing training
+          if (isUnitInsideBuilding(d, id)) {
+            const isTrained = (isStaffedAtType(id, 1) || isStaffedAtType(id, 5)) &&
+              Math.max(e[1717 + id] & 0xff, e[1616 + id] & 0xff) >= 2;
+            return isTrained;
+          }
+          return !t || t.kind === 'gather' || t.kind === 'return';
+        })
+        .sort((a, b) => getCombatScore(b) - getCombatScore(a));
+
       const targetBld = blueBlds[0];
       const targetUnit = blueUnits.find((u) => !isUnitInsideBuilding(d, u));
       const tx = targetUnit ? (e[targetUnit] & 0xff) : targetBld ? targetBld.x : 0;
       const ty = targetUnit ? (e[101 + targetUnit] & 0xff) : targetBld ? targetBld.y : 0;
-      const needCount = Math.min(waveSize - attackers.length, Math.max(1, candidates.length - 2));
+      const needCount = Math.min(allowedSquad - attackers.length, candidates.length);
+
       for (let i = 0; i < needCount; i++) {
         const id = candidates[i];
         if (!id) break;
+        if (isUnitInsideBuilding(d, id)) ensureUnitOutside(id);
         const storage = findNearestDropoff(e[id] & 0xff, e[101 + id] & 0xff, 1);
         const curW = e[6565 + id] & 0xff;
         if (curW === 9 && storage) {
@@ -5359,9 +5482,11 @@ function stepSimulation() {
         if (pair.maleReady && pair.femaleReady) {
           pair.stage = 'giveFlower';
           pair.giftTicks = 0;
-          const mName = getVillagerName(d, pair.maleId);
-          const fName = getVillagerName(d, pair.femaleId);
-          state.message = `💐 ${mName} đang tặng hoa cho ${fName} trước Lều!`;
+          if ((pair.maleId > 50 ? 1 : 0) === (state.localTribe ?? 0)) {
+            const mName = getVillagerName(d, pair.maleId);
+            const fName = getVillagerName(d, pair.femaleId);
+            state.message = `💐 ${mName} đang tặng hoa cho ${fName} trước Lều!`;
+          }
           uiChanged = true;
         } else if (pair.waitTicks > 220) {
           cancelPair();
