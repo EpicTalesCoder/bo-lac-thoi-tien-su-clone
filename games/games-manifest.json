@@ -16,5 +16,23 @@
       "10 màn Chiến dịch + Trận tùy chỉnh",
       "5 ngôn ngữ gốc (/0../4) & Web Audio MIDI (/sa)"
     ]
+  },
+  {
+    "slug": "green-farm-3",
+    "title": "Green Farm 3",
+    "originalTitle": "Green Farm 3",
+    "vendor": "Gameloft",
+    "resolution": "240×320",
+    "genre": "Mô phỏng nông trại",
+    "jarFile": "games/green-farm-3/original/green-farm-3-240x320.jar",
+    "playUrl": "./games/green-farm-3/web-port/index.html",
+    "directGameUrl": "./games/green-farm-3/web-port/index.html",
+    "coverImage": "./games/green-farm-3/web-port/assets/icon.png",
+    "status": "in-progress",
+    "features": [
+      "Original JAR preserved (SHA-256 verified)",
+      "44.307 dòng decompiled (CFR) + bytecode evidence",
+      "Web-port Phaser 3 shell — port in-progress"
+    ]
   }
 ]
