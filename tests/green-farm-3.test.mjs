@@ -125,3 +125,106 @@ test('assets audio + sprite packs còn nguyên từ Phase A', () => {
   const packs = readdirSync(spritesDir);
   assert.deepEqual(packs.sort(), ['pack11', 'pack2', 'pack5', 'pack7', 'pack8']);
 });
+
+/* ================= Phase C: nông trại ================= */
+
+const NOW = 1_000_000_000;
+
+test('CROPS: 4 cây, nhãn trỏ vào text gốc tồn tại, kinh tế có lãi', () => {
+  const data = JSON.parse(readFileSync(path.join(PORT, 'assets', 'text', 'en.json'), 'utf8'));
+  assert.equal(core.CROPS.length, 4);
+  const ids = core.CROPS.map((c) => c.id);
+  assert.deepEqual(ids, ['wheat', 'lettuce', 'lemon', 'apple']);
+  for (const c of core.CROPS) {
+    assert.ok(core.text(data, c.nameRef).length > 0, `label ${c.id}`);
+    assert.ok(c.growMs >= 60000, 'grow ít nhất 60s');
+    assert.ok(c.sell > c.cost, `${c.id} phải có lãi`);
+  }
+});
+
+test('farm: trồng trừ xu, tưới, chờ đủ growMs thì chín, gặt cộng kho', () => {
+  let farm = core.newFarm();
+  assert.equal(farm.coins, core.START_COINS);
+  // trồng lúa mì ở ô 0
+  let res = core.plantAt(farm, 0, NOW);
+  assert.equal(res.error, null);
+  assert.equal(res.farm.coins, core.START_COINS - 10);
+  assert.equal(res.farm.plots[0].crop, 'wheat');
+  // trồng đè ô đã có -> lỗi
+  res = core.plantAt(res.farm, 0, NOW);
+  assert.equal(res.error, 'occupied');
+  // chưa tưới: chưa chín
+  assert.equal(core.plotState(res.farm.plots[0], NOW + 999999), core.PLOT_GROWING);
+  // tưới
+  res = core.waterAt(res.farm, 0, NOW);
+  assert.equal(res.error, null);
+  assert.equal(res.farm.plots[0].wateredAt, NOW);
+  // chưa đủ thời gian -> growing
+  assert.equal(core.plotState(res.farm.plots[0], NOW + 59999), core.PLOT_GROWING);
+  // gặt non -> lỗi
+  res = core.harvestAt(res.farm, 0, NOW + 59999);
+  assert.equal(res.error, 'not_ready');
+  // đủ 60s -> ready -> gặt
+  assert.equal(core.plotState(res.farm.plots[0], NOW + 60000), core.PLOT_READY);
+  res = core.harvestAt(res.farm, 0, NOW + 60000);
+  assert.equal(res.error, null);
+  assert.equal(res.farm.inv.wheat, 1);
+  assert.equal(res.farm.plots[0], null);
+});
+
+test('farm: không đủ xu -> no_coins; farmTap context đúng thứ tự', () => {
+  let farm = { ...core.newFarm(), coins: 5 };
+  const res = core.plantAt(farm, 3, NOW);
+  assert.equal(res.error, 'no_coins');
+  // farmTap: trống -> trồng
+  farm = core.newFarm();
+  let r = core.farmTap(farm, 5, NOW);
+  assert.equal(r.error, null);
+  assert.equal(r.farm.plots[5].crop, 'wheat');
+  // farmTap: trồng rồi -> tưới
+  r = core.farmTap(r.farm, 5, NOW);
+  assert.equal(r.farm.plots[5].wateredAt, NOW);
+  // farmTap: đang lớn -> không làm gì
+  const r2 = core.farmTap(r.farm, 5, NOW + 1000);
+  assert.equal(r2.farm, r.farm);
+});
+
+test('sellAll: bán hết kho -> coins, kho về 0', () => {
+  let farm = core.newFarm();
+  farm = { ...farm, inv: { wheat: 3, lettuce: 2, lemon: 1, apple: 0 } };
+  const before = farm.coins;
+  const out = core.sellAll(farm);
+  assert.equal(out.coins, before + 3 * 18 + 2 * 28 + 1 * 45);
+  assert.deepEqual([out.inv.wheat, out.inv.lettuce, out.inv.lemon, out.inv.apple], [0, 0, 0, 0]);
+});
+
+test('save/load: round-trip khít, corrupt -> fallback null, plot lạ -> null', () => {
+  let farm = core.newFarm();
+  const r = core.plantAt(farm, 2, NOW);
+  farm = core.waterAt(r.farm, 2, NOW).farm;
+  farm = { ...farm, selectedCrop: 2 };
+  const json = core.serializeFarm(farm);
+  const back = core.deserializeFarm(json);
+  assert.equal(back.coins, farm.coins);
+  assert.equal(back.selectedCrop, 2);
+  assert.equal(back.plots[2].crop, 'wheat');
+  assert.equal(back.plots[2].wateredAt, NOW);
+  assert.equal(back.plots[0], null);
+  assert.equal(core.deserializeFarm('{corrupt!!'), null);
+  assert.equal(core.deserializeFarm('{"v":9}'), null);
+  // plot với crop lạ bị neutralise
+  const weird = core.deserializeFarm(JSON.stringify({ v: 1, coins: 10, inv: {}, plots: [{ crop: 'bomb' }, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null] }));
+  assert.equal(weird.plots[0], null);
+});
+
+test('plotIndexAt/toolbarIndexAt: toạ độ canvas -> ô đúng', () => {
+  const gx = (240 - 4 * 36) / 2; // 48
+  assert.equal(core.plotIndexAt(gx + 10, 70 + 10), 0);
+  assert.equal(core.plotIndexAt(gx + 36 + 10, 70 + 46 + 10), 5); // hàng 1, cột 1
+  assert.equal(core.plotIndexAt(5, 5), -1);
+  assert.equal(core.plotIndexAt(gx + 33, 75), -1); // rơi vào gap
+  assert.equal(core.toolbarIndexAt(20, 270), 0);
+  assert.equal(core.toolbarIndexAt(60, 270), 0); // gap 52..64 vẫn ô 0? không: 60-12=48 -> ô 0
+  assert.equal(core.toolbarIndexAt(70, 270), 1);
+  assert.equal(core.toolbarIndexAt(70, 100), -1); // ngoài hàng toolbar
+});
