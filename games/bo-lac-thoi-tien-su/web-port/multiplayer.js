@@ -988,6 +988,8 @@ export class MultiplayerClient {
         this.callbacks.onStartMatch?.(msg.mapIdx ?? this.lobby.mapIdx, this.getMyTribe(), activeTribes);
       } else if (msg.type === 'snap' && msg.snap) {
         this.callbacks.onSnapshot?.(msg.snap);
+      } else if (msg.type === 'tribeEvent') {
+        this.callbacks.onTribeEvent?.(msg);
       } else if (msg.type === 'returnLobby' && msg.lobby) {
         this.lobby = { ...this.lobby, ...msg.lobby, status: 'lobby' };
         this.emitLobby();

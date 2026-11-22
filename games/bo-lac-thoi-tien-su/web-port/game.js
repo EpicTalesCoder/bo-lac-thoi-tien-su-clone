@@ -589,30 +589,41 @@ function applyUnitDamage(attackerId, targetId, dmg) {
     }
 
     const deadName = getVillagerName(d, targetId);
-    const deadOwner = targetId > 50 ? 1 : 0;
+    const deadOwner = getUnitOwner(d, targetId);
     const localTribe = state.localTribe ?? 0;
+    const survivors = getVillagerIds(deadOwner);
+    if (d.resources?.[deadOwner]) {
+      d.resources[deadOwner][11] = survivors.length;
+    }
     if (deadOwner !== localTribe) {
-      // Enemy died: award +1 bone & kill stat, but NEVER show the Panel 9 "... đã chết!" notification (exact b.java:3727)!
-      state.tools += 1;
-      state.missionStats.enemiesKilled++;
-      syncResourcesToData();
-    } else {
-      state.population = getVillagerIds().length;
-      syncResourcesToData();
-      addPopup(tx, ty, `${deadName} đã chết!`, '#ff5252');
-      showWarning(`💀 ${deadName} đã chết!`);
-      state.message = `💀 ${deadName} đã chết!`;
-      // Elect new Chief if Chief died!
-      if (d.resources?.[localTribe]?.[17] === targetId) {
-        const survivors = getVillagerIds();
-        if (survivors.length > 0) {
-          d.resources[localTribe][17] = survivors[0];
-          const newChief = getVillagerName(d, survivors[0]);
-          state.message = `💀 ${deadName} đã chết! ${newChief} trở thành Tộc trưởng mới!`;
-        } else {
-          state.message = 'Toàn bộ bộ lạc đã tử trận!';
-        }
+      if (attackerId > 0 && getUnitOwner(d, attackerId) === localTribe) {
+        state.tools += 1;
+        state.missionStats.enemiesKilled++;
+        syncResourcesToData(localTribe);
       }
+    } else {
+      state.population = survivors.length;
+      syncResourcesToData(localTribe);
+    }
+    let deathMsg = `💀 ${deadName} đã chết!`;
+    // Elect new Chief if this tribe's Chief died!
+    if (d.resources?.[deadOwner]?.[17] === targetId) {
+      if (survivors.length > 0) {
+        d.resources[deadOwner][17] = survivors[0];
+        const newChief = getVillagerName(d, survivors[0]);
+        deathMsg = `💀 ${deadName} đã chết! ${newChief} trở thành Tộc trưởng mới!`;
+      } else {
+        deathMsg = 'Toàn bộ bộ lạc đã tử trận!';
+      }
+    }
+    // Skip duplicate popup when dmg >= 200 (old-age death sends its own message right after)
+    if (dmg < 200) {
+      notifyTribeEvent(deadOwner, deathMsg, `💀 ${deadName} đã chết!`, {
+        x: tx,
+        y: ty,
+        text: `${deadName} đã chết!`,
+        color: '#ff5252',
+      });
     }
     return true;
   }
@@ -694,6 +705,16 @@ function addHitEffect(wx, wy, kind = 'melee') {
     age: 0,
     duration: kind === 'building' ? 7 : 6,
   });
+}
+
+function notifyTribeEvent(tribe, message, warning = '', popup = null) {
+  if (tribe === (state.localTribe ?? 0)) {
+    if (message) state.message = message;
+    if (warning) showWarning(warning);
+    if (popup) addPopup(popup.x, popup.y, popup.text, popup.color || '#fff37b');
+  } else if (state.mpMode && mpClient?.role === 'host') {
+    mpClient.sendRaw({ type: 'tribeEvent', tribe, message, warning, popup });
+  }
 }
 
 function launchProjectile(attackerId, targetType, targetId, x0, y0, x1, y1, weaponId, dmg) {
@@ -4806,18 +4827,22 @@ function stepSimulation() {
         if (ownerPop < ownerCap) {
           const newId = spawnNewbornVillager(d, hut.x + 1, hut.y + hut.h, unitOwner);
           if (newId > 0) {
+            const newPop = getVillagerIds(unitOwner).length;
             if (d.resources?.[unitOwner]) {
-              d.resources[unitOwner][11] = getVillagerIds(unitOwner).length;
+              d.resources[unitOwner][11] = newPop;
               d.resources[unitOwner][16] = ownerCap;
             }
             if (unitOwner === (state.localTribe ?? 0)) {
-              state.population = getVillagerIds(unitOwner).length;
+              state.population = newPop;
               syncResourcesToData(unitOwner);
-              const newName = getVillagerName(d, newId);
-              addPopup(hut.x + 1, hut.y, `${newName} được sinh ra!`, '#9cff7b');
-              showWarning(`👶 ${newName} được sinh ra!`);
-              state.message = `👶 ${newName} được sinh ra! (Dân số: ${state.population}/${state.housingCap})`;
             }
+            const newName = getVillagerName(d, newId);
+            notifyTribeEvent(
+              unitOwner,
+              `👶 ${newName} được sinh ra! (Dân số: ${newPop}/${ownerCap})`,
+              `👶 ${newName} được sinh ra!`,
+              { x: hut.x + 1, y: hut.y, text: `${newName} được sinh ra!`, color: '#9cff7b' }
+            );
             // Switch couple back to normal sleeping state 1 (glowing light only) after birth
             let u = e[8993 + hut.bid];
             let g = 0;
@@ -5744,11 +5769,22 @@ function stepSimulation() {
             if (pairPop < pairCap) {
               const newId = spawnNewbornVillager(d, pair.hut.x + 1, pair.hut.y + pair.hut.h, pairOwner);
               if (newId > 0) {
-                if (pairOwner === (state.localTribe ?? 0)) {
-                  state.population = getVillagerIds(pairOwner).length;
-                  const babyName = getVillagerName(d, newId);
-                  state.message = `🎉 Em bé sơ sinh ${babyName} đã chào đời tại Lều!`;
+                const newPop = getVillagerIds(pairOwner).length;
+                if (d.resources?.[pairOwner]) {
+                  d.resources[pairOwner][11] = newPop;
+                  d.resources[pairOwner][16] = pairCap;
                 }
+                if (pairOwner === (state.localTribe ?? 0)) {
+                  state.population = newPop;
+                  syncResourcesToData(pairOwner);
+                }
+                const babyName = getVillagerName(d, newId);
+                notifyTribeEvent(
+                  pairOwner,
+                  `🎉 Em bé sơ sinh ${babyName} đã chào đời tại Lều! (Dân số: ${newPop}/${pairCap})`,
+                  `👶 ${babyName} được sinh ra!`,
+                  { x: pair.hut.x + 1, y: pair.hut.y, text: `${babyName} được sinh ra!`, color: '#9cff7b' }
+                );
               }
             }
             for (const uid of [pair.maleId, pair.femaleId]) {
@@ -6317,9 +6353,7 @@ function stepVillagerNeeds() {
             e[1919 + id] = e[6767 + id];
             syncUnitAvatar(d, id, id);
             setUnitAnim(id, 8, 0);
-            if (tribe === (state.localTribe ?? 0)) {
-              state.message = `🎂 ${getVillagerName(d, id)} đã trưởng thành và sẵn sàng lao động!`;
-            }
+            notifyTribeEvent(tribe, `🎂 ${getVillagerName(d, id)} đã trưởng thành và sẵn sàng lao động!`);
             changed = true;
           }
         } else if (!task && !isUnitInsideBuilding(d, id)) {
@@ -6358,13 +6392,17 @@ function stepVillagerNeeds() {
           const chance = Math.min(0.9, baseChance * healthMult);
           if (Math.random() < chance) {
             const nm = getVillagerName(d, id);
+            const uxDead = e[id] & 0xff;
+            const uyDead = e[101 + id] & 0xff;
             if (isUnitInsideBuilding(d, id)) exitBuildingSlot(d, id);
             state.tasks.delete(id);
             applyUnitDamage(0, id, 255);
-            if (tribe === (state.localTribe ?? 0)) {
-              state.message = `💀 ${nm} đã qua đời vì tuổi già (${nextAge} tuổi)!`;
-              showWarning(`💀 ${nm} đã chết vì tuổi già (${nextAge} tuổi)`);
-            }
+            notifyTribeEvent(
+              tribe,
+              `💀 ${nm} đã qua đời vì tuổi già (${nextAge} tuổi)!`,
+              `💀 ${nm} đã chết vì tuổi già (${nextAge} tuổi)`,
+              { x: uxDead, y: uyDead, text: `${nm} đã chết!`, color: '#ff5252' }
+            );
             changed = true;
             continue;
           }
@@ -9401,6 +9439,13 @@ Promise.all([
       },
       onGuestCommand(cmd) {
         executeGuestCommand(cmd);
+      },
+      onTribeEvent(ev) {
+        if (!ev || ev.tribe !== (state.localTribe ?? 0)) return;
+        if (ev.message) state.message = ev.message;
+        if (ev.warning) showWarning(ev.warning);
+        if (ev.popup) addPopup(ev.popup.x, ev.popup.y, ev.popup.text, ev.popup.color || '#fff37b');
+        render();
       },
       onSnapshot(snap) {
         if (!state.data || mpClient?.role !== 'guest') return;
