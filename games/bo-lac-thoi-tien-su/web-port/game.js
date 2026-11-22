@@ -2716,14 +2716,17 @@ function syncTopCombatSkills(uid) {
   e[2626 + uid] = candidates[1].id;
 }
 
-function assignHuntTask(unitId, animalOcc) {
+function assignHuntTask(unitId, animalOcc, defendOnly = false) {
   ensureUnitOutside(unitId);
   setUnitCarry(unitId, 0, 0);
   const aid = animalOcc - 101;
   const e = state.data.entityData;
   const ax = e[9359 + aid] & 0xff;
   const ay = e[9381 + aid] & 0xff;
-  const planned = planUnitPath(unitId, ax, ay, true);
+  const ux = e[unitId] & 0xff;
+  const uy = e[101 + unitId] & 0xff;
+  const inRange = Math.max(Math.abs(ax - ux), Math.abs(ay - uy)) <= getUnitRange(unitId);
+  const planned = inRange ? { path: [], stepProgress: 0 } : planUnitPath(unitId, ax, ay, true);
   if (planned === null) return false;
   state.tasks.set(unitId, {
     kind: 'hunt',
@@ -2731,6 +2734,8 @@ function assignHuntTask(unitId, animalOcc) {
     stepProgress: planned.stepProgress,
     target: { aid, occ: animalOcc, x: ax, y: ay },
     phase: 'attack',
+    defendOnly: Boolean(defendOnly),
+    swingIdx: 0,
     workTicks: 0,
   });
   if (state.selectedUnit === unitId) state.activePath = planned.path;
@@ -4434,14 +4439,15 @@ function stepSimulation() {
       }
 
       if (ahp <= 0) {
-        setUnitAnim(unitId, 8, 0);
         state.tasks.delete(unitId);
+        if (!resumeSavedJob(unitId)) setUnitAnim(unitId, 8, 0);
         uiChanged = true;
         continue;
       }
       const ax = e[9359 + aid] & 0xff;
       const ay = e[9381 + aid] & 0xff;
-      if (Math.max(Math.abs(ax - ux), Math.abs(ay - uy)) > 1) {
+      const range = getUnitRange(unitId);
+      if (Math.max(Math.abs(ax - ux), Math.abs(ay - uy)) > range) {
         const chase = findPath(ux, uy, ax, ay, unitId, true);
         if (chase && chase.length > 0) {
           task.path = chase;
@@ -4449,29 +4455,60 @@ function stepSimulation() {
           continue;
         }
       }
+      // Fight using the villager's ACTUAL equipped weapon (never drop or switch to bare hands!)
+      const wId = e[6565 + unitId] & 0xff;
+      const atk = getWeaponAttackAnim(wId, task.swingIdx || 0);
       e[606 + unitId] = directionFromDelta(ax - ux, ay - uy);
-      // Authentic melee attack animation (anim 25, 6 frames at 2 ticks/frame) — NO dust cloud
-      setUnitAnim(unitId, 25, Math.floor(task.workTicks / 2) % 6);
+      const frame = Math.floor(task.workTicks / 2) % atk.frames;
+      setUnitAnim(unitId, atk.animId, frame);
+      const isHitTick = task.workTicks % 2 === 0 && frame === atk.hitFrame;
       task.workTicks++;
-      if (task.workTicks >= 36) {
-        const aKind = e[9535 + aid] & 0xff;
-        const meatAmt = (d.mapTableData?.[d.mapTableOffsets?.[183] + aKind] & 0xff) || 20;
-        e[9513 + aid] = 0;
-        if (d.occupancy[ay][ax] === 101 + aid) d.occupancy[ay][ax] = 0;
-        const carcassSlot = spawnMeatCarcass(d, ax, ay, meatAmt);
-        const info = getVillagerInfo(unitId);
-        const animalLabel = aKind === 1 ? 'Cọp' : aKind === 0 ? 'Lợn rừng' : 'Hươu';
-        state.tasks.delete(unitId);
-        const carcassTarget = carcassSlot >= 0 ? classifyGatherable(ax, ay) : null;
-        if (carcassTarget && assignGatherTask(unitId, carcassTarget)) {
-          state.message = `🥩 ${info.role} đã săn được ${animalLabel} (${meatAmt} thịt) và đang xẻ thịt vác về kho!`;
-        } else {
-          state.food += Math.min(10, meatAmt);
-          syncResourcesToData();
-          setUnitAnim(unitId, 8, 0);
-          state.message = `🥩 ${info.role} đã săn được ${animalLabel}!`;
+      if (task.workTicks % (atk.frames * 2) === 0) {
+        task.swingIdx = (task.swingIdx || 0) + 1;
+      }
+      if (isHitTick) {
+        if (range > 1) {
+          state.projectiles.push({
+            x0: ux,
+            y0: uy,
+            x1: ax,
+            y1: ay,
+            age: 0,
+            duration: 6,
+            weaponId: wId,
+          });
         }
-        uiChanged = true;
+        const dmg = getUnitDamage(unitId);
+        const nextAhp = Math.max(0, ahp - dmg);
+        e[9513 + aid] = nextAhp;
+        if (nextAhp <= 0) {
+          const aKind = e[9535 + aid] & 0xff;
+          const meatAmt = (d.mapTableData?.[d.mapTableOffsets?.[183] + aKind] & 0xff) || 20;
+          if (d.occupancy[ay][ax] === 101 + aid) d.occupancy[ay][ax] = 0;
+          const carcassSlot = spawnMeatCarcass(d, ax, ay, meatAmt);
+          const info = getVillagerInfo(unitId);
+          const animalLabel = aKind === 1 ? 'Cọp' : aKind === 0 ? 'Lợn rừng' : 'Hươu';
+          state.tasks.delete(unitId);
+          if (task.defendOnly) {
+            // Self-defense against wild predator: DO NOT switch into meat gathering — resume previous task or stand idle!
+            if (!resumeSavedJob(unitId)) setUnitAnim(unitId, 8, 0);
+            if (getUnitOwner(d, unitId) === (state.localTribe ?? 0)) {
+              state.message = `⚔ ${info.role} đã hạ gục ${animalLabel}!`;
+            }
+          } else {
+            // Explicit player hunt command: butcher and haul meat back to Storage
+            const carcassTarget = carcassSlot >= 0 ? classifyGatherable(ax, ay) : null;
+            if (carcassTarget && assignGatherTask(unitId, carcassTarget)) {
+              state.message = `🥩 ${info.role} đã săn được ${animalLabel} (${meatAmt} thịt) và đang xẻ thịt vác về kho!`;
+            } else {
+              state.food += Math.min(10, meatAmt);
+              syncResourcesToData();
+              setUnitAnim(unitId, 8, 0);
+              state.message = `🥩 ${info.role} đã săn được ${animalLabel}!`;
+            }
+          }
+          uiChanged = true;
+        }
       }
     } else if (task.kind === 'rest') {
       const hut = task.target;
@@ -5631,7 +5668,7 @@ function stepWildAnimals() {
       if (Math.max(Math.abs(p.x - ax), Math.abs(p.y - ay)) > 14) continue;
       const t = state.tasks.get(p.uid);
       if (t && (t.kind === 'hunt' || t.kind === 'attackUnit' || t.kind === 'armForBattle' || t.kind === 'attackBuilding')) continue;
-      if (assignHuntTask(p.uid, 101 + aid)) called++;
+      if (assignHuntTask(p.uid, 101 + aid, true)) called++;
     }
     if (called > 0 && victimUid <= 50 === ((state.localTribe ?? 0) === 0)) {
       state.message = `⚔ ${called} dân làng chạy tới cứu đồng bạn bị thú dữ tấn công!`;
@@ -5752,7 +5789,7 @@ function stepWildAnimals() {
             if ((e[1919 + nearest.uid] & 0xff) > 0 && nearest.age >= 12) {
               const curT = state.tasks.get(nearest.uid);
               if (!curT || (curT.kind !== 'hunt' && curT.kind !== 'attackUnit' && curT.kind !== 'armForBattle')) {
-                assignHuntTask(nearest.uid, 101 + aid);
+                assignHuntTask(nearest.uid, 101 + aid, true);
               }
             }
             // After each bite, circle around the target to a new adjacent tile so the fight keeps moving
@@ -5794,7 +5831,7 @@ function stepWildAnimals() {
               rallyDefenders(aid, nearest.uid);
               const curT = state.tasks.get(nearest.uid);
               if (!curT || (curT.kind !== 'hunt' && curT.kind !== 'attackUnit' && curT.kind !== 'armForBattle')) {
-                assignHuntTask(nearest.uid, 101 + aid);
+                assignHuntTask(nearest.uid, 101 + aid, true);
               }
             }
             continue;
