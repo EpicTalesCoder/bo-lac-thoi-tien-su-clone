@@ -8904,9 +8904,13 @@ Promise.all([
         }
       }
       if (mpRoomMsgEl) {
-        mpRoomMsgEl.textContent = !lob.guestJoined
-          ? `Gửi mã phòng ${lob.roomCode} hoặc bấm "Mở Tab 2" để đối thủ vào phòng (${lob.transport || 'Đang mở kết nối...'}).`
-          : `Đã kết nối (${lob.transport || 'P2P'})! Cả 2 hãy bấm Sẵn sàng để bắt đầu trận đấu.`;
+        if (lob.statusNote && !lob.guestJoined) {
+          mpRoomMsgEl.textContent = lob.statusNote;
+        } else {
+          mpRoomMsgEl.textContent = !lob.guestJoined
+            ? `Gửi mã phòng ${lob.roomCode} cho đối thủ qua mạng (${lob.transport || 'Đang mở kết nối...'}).`
+            : `Đã kết nối (${lob.transport || 'Cloud WSS'})! Cả 2 hãy bấm Sẵn sàng để bắt đầu trận đấu.`;
+        }
       }
     };
 

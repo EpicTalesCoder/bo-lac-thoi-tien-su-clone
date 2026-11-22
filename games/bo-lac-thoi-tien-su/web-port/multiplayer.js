@@ -1,8 +1,9 @@
 /**
  * 1v1 Real-Time Multiplayer Room & Sync Engine for Prehistoric Tribes
- * Dual Transport:
- *  1) PeerJS WebRTC P2P DataChannel (works across devices/networks on Vercel & internet!)
- *  2) BroadcastChannel (instant <5ms connection for 2 browser tabs on the same machine / offline)
+ * Triple Transport (100% cross-network reliable):
+ *  1) Cloud WebSocket Relay (MQTT-over-WSS via TLS port 443: works across ANY 2 networks, 4G/5G CGNAT & firewalls!)
+ *  2) PeerJS WebRTC P2P DataChannel (low-latency direct P2P when NAT allows)
+ *  3) BroadcastChannel (instant <5ms connection for 2 browser tabs on the same machine / offline)
  */
 
 const PEER_CONFIG = {
@@ -12,9 +13,210 @@ const PEER_CONFIG = {
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
       { urls: 'stun:stun2.l.google.com:19302' },
+      { urls: 'stun:stun3.l.google.com:19302' },
     ],
   },
 };
+
+const WSS_BROKERS = [
+  'wss://broker.emqx.io:8084/mqtt',
+  'wss://broker.hivemq.com:8884/mqtt',
+];
+
+const ROOM_PEER_PREFIX = 'bltts-v2-room-';
+
+function mqttEncodeRemLen(len) {
+  const out = [];
+  do {
+    let b = len % 128;
+    len = Math.floor(len / 128);
+    if (len > 0) b |= 0x80;
+    out.push(b);
+  } while (len > 0);
+  return out;
+}
+
+function mqttEncodeStr(str) {
+  const bytes = new TextEncoder().encode(str);
+  return [(bytes.length >> 8) & 0xff, bytes.length & 0xff, ...bytes];
+}
+
+function mqttConnectPacket(clientId) {
+  const vh = [...mqttEncodeStr('MQTT'), 4, 0x02, 0, 45];
+  const pl = mqttEncodeStr(clientId);
+  return new Uint8Array([0x10, ...mqttEncodeRemLen(vh.length + pl.length), ...vh, ...pl]);
+}
+
+function mqttSubscribePacket(pid, topic) {
+  const vh = [(pid >> 8) & 0xff, pid & 0xff];
+  const pl = [...mqttEncodeStr(topic), 0];
+  return new Uint8Array([0x82, ...mqttEncodeRemLen(vh.length + pl.length), ...vh, ...pl]);
+}
+
+function mqttPublishPacket(topic, text) {
+  const t = mqttEncodeStr(topic);
+  const p = Array.from(new TextEncoder().encode(text));
+  return new Uint8Array([0x30, ...mqttEncodeRemLen(t.length + p.length), ...t, ...p]);
+}
+
+class MqttWssRelay {
+  constructor(subTopic, pubTopic, { onReady, onMessage, onStatus } = {}) {
+    this.subTopic = subTopic;
+    this.pubTopic = pubTopic;
+    this.onReady = onReady;
+    this.onMessage = onMessage;
+    this.onStatus = onStatus;
+    this.ws = null;
+    this.ready = false;
+    this.closed = false;
+    this.brokerIdx = 0;
+    this.pingTimer = null;
+    this.retryTimer = null;
+    this._decoder = new TextDecoder();
+    this._connect();
+  }
+
+  _connect() {
+    if (this.closed || typeof WebSocket === 'undefined') return;
+    const url = WSS_BROKERS[this.brokerIdx % WSS_BROKERS.length];
+    this.ready = false;
+    let ws;
+    try {
+      ws = new WebSocket(url, 'mqtt');
+      ws.binaryType = 'arraybuffer';
+    } catch {
+      this._scheduleFailover();
+      return;
+    }
+    this.ws = ws;
+    const clientId = `bltts_${Math.random().toString(36).slice(2, 12)}_${Date.now().toString(36).slice(-4)}`;
+
+    ws.onopen = () => {
+      if (this.closed || this.ws !== ws) return;
+      try {
+        ws.send(mqttConnectPacket(clientId));
+      } catch {}
+    };
+
+    ws.onmessage = (ev) => {
+      if (this.closed || this.ws !== ws) return;
+      const u8 = ev.data instanceof ArrayBuffer ? new Uint8Array(ev.data) : null;
+      if (!u8 || u8.length < 2) return;
+      let offset = 0;
+      while (offset + 2 <= u8.length) {
+        const header = u8[offset];
+        const pktType = header >> 4;
+        let mult = 1;
+        let rem = 0;
+        let idx = offset + 1;
+        let lenDone = false;
+        while (idx < u8.length) {
+          const b = u8[idx++];
+          rem += (b & 127) * mult;
+          if ((b & 128) === 0) {
+            lenDone = true;
+            break;
+          }
+          mult *= 128;
+        }
+        if (!lenDone || idx + rem > u8.length) break;
+
+        if (pktType === 2) {
+          // CONNACK -> subscribe to incoming room channel
+          try {
+            ws.send(mqttSubscribePacket(1, this.subTopic));
+          } catch {}
+        } else if (pktType === 9) {
+          // SUBACK -> relay channel is live!
+          if (!this.ready) {
+            this.ready = true;
+            this._startPing();
+            this.onReady?.();
+          }
+        } else if (pktType === 3) {
+          // PUBLISH
+          const tLen = (u8[idx] << 8) | u8[idx + 1];
+          const qos = (header >> 1) & 3;
+          const pStart = idx + 2 + tLen + (qos > 0 ? 2 : 0);
+          const pEnd = idx + rem;
+          if (pStart <= pEnd) {
+            const text = this._decoder.decode(u8.subarray(pStart, pEnd));
+            try {
+              const parsed = JSON.parse(text);
+              this.onMessage?.(parsed);
+            } catch {}
+          }
+        }
+        offset = idx + rem;
+      }
+    };
+
+    ws.onerror = () => {
+      // onclose will trigger failover
+    };
+
+    ws.onclose = () => {
+      this._stopPing();
+      this.ready = false;
+      if (!this.closed && this.ws === ws) {
+        this._scheduleFailover();
+      }
+    };
+  }
+
+  _startPing() {
+    this._stopPing();
+    this.pingTimer = setInterval(() => {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        try {
+          this.ws.send(new Uint8Array([0xc0, 0x00])); // MQTT PINGREQ
+        } catch {}
+      }
+    }, 20000);
+  }
+
+  _stopPing() {
+    if (this.pingTimer) {
+      clearInterval(this.pingTimer);
+      this.pingTimer = null;
+    }
+  }
+
+  _scheduleFailover() {
+    if (this.closed) return;
+    this.brokerIdx = (this.brokerIdx + 1) % WSS_BROKERS.length;
+    this.onStatus?.('Đang chuyển máy chủ phòng dự phòng...');
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = setTimeout(() => this._connect(), 1200);
+  }
+
+  send(packet) {
+    if (!this.ready || !this.ws || this.ws.readyState !== WebSocket.OPEN) return false;
+    try {
+      this.ws.send(mqttPublishPacket(this.pubTopic, JSON.stringify(packet)));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  close() {
+    this.closed = true;
+    this.ready = false;
+    this._stopPing();
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
+    try {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.send(new Uint8Array([0xe0, 0x00])); // MQTT DISCONNECT
+      }
+      this.ws?.close();
+    } catch {}
+    this.ws = null;
+  }
+}
 
 export function generateRoomCode() {
   return String(Math.floor(1000 + Math.random() * 9000));
@@ -28,9 +230,14 @@ export class MultiplayerClient {
     this.peer = null;
     this.conn = null;
     this.bc = null;
+    this.relay = null;
     this.connected = false;
     this.transport = '';
+    this.statusNote = '';
     this.countdownTimer = null;
+    this._joinRetryTimer = null;
+    this._joinAttempts = 0;
+    this._lastRelaySnapAt = 0;
     this._seqOut = 0;
     this._seenSeq = new Set();
 
@@ -48,7 +255,13 @@ export class MultiplayerClient {
   }
 
   emitLobby() {
-    this.callbacks.onLobbyUpdate?.({ ...this.lobby, role: this.role, connected: this.connected, transport: this.transport });
+    this.callbacks.onLobbyUpdate?.({
+      ...this.lobby,
+      role: this.role,
+      connected: this.connected,
+      transport: this.transport,
+      statusNote: this.statusNote,
+    });
   }
 
   sendRaw(msg) {
@@ -60,6 +273,17 @@ export class MultiplayerClient {
         sent = true;
       } catch {}
     }
+    if (this.relay && this.relay.ready) {
+      if (msg.type === 'snap') {
+        const now = Date.now();
+        if (now - this._lastRelaySnapAt >= 95) {
+          this._lastRelaySnapAt = now;
+          if (this.relay.send(packet)) sent = true;
+        }
+      } else if (this.relay.send(packet)) {
+        sent = true;
+      }
+    }
     if (this.bc) {
       try {
         this.bc.postMessage(packet);
@@ -69,11 +293,19 @@ export class MultiplayerClient {
     return sent;
   }
 
+  _clearJoinRetry() {
+    if (this._joinRetryTimer) {
+      clearInterval(this._joinRetryTimer);
+      this._joinRetryTimer = null;
+    }
+  }
+
   createRoom(hostName = 'Tù trưởng Xanh', mapIdx = 1) {
     this.leaveRoom();
     const code = generateRoomCode();
     this.role = 'host';
     this.roomCode = code;
+    this.statusNote = 'Đang mở phòng trên máy chủ đám mây...';
     this.lobby = {
       roomCode: code,
       mapIdx,
@@ -100,10 +332,40 @@ export class MultiplayerClient {
       };
     }
 
-    // 2) PeerJS WebRTC P2P for internet play across devices
+    // 2) Cloud WSS Relay (works reliably across ANY 2 networks, 4G/5G CGNAT & firewalls!)
+    this.relay = new MqttWssRelay(
+      `bltts/mp/v2/${code}/c2h`,
+      `bltts/mp/v2/${code}/h2c`,
+      {
+        onReady: () => {
+          this.transport = this.transport || 'Cloud WSS';
+          this.statusNote = '';
+          if (this.connected) {
+            this.sendRaw({ type: 'lobbySync', lobby: this.lobby });
+          }
+          this.emitLobby();
+        },
+        onMessage: (msg) => {
+          if (!msg || msg._from === this.role) return;
+          if (!this.connected) {
+            this.connected = true;
+            this.transport = this.transport === 'Local Tab' ? 'Local Tab' : 'Cloud WSS';
+          }
+          this.handleMessage(msg);
+        },
+        onStatus: (txt) => {
+          if (!this.connected) {
+            this.statusNote = txt;
+            this.emitLobby();
+          }
+        },
+      }
+    );
+
+    // 3) PeerJS WebRTC P2P (optional direct acceleration when NAT allows)
     if (typeof window !== 'undefined' && window.Peer) {
       try {
-        this.peer = new window.Peer(`pt-room-${code}`, PEER_CONFIG);
+        this.peer = new window.Peer(`${ROOM_PEER_PREFIX}${code}`, PEER_CONFIG);
         this.peer.on('open', () => {
           this.transport = this.transport || 'WebRTC P2P';
           this.emitLobby();
@@ -120,7 +382,7 @@ export class MultiplayerClient {
           conn.on('close', () => this.handlePeerDisconnect());
         });
         this.peer.on('error', () => {
-          // Keep BroadcastChannel working even if signaling server is unreachable
+          // Cloud WSS & BroadcastChannel continue working seamlessly!
           this.emitLobby();
         });
       } catch {}
@@ -136,6 +398,8 @@ export class MultiplayerClient {
     if (!cleanCode) return false;
     this.role = 'guest';
     this.roomCode = cleanCode;
+    this.statusNote = `Đang tìm phòng #${cleanCode} qua mạng...`;
+    this._joinAttempts = 0;
     this.lobby = {
       roomCode: cleanCode,
       mapIdx: 1,
@@ -148,6 +412,11 @@ export class MultiplayerClient {
       countdown: 0,
     };
 
+    const announceJoin = () => {
+      if (this.role !== 'guest' || this.connected) return;
+      this.sendRaw({ type: 'guestJoin', guestName: this.lobby.guestName, ready: this.lobby.guestReady });
+    };
+
     // 1) BroadcastChannel for instant local 2-tab join
     if (typeof BroadcastChannel !== 'undefined') {
       this.bc = new BroadcastChannel(`pt-mp-room-${cleanCode}`);
@@ -157,25 +426,71 @@ export class MultiplayerClient {
         if (!this.connected) {
           this.connected = true;
           this.transport = 'Local Tab';
+          this.statusNote = '';
+          this._clearJoinRetry();
         }
         this.handleMessage(msg);
       };
-      // Announce join immediately via BroadcastChannel (and retry briefly in case Host is still initializing)
-      setTimeout(() => {
-        this.sendRaw({ type: 'guestJoin', guestName: this.lobby.guestName, ready: this.lobby.guestReady });
-      }, 60);
+      setTimeout(announceJoin, 60);
     }
 
-    // 2) PeerJS WebRTC P2P join
+    // 2) Cloud WSS Relay join (works across ANY 2 networks, 4G/5G & firewalls!)
+    this.relay = new MqttWssRelay(
+      `bltts/mp/v2/${cleanCode}/h2c`,
+      `bltts/mp/v2/${cleanCode}/c2h`,
+      {
+        onReady: () => {
+          this.transport = this.transport || 'Cloud WSS';
+          announceJoin();
+          this._clearJoinRetry();
+          this._joinRetryTimer = setInterval(() => {
+            if (this.connected || this.role !== 'guest') {
+              this._clearJoinRetry();
+              return;
+            }
+            this._joinAttempts++;
+            announceJoin();
+            if (this._joinAttempts >= 8) {
+              this.statusNote = `Chưa thấy Chủ phòng #${cleanCode} phản hồi — hãy kiểm tra đúng mã 4 số hoặc bảo Chủ phòng tạo lại phòng.`;
+              this.emitLobby();
+            }
+          }, 1500);
+          this.emitLobby();
+        },
+        onMessage: (msg) => {
+          if (!msg || msg._from === this.role) return;
+          if (!this.connected) {
+            this.connected = true;
+            this.transport = this.transport === 'Local Tab' ? 'Local Tab' : 'Cloud WSS';
+            this.statusNote = '';
+            this._clearJoinRetry();
+          }
+          this.handleMessage(msg);
+        },
+        onStatus: (txt) => {
+          if (!this.connected) {
+            this.statusNote = txt;
+            this.emitLobby();
+          }
+        },
+      }
+    );
+
+    // 3) PeerJS WebRTC P2P join (optional direct acceleration)
     if (typeof window !== 'undefined' && window.Peer) {
       try {
         this.peer = new window.Peer(undefined, PEER_CONFIG);
         this.peer.on('open', () => {
-          const conn = this.peer.connect(`pt-room-${cleanCode}`, { reliable: true });
+          const conn = this.peer.connect(`${ROOM_PEER_PREFIX}${cleanCode}`, {
+            reliable: true,
+            serialization: 'json',
+          });
           this.conn = conn;
           conn.on('open', () => {
             this.connected = true;
             this.transport = 'WebRTC P2P';
+            this.statusNote = '';
+            this._clearJoinRetry();
             this.sendRaw({ type: 'guestJoin', guestName: this.lobby.guestName, ready: this.lobby.guestReady });
             this.emitLobby();
           });
@@ -192,9 +507,9 @@ export class MultiplayerClient {
     return true;
   }
 
-  handlePeerDisconnect() {
-    // If local BroadcastChannel is active on the same machine, don't tear down the room on a WebRTC hiccup
-    if (this.bc && this.transport === 'Local Tab') return;
+  handlePeerDisconnect(force = false) {
+    // If another transport (Local Tab or Cloud WSS) is still live, don't tear down the room on a WebRTC hiccup!
+    if (!force && ((this.bc && this.transport === 'Local Tab') || this.relay?.ready)) return;
     if (this.role === 'host') {
       this.connected = false;
       this.lobby.guestJoined = false;
@@ -332,10 +647,14 @@ export class MultiplayerClient {
         this.checkStartCountdown();
       } else if (msg.type === 'cmd') {
         this.callbacks.onGuestCommand?.(msg.cmd);
+      } else if (msg.type === 'peerLeave') {
+        this.handlePeerDisconnect(true);
       }
     } else if (this.role === 'guest') {
       if (msg.type === 'lobbySync' && msg.lobby) {
         this.connected = true;
+        this.statusNote = '';
+        this._clearJoinRetry();
         this.lobby = { ...this.lobby, ...msg.lobby };
         this.emitLobby();
       } else if (msg.type === 'startMatch') {
@@ -349,22 +668,31 @@ export class MultiplayerClient {
         this.lobby = { ...this.lobby, ...msg.lobby, status: 'lobby' };
         this.emitLobby();
         this.callbacks.onReturnLobby?.();
+      } else if (msg.type === 'peerLeave') {
+        this.handlePeerDisconnect(true);
       }
     }
   }
 
   leaveRoom() {
+    if (this.role && this.connected) {
+      try { this.sendRaw({ type: 'peerLeave' }); } catch {}
+    }
     this.cancelCountdown();
+    this._clearJoinRetry();
     try { this.conn?.close(); } catch {}
     try { this.peer?.destroy(); } catch {}
+    try { this.relay?.close(); } catch {}
     try { this.bc?.close(); } catch {}
     this.conn = null;
     this.peer = null;
+    this.relay = null;
     this.bc = null;
     this.connected = false;
     this.role = null;
     this.roomCode = '';
     this.transport = '';
+    this.statusNote = '';
     this.lobby.status = 'idle';
     this.lobby.guestJoined = false;
     this.lobby.hostReady = false;
