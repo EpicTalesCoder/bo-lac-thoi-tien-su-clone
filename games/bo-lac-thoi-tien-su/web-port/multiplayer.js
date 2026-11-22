@@ -23,8 +23,29 @@ const WSS_BROKERS = [
   'wss://broker.hivemq.com:8884/mqtt',
 ];
 
-const NTFY_BASE = 'https://ntfy.sh';
-const NTFY_WS_BASE = 'wss://ntfy.sh';
+function isDiscordActivity() {
+  if (typeof window === 'undefined' || !window.location) return false;
+  const host = window.location.hostname || '';
+  return host.endsWith('.discordsays.com') || (window.location.search || '').includes('frame_id=');
+}
+
+function getNtfyEndpoints() {
+  if (isDiscordActivity()) {
+    const origin = window.location.origin;
+    const host = window.location.host;
+    return {
+      httpBase: `${origin}/.proxy/ntfy`,
+      wsBase: `wss://${host}/.proxy/ntfy`,
+      discordProxy: true,
+    };
+  }
+  return {
+    httpBase: 'https://ntfy.sh',
+    wsBase: 'wss://ntfy.sh',
+    discordProxy: false,
+  };
+}
+
 const ROOM_PEER_PREFIX = 'bltts-v2-room-';
 
 function mqttEncodeRemLen(len) {
@@ -247,17 +268,20 @@ class MqttWssRelay {
   }
 }
 
-// Pure Port-443 HTTPS/WSS Relay (works on 100% of mobile 4G/5G, office/school Wi-Fi & strict firewalls!)
+// Pure Port-443 HTTPS/WSS Relay (works on 100% of mobile 4G/5G, office/school Wi-Fi, AND Discord Activity via /.proxy/ntfy!)
 class NtfyHttpsRelay {
-  constructor(subTopic, pubTopic, { onReady, onMessage } = {}) {
+  constructor(subTopic, pubTopic, { onReady, onMessage, onError } = {}) {
     this.subTopic = subTopic;
     this.pubTopic = pubTopic;
     this.onReady = onReady;
     this.onMessage = onMessage;
+    this.onError = onError;
     this.ws = null;
     this.ready = false;
+    this.everOpened = false;
     this.closed = false;
     this.retryTimer = null;
+    this.endpoints = getNtfyEndpoints();
     this._connect();
   }
 
@@ -266,7 +290,7 @@ class NtfyHttpsRelay {
     this.ready = false;
     let ws;
     try {
-      ws = new WebSocket(`${NTFY_WS_BASE}/${encodeURIComponent(this.subTopic)}/ws`);
+      ws = new WebSocket(`${this.endpoints.wsBase}/${encodeURIComponent(this.subTopic)}/ws`);
     } catch {
       this._scheduleRetry();
       return;
@@ -275,6 +299,7 @@ class NtfyHttpsRelay {
     ws.onopen = () => {
       if (this.closed || this.ws !== ws) return;
       this.ready = true;
+      this.everOpened = true;
       this.onReady?.();
     };
     ws.onmessage = (ev) => {
@@ -290,6 +315,9 @@ class NtfyHttpsRelay {
     ws.onerror = () => {};
     ws.onclose = () => {
       this.ready = false;
+      if (!this.everOpened && this.endpoints.discordProxy) {
+        this.onError?.('⚠ Trong Discord Activity: hãy thêm URL Mapping "/ntfy" → "ntfy.sh" trong Discord Developer Portal (Activities → URL Mappings).');
+      }
       if (!this.closed && this.ws === ws) this._scheduleRetry();
     };
   }
@@ -303,7 +331,7 @@ class NtfyHttpsRelay {
   send(packet) {
     if (this.closed || typeof fetch === 'undefined') return false;
     try {
-      fetch(`${NTFY_BASE}/${encodeURIComponent(this.pubTopic)}`, {
+      fetch(`${this.endpoints.httpBase}/${encodeURIComponent(this.pubTopic)}`, {
         method: 'POST',
         body: JSON.stringify(packet),
       }).catch(() => {});
@@ -443,10 +471,11 @@ export class MultiplayerClient {
     }
     if (this.ntfyRelay && !this.ntfyRelay.closed) {
       if (msg.type === 'snap') {
-        // Use Port-443 HTTPS relay for game snapshots whenever MQTT/WebRTC are blocked by firewall!
+        // Use Port-443 HTTPS relay (or Discord /.proxy/ntfy) for game snapshots whenever MQTT/WebRTC are unavailable!
         if (!fastTransportSent) {
           const now = Date.now();
-          if (now - this._lastNtfySnapAt >= 240) {
+          const minGap = this.ntfyRelay.endpoints?.discordProxy ? 150 : 240;
+          if (now - this._lastNtfySnapAt >= minGap) {
             this._lastNtfySnapAt = now;
             if (this.ntfyRelay.send(packet)) sent = true;
           }
@@ -512,13 +541,16 @@ export class MultiplayerClient {
       };
     }
 
-    // 2) Port-443 HTTPS/WSS Relay (passes 100% of mobile 4G/5G CGNAT & strict firewalls!)
+    const inDiscord = isDiscordActivity();
+    const ntfyLabel = inDiscord ? 'Discord Proxy' : 'Cloud HTTPS';
+
+    // 2) Port-443 HTTPS/WSS Relay (passes 100% of mobile 4G/5G CGNAT, firewalls, AND Discord Activity via /.proxy/ntfy!)
     this.ntfyRelay = new NtfyHttpsRelay(
       `bltts_v2_${code}_c2h`,
       `bltts_v2_${code}_h2c`,
       {
         onReady: () => {
-          this.transport = this.transport || 'Cloud HTTPS';
+          this.transport = this.transport || ntfyLabel;
           this.statusNote = '';
           this.sendRaw({ type: 'hostBeacon', roomCode: code });
           if (this.connected) {
@@ -530,37 +562,45 @@ export class MultiplayerClient {
           if (!msg || msg._from === this.clientId) return;
           if (!this.connected) {
             this.connected = true;
-            this.transport = this.transport === 'Local Tab' ? 'Local Tab' : 'Cloud HTTPS';
+            this.transport = this.transport === 'Local Tab' ? 'Local Tab' : ntfyLabel;
           }
           this.handleMessage(msg);
+        },
+        onError: (txt) => {
+          if (!this.connected) {
+            this.statusNote = txt;
+            this.emitLobby();
+          }
         },
       }
     );
 
-    // 3) Dual MQTT-WSS Relay (EMQX + HiveMQ simultaneously for low-latency 10Hz sync!)
-    this.relay = new MqttWssRelay(
-      `bltts/mp/v2/${code}/c2h`,
-      `bltts/mp/v2/${code}/h2c`,
-      {
-        onReady: () => {
-          this.transport = this.transport && this.transport !== 'Cloud HTTPS' ? this.transport : 'Cloud WSS';
-          this.statusNote = '';
-          this.sendRaw({ type: 'hostBeacon', roomCode: code });
-          if (this.connected) {
-            this.sendRaw({ type: 'lobbySync', lobby: this.lobby });
-          }
-          this.emitLobby();
-        },
-        onMessage: (msg) => {
-          if (!msg || msg._from === this.clientId) return;
-          if (!this.connected) {
-            this.connected = true;
-            this.transport = this.transport === 'Local Tab' ? 'Local Tab' : 'Cloud WSS';
-          }
-          this.handleMessage(msg);
-        },
-      }
-    );
+    // 3) Dual MQTT-WSS Relay (skip inside Discord Activity where external ports 8084/8884 are blocked by CSP)
+    if (!inDiscord) {
+      this.relay = new MqttWssRelay(
+        `bltts/mp/v2/${code}/c2h`,
+        `bltts/mp/v2/${code}/h2c`,
+        {
+          onReady: () => {
+            this.transport = this.transport && this.transport !== ntfyLabel ? this.transport : 'Cloud WSS';
+            this.statusNote = '';
+            this.sendRaw({ type: 'hostBeacon', roomCode: code });
+            if (this.connected) {
+              this.sendRaw({ type: 'lobbySync', lobby: this.lobby });
+            }
+            this.emitLobby();
+          },
+          onMessage: (msg) => {
+            if (!msg || msg._from === this.clientId) return;
+            if (!this.connected) {
+              this.connected = true;
+              this.transport = this.transport === 'Local Tab' ? 'Local Tab' : 'Cloud WSS';
+            }
+            this.handleMessage(msg);
+          },
+        }
+      );
+    }
 
     // Periodic host beacon while waiting in lobby so joining guests discover the room immediately
     this._clearHostBeacon();
@@ -569,8 +609,8 @@ export class MultiplayerClient {
       this.sendRaw({ type: 'hostBeacon', roomCode: code });
     }, 2200);
 
-    // 3) PeerJS WebRTC P2P (optional direct acceleration for up to 3 guests)
-    if (typeof window !== 'undefined' && window.Peer) {
+    // 4) PeerJS WebRTC P2P (optional direct acceleration outside Discord Activity)
+    if (!inDiscord && typeof window !== 'undefined' && window.Peer) {
       try {
         this.peer = new window.Peer(`${ROOM_PEER_PREFIX}${code}`, PEER_CONFIG);
         this.peer.on('open', () => {
@@ -652,13 +692,16 @@ export class MultiplayerClient {
       setTimeout(announceJoin, 60);
     }
 
-    // 2) Port-443 HTTPS/WSS Relay join (passes 100% of mobile 4G/5G CGNAT & strict firewalls!)
+    const inDiscord = isDiscordActivity();
+    const ntfyLabel = inDiscord ? 'Discord Proxy' : 'Cloud HTTPS';
+
+    // 2) Port-443 HTTPS/WSS Relay join (passes 100% of mobile 4G/5G CGNAT, firewalls, AND Discord Activity via /.proxy/ntfy!)
     this.ntfyRelay = new NtfyHttpsRelay(
       `bltts_v2_${cleanCode}_h2c`,
       `bltts_v2_${cleanCode}_c2h`,
       {
         onReady: () => {
-          this.transport = this.transport || 'Cloud HTTPS';
+          this.transport = this.transport || ntfyLabel;
           announceJoin();
           this.emitLobby();
         },
@@ -670,41 +713,49 @@ export class MultiplayerClient {
           }
           if (!this.connected) {
             this.connected = true;
-            this.transport = this.transport === 'Local Tab' ? 'Local Tab' : 'Cloud HTTPS';
+            this.transport = this.transport === 'Local Tab' ? 'Local Tab' : ntfyLabel;
             this.statusNote = '';
             this._clearJoinRetry();
           }
           this.handleMessage(msg);
+        },
+        onError: (txt) => {
+          if (!this.connected) {
+            this.statusNote = txt;
+            this.emitLobby();
+          }
         },
       }
     );
 
-    // 3) Dual MQTT-WSS Relay join (EMQX + HiveMQ simultaneously!)
-    this.relay = new MqttWssRelay(
-      `bltts/mp/v2/${cleanCode}/h2c`,
-      `bltts/mp/v2/${cleanCode}/c2h`,
-      {
-        onReady: () => {
-          this.transport = this.transport && this.transport !== 'Cloud HTTPS' ? this.transport : 'Cloud WSS';
-          announceJoin();
-          this.emitLobby();
-        },
-        onMessage: (msg) => {
-          if (!msg || msg._from === this.clientId) return;
-          if (msg.type === 'hostBeacon') {
-            if (!this.connected) announceJoin();
-            return;
-          }
-          if (!this.connected) {
-            this.connected = true;
-            this.transport = this.transport === 'Local Tab' ? 'Local Tab' : 'Cloud WSS';
-            this.statusNote = '';
-            this._clearJoinRetry();
-          }
-          this.handleMessage(msg);
-        },
-      }
-    );
+    // 3) Dual MQTT-WSS Relay join (skip inside Discord Activity where external ports 8084/8884 are blocked by CSP)
+    if (!inDiscord) {
+      this.relay = new MqttWssRelay(
+        `bltts/mp/v2/${cleanCode}/h2c`,
+        `bltts/mp/v2/${cleanCode}/c2h`,
+        {
+          onReady: () => {
+            this.transport = this.transport && this.transport !== ntfyLabel ? this.transport : 'Cloud WSS';
+            announceJoin();
+            this.emitLobby();
+          },
+          onMessage: (msg) => {
+            if (!msg || msg._from === this.clientId) return;
+            if (msg.type === 'hostBeacon') {
+              if (!this.connected) announceJoin();
+              return;
+            }
+            if (!this.connected) {
+              this.connected = true;
+              this.transport = this.transport === 'Local Tab' ? 'Local Tab' : 'Cloud WSS';
+              this.statusNote = '';
+              this._clearJoinRetry();
+            }
+            this.handleMessage(msg);
+          },
+        }
+      );
+    }
 
     // Start immediate multi-transport join retry timer (don't wait only for MQTT!)
     this._clearJoinRetry();
@@ -721,8 +772,8 @@ export class MultiplayerClient {
       }
     }, 1200);
 
-    // 3) PeerJS WebRTC P2P join (optional direct acceleration)
-    if (typeof window !== 'undefined' && window.Peer) {
+    // 4) PeerJS WebRTC P2P join (optional direct acceleration outside Discord Activity)
+    if (!inDiscord && typeof window !== 'undefined' && window.Peer) {
       try {
         this.peer = new window.Peer(undefined, PEER_CONFIG);
         this.peer.on('open', () => {
