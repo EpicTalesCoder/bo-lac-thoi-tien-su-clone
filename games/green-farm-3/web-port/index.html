@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Green Farm 3 — Phaser 3 Web Port</title>
+</head>
+<body style="background:#111;color:#eee;font-family:monospace;text-align:center;padding:32px">
+  <h1>Green Farm 3 <small style="color:#888">(Gameloft · 240×320)</small></h1>
+  <canvas id="game" width="240" height="320" style="border:1px solid #444;image-rendering:pixelated"></canvas>
+  <p id="status" style="color:#ffd84d">Đang nạp runtime…</p>
+  <p><a href="../../../index.html" style="color:#9cff7b">← Quay lại Cổng Game</a></p>
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.min.js"></script>
+  <script type="module">
+    import { mountPhaserRuntime } from './phaser-engine.js';
+
+    const icon = new Image();
+    icon.src = './assets/icon.png';
+
+    const statusEl = document.getElementById('status');
+    let loaded = false;
+
+    icon.onload = () => { loaded = true; statusEl.textContent = 'Web port in-progress — xem analysis/ANALYSIS-README.md'; };
+
+    mountPhaserRuntime({
+      canvas: document.getElementById('game'),
+      width: 240,
+      height: 320,
+      tickMs: 120,
+      onStepSimulation() {},
+      onFrameInterpolate() { return false; },
+      onRenderFrame(ctx) {
+        ctx.fillStyle = '#18241b';
+        ctx.fillRect(0, 0, 240, 320);
+
+        if (loaded) {
+          ctx.imageSmoothingEnabled = false;
+          ctx.drawImage(icon, 96, 60, 48, 48);
+        }
+
+        ctx.fillStyle = '#9cff7b';
+        ctx.font = 'bold 16px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText('GREEN FARM 3', 120, 140);
+
+        ctx.fillStyle = '#cfe8c6';
+        ctx.font = '10px monospace';
+        ctx.fillText('Gameloft · J2ME MIDP 2.0', 120, 160);
+        ctx.fillText('44.307 dòng đã decompile (CFR)', 120, 178);
+
+        ctx.fillStyle = '#ffd84d';
+        ctx.fillText('PORT ĐANG TRONG GIAI ĐOẠN PHÂN TÍCH', 120, 210);
+        ctx.fillStyle = '#888';
+        ctx.fillText('Original JAR + assets + bytecode: analysis/', 120, 228);
+      }
+    });
+  </script>
+</body>
+</html>
