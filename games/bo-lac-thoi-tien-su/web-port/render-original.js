@@ -1827,6 +1827,44 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
     }
   }
 
+  // Pass 4c4: Crisp pixel-art weapon hit & impact burst animations (combat + training dummy/target)
+  if (state.hitEffects && state.hitEffects.length > 0) {
+    for (const fx of state.hitEffects) {
+      const t = fx.age / Math.max(1, fx.duration);
+      const px = Math.round((fx.x - camX) * CELL_WIDTH + 11);
+      const py = Math.round(originY + (fx.y - camY) * CELL_HEIGHT + 4);
+      if (fx.kind === 'building') {
+        drawAnimation(ctx, data, 74, px - 10, py - 8, Math.min(6, fx.age), imageCache);
+      }
+      const radius = Math.round(2 + t * 8);
+      ctx.save();
+      ctx.globalAlpha = Math.max(0.15, 1 - t * 0.85);
+      // Bright pixel impact core on first 3 frames
+      if (fx.age <= 2) {
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(px - 3, py - 3, 6, 6);
+        ctx.fillStyle = fx.kind === 'training' ? '#ffe44d' : '#ff6a2b';
+        ctx.fillRect(px - 5, py - 1, 10, 2);
+        ctx.fillRect(px - 1, py - 5, 2, 10);
+      }
+      // 4 diagonal + 4 cardinal crisp pixel sparks expanding from impact point
+      const sparkCol = fx.kind === 'training' ? '#fff36b' : fx.kind === 'ranged' ? '#ffd04d' : '#ff5238';
+      ctx.fillStyle = sparkCol;
+      const d1 = radius;
+      const d2 = Math.max(2, Math.round(radius * 0.7));
+      ctx.fillRect(px - d1 - 1, py - 1, 2, 2);
+      ctx.fillRect(px + d1 - 1, py - 1, 2, 2);
+      ctx.fillRect(px - 1, py - d1 - 1, 2, 2);
+      ctx.fillRect(px - 1, py + d1 - 1, 2, 2);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(px - d2, py - d2, 2, 2);
+      ctx.fillRect(px + d2 - 1, py - d2, 2, 2);
+      ctx.fillRect(px - d2, py + d2 - 1, 2, 2);
+      ctx.fillRect(px + d2 - 1, py + d2 - 1, 2, 2);
+      ctx.restore();
+    }
+  }
+
   ctx.restore();
 
   // Pass 6: Authentic Top & Bottom HUD

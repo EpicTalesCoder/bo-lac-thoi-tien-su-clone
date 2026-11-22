@@ -234,6 +234,7 @@ const state = {
   dustEffects: [],
   deathEffects: [],
   projectiles: [],
+  hitEffects: [],
   popups: [],
 };
 
@@ -535,6 +536,9 @@ function applyUnitDamage(attackerId, targetId, dmg) {
   const tx = e[targetId] & 0xff;
   const ty = e[101 + targetId] & 0xff;
   addPopup(tx, ty, `-${dmg}`, targetId <= 50 ? '#ff6f61' : '#ffd84d');
+  if (dmg < 200) {
+    addHitEffect(tx, ty, attackerId > 0 && getUnitRange(attackerId) > 1 ? 'ranged' : 'melee');
+  }
 
   if (nextHp > 0 && (e[1414 + targetId] & 0xff) >= 12) {
     if (targetId <= 50 && attackerId > 50) {
@@ -632,6 +636,7 @@ function applyBuildingDamage(attackerId, bid, dmg) {
   const bcx = bx + Math.floor((spec.width || 2) / 2);
   const bcy = by + Math.floor((spec.height || 2) / 2);
   addPopup(bx + 1, by, `-${dmg}`, '#ff944d');
+  addHitEffect(bcx, bcy, 'building');
   if (nextHp > 0 && nextHp * 2 < maxHp) {
     e[8627 + bid] = 2; // damaged burning state -> renders authentic fire flames d(110)!
   }
@@ -679,6 +684,16 @@ function applyBuildingDamage(attackerId, bid, dmg) {
     return true;
   }
   return false;
+}
+
+function addHitEffect(wx, wy, kind = 'melee') {
+  state.hitEffects.push({
+    x: wx,
+    y: wy,
+    kind,
+    age: 0,
+    duration: kind === 'building' ? 7 : 6,
+  });
 }
 
 function launchProjectile(attackerId, targetType, targetId, x0, y0, x1, y1, weaponId, dmg) {
@@ -3250,17 +3265,32 @@ function gatherNearest() {
 }
 
 function stepProjectiles() {
-  if (state.projectiles.length === 0) return false;
   let changed = false;
-  for (let i = state.projectiles.length - 1; i >= 0; i--) {
-    const p = state.projectiles[i];
-    p.age++;
-    if (p.age >= p.duration) {
-      state.projectiles.splice(i, 1);
-      if (p.targetType === 'unit') {
-        applyUnitDamage(p.attackerId, p.targetId, p.dmg);
-      } else if (p.targetType === 'building') {
-        applyBuildingDamage(p.attackerId, p.targetId, p.dmg);
+  if (state.projectiles.length > 0) {
+    for (let i = state.projectiles.length - 1; i >= 0; i--) {
+      const p = state.projectiles[i];
+      p.age++;
+      if (p.age >= p.duration) {
+        state.projectiles.splice(i, 1);
+        if (p.targetType === 'unit') {
+          applyUnitDamage(p.attackerId, p.targetId, p.dmg);
+        } else if (p.targetType === 'building') {
+          applyBuildingDamage(p.attackerId, p.targetId, p.dmg);
+        } else if (p.targetType === 'training') {
+          addHitEffect(p.x1, p.y1, 'training');
+        } else if (p.targetType === 'animal') {
+          addHitEffect(p.x1, p.y1, 'ranged');
+        }
+        changed = true;
+      }
+    }
+  }
+  if (state.hitEffects.length > 0) {
+    for (let i = state.hitEffects.length - 1; i >= 0; i--) {
+      const fx = state.hitEffects[i];
+      fx.age++;
+      if (fx.age >= fx.duration) {
+        state.hitEffects.splice(i, 1);
       }
       changed = true;
     }
@@ -4702,6 +4732,7 @@ function stepSimulation() {
       if (isHitTick) {
         if (range > 1) {
           state.projectiles.push({
+            targetType: 'animal',
             x0: ux,
             y0: uy,
             x1: ax,
@@ -4710,6 +4741,8 @@ function stepSimulation() {
             duration: 6,
             weaponId: wId,
           });
+        } else {
+          addHitEffect(ax, ay, 'melee');
         }
         const dmg = getUnitDamage(unitId);
         const nextAhp = Math.max(0, ahp - dmg);
@@ -5443,6 +5476,46 @@ function stepSimulation() {
           uiChanged = true;
         }
       } else if (bType === 1 || bType === 5) {
+        // Authentic weapon-hit animations during training:
+        // - Phòng tập đánh (bType 1): drive dummy hit wobble (e[1313]=2 + e[3030] frame) + hit spark right at the dummy!
+        // - Khu tập ném (bType 5): launch flying training weapon (Đá ném/Giáo/Rìu nhỏ) from trainee to bullseye target!
+        if (bType === 1) {
+          const swingPhase = task.workTicks % 14;
+          if (swingPhase === 5) {
+            e[1313 + unitId] = 2; // Dummy hit wobble animation (d(117) for slot 0, d(122) for slot 1)
+            e[3030 + unitId] = 0;
+            const dummyX = slotIdx === 0 ? bld.x + 0.72 : bld.x + 3.55;
+            const dummyY = slotIdx === 0 ? bld.y + 1.95 : bld.y + 0.25;
+            addHitEffect(dummyX, dummyY, 'training');
+            uiChanged = true;
+          } else if (swingPhase > 5 && swingPhase <= 11) {
+            e[1313 + unitId] = 2;
+            e[3030 + unitId] = swingPhase - 5;
+          } else {
+            e[1313 + unitId] = 1; // Idle dummy
+            e[3030 + unitId] = 0;
+          }
+        } else if (bType === 5) {
+          if (task.workTicks % 18 === 6) {
+            const rawW = e[6565 + unitId] & 0xff;
+            const throwW = rawW === 2 || rawW === 5 ? rawW : 1;
+            const sx = slotIdx === 0 ? bld.x + 1.15 : bld.x + 1.35;
+            const sy = slotIdx === 0 ? bld.y + 1.75 : bld.y + 2.55;
+            const tx = bld.x + 4.05;
+            const ty = slotIdx === 0 ? bld.y + 1.85 : bld.y + 2.05;
+            state.projectiles.push({
+              targetType: 'training',
+              x0: sx,
+              y0: sy,
+              x1: tx,
+              y1: ty,
+              age: 0,
+              duration: 7,
+              weaponId: throwW,
+            });
+            uiChanged = true;
+          }
+        }
         // Authentic /a mo[126]: bType 1 (Phòng tập đánh) -> skillId 14 -> e[1717];
         // bType 5 (Trung tâm bia / Khu tập ném) -> skillId 15 -> e[1616]!
         const curLvRaw = (bType === 1 ? e[1717 + unitId] : e[1616 + unitId]) & 0xff;
@@ -6513,6 +6586,7 @@ function resumeSavedGame() {
   state.skillXp.clear();
   state.enemyTasks.clear();
   state.projectiles = [];
+  state.hitEffects = [];
   state.activePath = [];
   state.dustEffects = [];
   state.popups = [];
@@ -7359,6 +7433,7 @@ function loadScenario(index, opts = {}) {
   state.skillXp.clear();
   state.enemyTasks.clear();
   state.projectiles = [];
+  state.hitEffects = [];
   state.treeWood.clear();
   state.activePath = [];
   state.dustEffects = [];
@@ -9173,6 +9248,7 @@ Promise.all([
       state.animalFight.clear();
       state.animalRally?.clear();
       state.projectiles = [];
+  state.hitEffects = [];
       state.dustEffects = [];
       state.selectedUnits.clear();
       state.scenarioIndex = mapIdx;
