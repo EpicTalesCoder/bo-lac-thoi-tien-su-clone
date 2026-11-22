@@ -6129,14 +6129,15 @@ function stepWildAnimals() {
   return changed;
 }
 
-// Max HP by age: children (< 12) do not count (internal 20, HP bar hidden); age 12 = 100 HP and it keeps shrinking
-// with age until old-age death around 60+.
+// Max HP by age: children (< 12) have internal 20 HP; age 12 = 100 HP and declines naturally
+// through middle age (60s still healthy ~70 HP) and elder years (75–100+).
 function getAgeMaxHp(age) {
   if (age < 12) return 20;
   if (age <= 12) return 100;
-  if (age <= 40) return Math.round(100 - (age - 12) * 0.7);
-  if (age <= 60) return Math.round(80 - (age - 40) * 2.75);
-  return Math.max(1, Math.round(25 - (age - 60) * 5));
+  if (age <= 40) return Math.round(100 - (age - 12) * 0.43);
+  if (age <= 65) return Math.round(88 - (age - 40) * 0.92);
+  if (age <= 85) return Math.round(65 - (age - 65) * 1.75);
+  return Math.max(8, Math.round(30 - (age - 85) * 1.1));
 }
 
 function syncUnitMaxHp(uid) {
@@ -6145,7 +6146,7 @@ function syncUnitMaxHp(uid) {
   const e = d.entityData;
   const age = e[1414 + uid] & 0xff;
   const bonus = age < 12 ? 0 : Math.min(40, 3 * ((e[1717 + uid] & 0xff) + (e[1616 + uid] & 0xff))) + (state.hpBonus.get(uid) || 0);
-  const target = Math.max(1, Math.min(150, getAgeMaxHp(age) + (age >= 60 ? 0 : bonus)));
+  const target = Math.max(1, Math.min(150, getAgeMaxHp(age) + (age >= 85 ? 0 : bonus)));
   const curMax = e[6767 + uid] & 0xff;
   if (curMax === target) return false;
   const curHp = e[1919 + uid] & 0xff;
@@ -6255,13 +6256,27 @@ function stepVillagerNeeds() {
         continue;
       }
 
-      // Adults grow older every year (140 ticks): max HP shrinks with age, and from ~60 they die of old age
+      // Adults grow older every year (140 ticks): natural lifespan curve — healthy through 60s,
+      // most pass away naturally around 75–90, and well-cared-for elders can reach 95–105+!
       if (state.animTick % 140 === 0) {
         const nextAge = Math.min(120, age + 1);
         e[1414 + id] = nextAge;
         syncUnitMaxHp(id);
-        if (nextAge >= 60 && (e[1919 + id] & 0xff) > 0) {
-          const chance = Math.min(1, (nextAge - 59) * 0.25);
+        if (nextAge >= 68 && (e[1919 + id] & 0xff) > 0) {
+          let baseChance = 0;
+          if (nextAge < 75) baseChance = 0.015 + (nextAge - 68) * 0.004;
+          else if (nextAge < 85) baseChance = 0.05 + (nextAge - 75) * 0.009;
+          else if (nextAge < 95) baseChance = 0.14 + (nextAge - 85) * 0.014;
+          else if (nextAge < 105) baseChance = 0.28 + (nextAge - 95) * 0.018;
+          else baseChance = Math.min(0.85, 0.48 + (nextAge - 105) * 0.04);
+
+          const sat = e[2121 + id] & 0xff;
+          const eng = e[2020 + id] & 0xff;
+          const mood = e[505 + id] & 0xff;
+          const healthMult =
+            sat >= 60 && mood >= 60 ? 0.75 :
+            sat < 30 || eng < 25 ? 1.5 : 1.0;
+          const chance = Math.min(0.9, baseChance * healthMult);
           if (Math.random() < chance) {
             const nm = getVillagerName(d, id);
             if (isUnitInsideBuilding(d, id)) exitBuildingSlot(d, id);
