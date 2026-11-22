@@ -224,6 +224,7 @@ const state = {
   shrineRituals: new Map(), // bid -> { spell, ticks, duration } active Shaman spell rituals
   animalMoves: new Map(), // aid -> { dx, dy, progress, total, anim } smooth sub-tile animal movement
   hpBonus: new Map(), // uid -> extra max HP from Phòng thủ spell
+  skillXp: new Map(), // `${uid}:${offset}` -> accumulated work XP toward next skill level
   animalIdle: new Map(), // aid -> { anim, ticks } random idle variant (grazing/sniffing) from mo[184]
   animalFight: new Map(), // aid -> { ticks } attack animation cycle
   siteMaterials: new Map(), // bid -> { wood, stone, tools, owner } pending material deliveries from Storage
@@ -2709,7 +2710,7 @@ function syncTopCombatSkills(uid) {
   const e = state.data?.entityData;
   if (!e || !uid) return;
   // Authentic /a mo[126] & mo[127] combat skill IDs:
-  // 14 = Melee (e[1717], bias 0), 15 = Throwing (e[1616], bias 0), 13 = Magic (e[7575], bias -1)
+  // 14 = Melee (e[1717], bias 0), 15 = Throwing (e[1616], bias 0), 13 = Magic/PIA (e[7575], bias -1)
   const candidates = [
     { id: 14, val: e[1717 + uid] & 0xff },
     { id: 15, val: e[1616 + uid] & 0xff },
@@ -2717,6 +2718,94 @@ function syncTopCombatSkills(uid) {
   ].sort((a, b) => b.val - a.val || a.id - b.id);
   e[2525 + uid] = candidates[0].id;
   e[2626 + uid] = candidates[1].id;
+}
+
+function getSkillFieldInfo(skillId) {
+  if (skillId >= 1 && skillId <= 7) {
+    return { offset: 6969, bias: -1, maxRaw: 10, name: 'Thu thập', isCombat: false, id: skillId };
+  }
+  switch (skillId) {
+    case 8: return { offset: 7070, bias: -1, maxRaw: 10, name: 'Thợ rèn', isCombat: false, id: 8 };
+    case 9: return { offset: 7171, bias: -1, maxRaw: 10, name: 'Nấu ăn', isCombat: false, id: 9 };
+    case 10: return { offset: 7272, bias: -1, maxRaw: 10, name: 'Âm nhạc', isCombat: false, id: 10 };
+    case 11: return { offset: 7373, bias: -1, maxRaw: 10, name: 'Pháp sư', isCombat: false, id: 11 };
+    case 12: return { offset: 7474, bias: -1, maxRaw: 10, name: 'Xây dựng', isCombat: false, id: 12 };
+    case 13: return { offset: 7575, bias: -1, maxRaw: 10, name: 'Chăm trẻ', isCombat: true, id: 13 };
+    case 14: return { offset: 1717, bias: 0, maxRaw: 9, name: 'Cận chiến', isCombat: true, id: 14 };
+    case 15: return { offset: 1616, bias: 0, maxRaw: 9, name: 'Ném xa', isCombat: true, id: 15 };
+    default: return null;
+  }
+}
+
+function syncTopCivilSkills(uid, recentGatherId = 0) {
+  const e = state.data?.entityData;
+  if (!e || !uid) return;
+  const curW1 = e[2323 + uid] & 0xff;
+  const curW2 = e[2424 + uid] & 0xff;
+  const gatherIcon =
+    recentGatherId >= 1 && recentGatherId <= 7
+      ? recentGatherId
+      : curW1 >= 1 && curW1 <= 7
+        ? curW1
+        : curW2 >= 1 && curW2 <= 7
+          ? curW2
+          : 1;
+  const candidates = [
+    { id: gatherIcon, val: Math.max(0, (e[6969 + uid] & 0xff) - 1) },
+    { id: 8, val: Math.max(0, (e[7070 + uid] & 0xff) - 1) },
+    { id: 9, val: Math.max(0, (e[7171 + uid] & 0xff) - 1) },
+    { id: 10, val: Math.max(0, (e[7272 + uid] & 0xff) - 1) },
+    { id: 11, val: Math.max(0, (e[7373 + uid] & 0xff) - 1) },
+    { id: 12, val: Math.max(0, (e[7474 + uid] & 0xff) - 1) },
+  ].sort((a, b) => b.val - a.val || a.id - b.id);
+  e[2323 + uid] = candidates[0].id;
+  e[2424 + uid] = candidates[1].id;
+}
+
+function grantSkillXp(unitId, skillId, xpAmount) {
+  const d = state.data;
+  if (!d || !unitId || !xpAmount || xpAmount <= 0) return false;
+  const e = d.entityData;
+  if ((e[1919 + unitId] & 0xff) <= 0) return false;
+  const info = getSkillFieldInfo(skillId);
+  if (!info) return false;
+
+  const raw = e[info.offset + unitId] & 0xff;
+  const minRaw = info.bias < 0 ? 1 : 0;
+  const curRaw = Math.max(minRaw, raw);
+  if (curRaw >= info.maxRaw) return false;
+
+  const curDisp = Math.max(0, curRaw + info.bias);
+  const xpNeeded = 100 + curDisp * 45;
+  const key = `${unitId}:${info.offset}`;
+  const nextXp = (state.skillXp.get(key) || 0) + xpAmount;
+  if (nextXp < xpNeeded) {
+    state.skillXp.set(key, nextXp);
+    return false;
+  }
+
+  const newRaw = Math.min(info.maxRaw, curRaw + 1);
+  e[info.offset + unitId] = newRaw;
+  state.skillXp.set(key, nextXp - xpNeeded);
+
+  if (info.isCombat) {
+    syncTopCombatSkills(unitId);
+    if (skillId === 14 || skillId === 15) {
+      syncUnitMaxHp(unitId);
+    }
+  } else {
+    syncTopCivilSkills(unitId, skillId >= 1 && skillId <= 7 ? skillId : 0);
+  }
+
+  const newDisp = Math.max(0, newRaw + info.bias);
+  if (getUnitOwner(d, unitId) === (state.localTribe ?? 0)) {
+    const ux = e[unitId] & 0xff;
+    const uy = e[101 + unitId] & 0xff;
+    const vInfo = getVillagerInfo(unitId);
+    addPopup(ux, uy, `⭐ ${info.name} Lv.${newDisp}!`, '#fff37b');
+    state.message = `⭐ ${vInfo.role} đã lên kỹ năng ${info.name} cấp ${newDisp}!`;
+  }
+  return true;
 }
 
 function assignHuntTask(unitId, animalOcc, defendOnly = false) {
@@ -4057,6 +4146,7 @@ function stepSimulation() {
         } else {
           applyUnitDamage(unitId, tid, dmg);
         }
+        grantSkillXp(unitId, range > 1 ? 15 : 14, 14);
         uiChanged = true;
       }
       task.workTicks = (task.workTicks || 0) + 1;
@@ -4111,6 +4201,7 @@ function stepSimulation() {
         } else {
           applyBuildingDamage(unitId, bld.bid, dmg);
         }
+        grantSkillXp(unitId, range > 1 ? 15 : 14, 12);
         uiChanged = true;
       }
       task.workTicks = (task.workTicks || 0) + 1;
@@ -4248,6 +4339,14 @@ function stepSimulation() {
           addPopup(ux, uy, `Nộp +${carry.amount} ${carry.label}`, '#fff37b');
           const info = getVillagerInfo(unitId);
           state.message = `${info.role} đã vác và nộp ${carry.amount} ${carry.label} tại ${dropoff.spec.name}!`;
+          const gatherSkillId =
+            carry.type === 'wood' ? 2 :
+            carry.type === 'stone' ? 5 :
+            carry.type === 'fish' ? 4 :
+            carry.type === 'bones' ? 7 :
+            carry.carrySprite === 1 ? 3 :
+            carry.carrySprite === 6 ? 6 : 1;
+          grantSkillXp(unitId, gatherSkillId, 45);
           uiChanged = true;
         }
         task.workTicks++;
@@ -4427,6 +4526,9 @@ function stepSimulation() {
       task.workTicks++;
 
       // Authentic steady construction / upgrade rate: +1 HP every 3 ticks per builder, capped by delivered materials!
+      if (task.workTicks % 9 === 0) {
+        if (grantSkillXp(unitId, 12, 20)) uiChanged = true;
+      }
       if (task.workTicks % 3 === 0) {
         if (curHp >= allowedMaxHp && stillMissingMaterials) {
           continue;
@@ -4480,6 +4582,7 @@ function stepSimulation() {
           }
           // Dust cloud d(74) plays ONLY when the building finishes construction/upgrade (f.java:1517)!
           addDust(bld.x, bld.y, bld.w, bld.h);
+          for (const wid of workers) grantSkillXp(wid, 12, 60);
 
           // If this finished building is a Nhà trẻ (bType 10), immediately call all outside children (< 12) of the tribe to run inside for safety!
           if ((e[8749 + bid] & 0xff) === 10) {
@@ -4611,7 +4714,10 @@ function stepSimulation() {
         const dmg = getUnitDamage(unitId);
         const nextAhp = Math.max(0, ahp - dmg);
         e[9513 + aid] = nextAhp;
+        grantSkillXp(unitId, 3, 15);
+        grantSkillXp(unitId, range > 1 ? 15 : 14, 10);
         if (nextAhp <= 0) {
+          grantSkillXp(unitId, 3, 55);
           const aKind = e[9535 + aid] & 0xff;
           const meatAmt = (d.mapTableData?.[d.mapTableOffsets?.[183] + aKind] & 0xff) || 20;
           if (d.occupancy[ay][ax] === 101 + aid) d.occupancy[ay][ax] = 0;
@@ -5120,6 +5226,7 @@ function stepSimulation() {
           setUnitAnim(unitId, 53, Math.floor(task.forgeTicks / 2) % 3);
           if (task.forgeTicks >= 36) {
             const wId = task.forgingWeaponId;
+            grantSkillXp(unitId, 8, 55);
             exitBuildingSlot(d, unitId);
             const storage = findNearestDropoff(e[unitId] & 0xff, e[101 + unitId] & 0xff, unitOwner);
             if (storage) {
@@ -5284,6 +5391,7 @@ function stepSimulation() {
           if (task.workTicks % 40 === 0) {
             // Bếp slot 0: Chef finishes cooking a batch -> serves cooked food onto THIS Kitchen's table (e[8871+bid]) & +4 food,
             // then goes to Storage to fetch raw Meat (carrySprite=1) for the next pot!
+            grantSkillXp(unitId, 9, 45);
             e[8871 + bld.bid] = Math.min(40, (e[8871 + bld.bid] & 0xff) + 6);
             if (unitOwner === (state.localTribe ?? 0)) {
               state.food += 4;
@@ -5369,6 +5477,7 @@ function stepSimulation() {
       } else if (bType === 7) {
         if (slotIdx === 0 && task.workTicks % 45 === 0) {
           // Sàn Disco slot 0: DJ boosts tribe mood & energy!
+          grantSkillXp(unitId, 10, 45);
           for (const id of getVillagerIds(unitOwner)) {
             e[505 + id] = Math.min(100, (e[505 + id] & 0xff) + 12);
             e[2020 + id] = Math.min(100, (e[2020 + id] & 0xff) + 8);
@@ -5398,12 +5507,21 @@ function stepSimulation() {
           if (ritual.ticks >= (ritual.duration || 45)) {
             state.shrineRituals.delete(bld.bid);
             applyShamanSpellEffect(ritual.spell, bld);
+            grantSkillXp(unitId, 11, 65);
             uiChanged = true;
           }
+        } else if (slotIdx === 0 && task.workTicks % 15 === 0) {
+          grantSkillXp(unitId, 11, 25);
+          uiChanged = true;
         }
-      } else if ((bType === 9 || bType === 11) && task.workTicks === 10) {
-        // Trung tâm PIA / Chòi canh: expands fog of war radius!
-        revealFog(d, bld.x + Math.floor(bld.w / 2), bld.y + Math.floor(bld.h / 2), bType === 11 ? 8 : 7);
+      } else if (bType === 9 || bType === 11) {
+        // Trung tâm PIA / Chòi canh: expands fog of war radius & trains caregiver/knowledge skill!
+        if (task.workTicks === 10) {
+          revealFog(d, bld.x + Math.floor(bld.w / 2), bld.y + Math.floor(bld.h / 2), bType === 11 ? 8 : 7);
+        }
+        if (bType === 9 && slotIdx === 0 && task.workTicks % 35 === 0) {
+          if (grantSkillXp(unitId, 13, 35)) uiChanged = true;
+        }
       }
     } else if (task.kind === 'courtship') {
       // Authentic Prehistoric Tribes courtship & reproduction (b.java:3357-3473, 4142-4210):
@@ -6377,6 +6495,7 @@ function resumeSavedGame() {
   state.paused = false;
   state.panelMode = 'main';
   state.tasks.clear();
+  state.skillXp.clear();
   state.enemyTasks.clear();
   state.projectiles = [];
   state.activePath = [];
@@ -7222,6 +7341,7 @@ function loadScenario(index, opts = {}) {
   state.victoryDismissed = false;
   state.lastAlertTick = -999;
   state.tasks.clear();
+  state.skillXp.clear();
   state.enemyTasks.clear();
   state.projectiles = [];
   state.treeWood.clear();
@@ -9013,6 +9133,7 @@ Promise.all([
       state.buildPreview = null;
       state.showMinimap = false;
       state.tasks.clear();
+  state.skillXp.clear();
       state.savedJobs.clear();
       state.enemyTasks.clear();
       state.weaponQueues.clear();
