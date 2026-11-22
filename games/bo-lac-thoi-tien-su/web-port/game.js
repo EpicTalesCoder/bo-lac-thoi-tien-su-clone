@@ -2053,7 +2053,7 @@ function startCourtshipPair(force = false, preferredHut = null, owner = 0) {
 
   // Allow 1 active courtship pair per tribe at a time
   for (const [uid, t] of state.tasks.entries()) {
-    if (t.kind === 'courtship' && ((uid > 50 ? 1 : 0) === owner)) return false;
+    if (t.kind === 'courtship' && getUnitOwner(d, uid) === owner) return false;
   }
 
   const e = d.entityData;
@@ -4789,28 +4789,46 @@ function stepSimulation() {
       // Advance building interior animation frame e[3030 + unitId] (13 frames for anim 115 glowing light / anim 116 breeding tent)
       e[3030 + unitId] = Math.floor(task.workTicks / 2) % 13;
 
-      // If 1 adult male + 1 adult female are inside this Lều (state 2: e[1313] === 2) and housingCap has room, spawn newborn villager!
-      if (
-        e[1313 + unitId] === 2 &&
-        task.workTicks === 36 &&
-        state.population < state.housingCap
-      ) {
-        const newId = spawnNewbornVillager(d, hut.x + 1, hut.y + hut.h);
-        if (newId > 0) {
-          state.population = getVillagerIds().length;
-          syncResourcesToData();
-          const newName = getVillagerName(d, newId);
-          addPopup(hut.x + 1, hut.y, `${newName} được sinh ra!`, '#9cff7b');
-          showWarning(`👶 ${newName} được sinh ra!`);
-          state.message = `👶 ${newName} được sinh ra! (Dân số: ${state.population}/${state.housingCap})`;
-          // Switch couple back to normal sleeping state 1 (glowing light only) after birth
-          let u = e[8993 + hut.bid];
-          let g = 0;
-          while (u > 0 && g++ < 16) {
-            if (e[1313 + u] === 2) e[1313 + u] = 1;
-            u = e[4545 + u];
+      // If 1 adult male + 1 adult female are inside this Lều (state 2: e[1313] === 2) and their tribe has room, spawn newborn villager!
+      if (e[1313 + unitId] === 2) {
+        task.breedTicks = (task.breedTicks || 0) + 1;
+      } else {
+        task.breedTicks = 0;
+      }
+      if (e[1313 + unitId] === 2 && task.breedTicks >= 36) {
+        const unitOwner = getUnitOwner(d, unitId);
+        const ownerPop = getVillagerIds(unitOwner).length;
+        const ownerHuts = getPlayerBuildings(unitOwner).filter((b) => !b.underConstruction && b.targetType === 2).length;
+        const ownerCap =
+          unitOwner === (state.localTribe ?? 0)
+            ? Math.max(state.housingCap, 6 + ownerHuts * 6)
+            : Math.max(6, 6 + ownerHuts * 6);
+        if (ownerPop < ownerCap) {
+          const newId = spawnNewbornVillager(d, hut.x + 1, hut.y + hut.h, unitOwner);
+          if (newId > 0) {
+            if (d.resources?.[unitOwner]) {
+              d.resources[unitOwner][11] = getVillagerIds(unitOwner).length;
+              d.resources[unitOwner][16] = ownerCap;
+            }
+            if (unitOwner === (state.localTribe ?? 0)) {
+              state.population = getVillagerIds(unitOwner).length;
+              syncResourcesToData(unitOwner);
+              const newName = getVillagerName(d, newId);
+              addPopup(hut.x + 1, hut.y, `${newName} được sinh ra!`, '#9cff7b');
+              showWarning(`👶 ${newName} được sinh ra!`);
+              state.message = `👶 ${newName} được sinh ra! (Dân số: ${state.population}/${state.housingCap})`;
+            }
+            // Switch couple back to normal sleeping state 1 (glowing light only) after birth
+            let u = e[8993 + hut.bid];
+            let g = 0;
+            while (u > 0 && g++ < 16) {
+              if (e[1313 + u] === 2) e[1313 + u] = 1;
+              const ut = state.tasks.get(u);
+              if (ut) ut.breedTicks = 0;
+              u = e[4545 + u];
+            }
+            uiChanged = true;
           }
-          uiChanged = true;
         }
       }
 
@@ -4820,7 +4838,7 @@ function stepSimulation() {
         const nextHp = Math.min(maxHp, (e[1919 + unitId] & 0xff) + 1);
         e[2020 + unitId] = nextEnergy;
         e[1919 + unitId] = nextHp;
-        if (nextEnergy >= 96 && (e[1313 + unitId] !== 2 || task.workTicks > 38)) {
+        if (nextEnergy >= 96 && (e[1313 + unitId] !== 2 || (task.breedTicks || 0) >= 38)) {
           exitBuildingSlot(d, unitId);
           e[2222 + unitId] = 0;
           e[3333 + unitId] = -1;
@@ -5719,7 +5737,7 @@ function stepSimulation() {
           if (task.role === 'male') pair.hutTicks++;
           if (pair.hutTicks >= 80 && !pair.born) {
             pair.born = true;
-            const pairOwner = pair.maleId > 50 ? 1 : 0;
+            const pairOwner = getUnitOwner(d, pair.maleId);
             const pairPop = getVillagerIds(pairOwner).length;
             const pairHuts = getPlayerBuildings(pairOwner).filter((b) => !b.underConstruction && b.targetType === 2).length;
             const pairCap = Math.max(6, 6 + pairHuts * 6);
@@ -6465,7 +6483,9 @@ function stepVillagerNeeds() {
     state.animTick >= 600 &&
     state.animTick % 750 === 0
   ) {
-    if (startCourtshipPair(false)) changed = true;
+    for (const tribe of tribes) {
+      if (startCourtshipPair(false, null, tribe)) changed = true;
+    }
   }
 
   return changed;
@@ -7002,7 +7022,14 @@ function openCanvasBuildingMenu(bld) {
       label: 'HẸN HÒ SINH CON',
       iconAnim: 21,
       action: () => {
-        const ok = startCourtshipPair(true, bld);
+        if (state.mpMode && mpClient?.role === 'guest') {
+          mpClient.sendCommand({ kind: 'courtship', bid: bld.bid });
+          state.message = '💐 Đang gửi lệnh hẹn hò sinh con về Chủ phòng...';
+          state.canvasMenu = null;
+          render();
+          return;
+        }
+        const ok = startCourtshipPair(true, bld, state.localTribe ?? 0);
         if (!ok) {
           state.message =
             state.population >= state.housingCap
@@ -9210,6 +9237,9 @@ Promise.all([
         state.tribeUseRawWeapon[guestTribe] = Boolean(cmd.value);
       } else if (cmd.kind === 'setWeaponQueue') {
         adjustWeaponQueue(cmd.bid, cmd.weaponId, cmd.delta, true);
+      } else if (cmd.kind === 'courtship') {
+        const hut = getPlayerBuildings(guestTribe).find((b) => b.bid === cmd.bid && !b.underConstruction && b.targetType === 2) || null;
+        startCourtshipPair(true, hut, guestTribe);
       }
     };
 
