@@ -1,1 +1,38 @@
-/usr/bin/bash: line 5: javap: command not found
+public final class tr extends javax.microedition.midlet.MIDlet {
+  static tr a;
+
+  static e b;
+
+  public tr();
+    Code:
+       0: aload_0
+       1: invokespecial #11                 // Method javax/microedition/midlet/MIDlet."<init>":()V
+       4: aload_0
+       5: putstatic     #6                  // Field a:Ltr;
+       8: invokestatic  #8                  // Method b.d:()V
+      11: new           #2                  // class e
+      14: dup
+      15: invokespecial #9                  // Method e."<init>":()V
+      18: putstatic     #7                  // Field b:Le;
+      21: return
+
+  public final void destroyApp(boolean);
+    Code:
+       0: aload_0
+       1: invokevirtual #12                 // Method notifyDestroyed:()V
+       4: return
+
+  public final void pauseApp();
+    Code:
+       0: aload_0
+       1: invokevirtual #13                 // Method notifyPaused:()V
+       4: return
+
+  public final void startApp();
+    Code:
+       0: iconst_1
+       1: putstatic     #5                  // Field e.J:Z
+       4: getstatic     #7                  // Field b:Le;
+       7: invokevirtual #10                 // Method e.a:()V
+      10: return
+}

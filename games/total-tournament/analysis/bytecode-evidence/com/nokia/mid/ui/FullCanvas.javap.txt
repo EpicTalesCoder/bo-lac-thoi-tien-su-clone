@@ -1,0 +1,7 @@
+public abstract class com.nokia.mid.ui.FullCanvas extends com.hellomoto.fullscreen.FullCn {
+  protected com.nokia.mid.ui.FullCanvas();
+    Code:
+       0: aload_0
+       1: invokespecial #1                  // Method com/hellomoto/fullscreen/FullCn."<init>":()V
+       4: return
+}

@@ -2,6 +2,8 @@
 
 Nguồn: `~/Downloads/game2/total-tournament.jar` (mirror Dertz, 250KB, 56 file, 14 class).
 Bản decompile CFR đầy đủ 14/14 class nằm ở `analysis/decompiled-cfr/` (verify bằng re-run CFR mới, diff 0).
+Bản decompile Vineflower 1.12.0 đầy đủ 14/14 class nằm ở `analysis/decompiled-vineflower/` — sạch 0 lỗi, đọc dễ hơn CFR ở 3 chỗ CFR fails structure: `b.a(String)` (bộ giải mã tài nguyên), `e.i()`, `e.run()` (game loop). Dùng bản VF làm nguồn chính khi viết lại code.
+Bytecode evidence: `analysis/bytecode-evidence/*.javap.txt` — sinh lại bằng `javap 21 -p -c` thật (bản PR #17 trước đó chỉ là thông báo lỗi `javap: command not found`), nay gồm đủ 6 class game + 8 class stub `com/nokia/**`, `com/hellomoto/**`.
 
 ## 1. Nhận dạng (META-INF/MANIFEST.MF)
 
@@ -66,7 +68,7 @@ Script decode tham khảo: xem `analysis/data/` (đã kèm bản raw gốc).
 
 | File | Format (từ code e.java) | Nội dung |
 |---|---|---|
-| `cu2` | rows × 7 byte (bx=7): [dx,dy,w,h,ofsX,ofsY,imgIdx] signed; **row 0 = header, bỏ** | Bảng frame 117 frame (107 hợp lệ) |
+| `cu2` | rows × 7 byte (bx=7): [dx,dy,w,h,ofsX,ofsY,imgIdx] signed; **row 0 = header, bỏ** | Bảng frame 117 frame — **108 hợp lệ, 9 row rỗng** (rows 8,9,31,32,59,60,66–68; sửa số cũ "107"); decode đầy đủ trong `tables.json["cu2"]` |
 | `ca` | 220 row × 24 byte = 8 triple/row (bw=24); triple thứ 3: 61–64→0, âm→+256 | **Bảng composite thân lính `aH`**: mỗi pose row ghép nhiều part (dx,dy,imgIdx) |
 | `wlg` | 16×6 byte | Bảng set vũ khí 16 combo (slot→weapon id; 255 = trống) |
 | `wpn` | records 3 byte [objIdx, slot+1, code]; code+256 → switch {242:6, 243:5, 245:3, 246:2, 247:1}; nhóm cách [0,0,0] | **Weapon spawn theo level** — 6527 records / 11 khối |
@@ -75,7 +77,7 @@ Script decode tham khảo: xem `analysis/data/` (đã kèm bản raw gốc).
 | `cc` | 66 entry × 11 byte, column-major (aJ[11][bt]) | Bảng cấu hình map/camera |
 | `ccs` | 47 entry × 7 byte, column-major (h[11][bt]) | Bảng sound slots (dùng trong `r()`) |
 | `mua` | 12 row × 25 byte (by=25) | Bảng particle/mưa |
-| `cf` | n × 6 byte (6 cột/glyph) | Font metrics per language (a.java `b()`) |
+| `cf` | n × 6 byte (6 cột/glyph) | Font metrics per language (a.java `b()`: `a[6][n]` column-major, signed byte; tên file = `cf` + ngôn ngữ, jar chỉ có `cf` = lang 0) — **96 glyph**, decode trong `tables.json["cf"]` |
 | `text` | CP1251 thuần, field tách `=`, record tách xuống dòng | **UI strings Nga**: menu, 5 mode, HUD từng mode, pause dialog |
 | `text1` | UTF-8 | Credits: NET Lizard 2008, v2.1, team dev |
 | `text2` | UTF-8 | Help: mô tả 5 mode |
