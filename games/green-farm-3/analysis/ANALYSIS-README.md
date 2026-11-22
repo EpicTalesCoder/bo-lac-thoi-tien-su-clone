@@ -32,7 +32,7 @@ Tổng **44,307 dòng** Java decompiled; bytecode evidence (`javap -p -c`) cho 8
 ## Việc còn lại để playable
 
 1. ~~Viết decoder cho pack `/5` và `/10`~~ ✅ **XONG** — `tools/decode_image.py`: 2.884 sprite PNG (packs 2/5/7/8/11), format GLLib BSprite v5, I64RLE table đã khôi phục. Chi tiết: `PACK-MAP.md`.
-2. ~~Map game loop của `a` sang Phaser runtime~~ 🔄 **Phase B xong khung** — `web-port/gf-core.js` (state machine SPLASH→MENU→ABOUT/HELP/OPTIONS/EXIT_CONFIRM/FARM, keymap MIDP, pure/test được) + `game.js` (render menu tiếng Việt với sprite thật + input keyboard/touch). Farm view còn là placeholder → Phase C.
+2. ~~Map game loop của `a` sang Phaser runtime~~ ✅ **Phase B + C xong** — `web-port/gf-core.js` (state machine MIDP + nông trại 4×4: trồng/tưới/gặt/bán + save localStorage) + `game.js` (menu VI, farm view, nhạc MP3 + SFX). Chưa làm: sprite cây theo từng stage (đang dùng khối màu), frame composition/anim atlas, quest/IAP/network của bản gốc.
 3. ~~Dịch text từ `EN.*`~~ ✅ **XONG** — pack "EN" thực chất là **tiếng Việt**, decode exact: `tools/decode_text.py` → `web-port/assets/text/en.json` (12 trang, 3.834 chuỗi). Chi tiết: `TEXT-MAP.md`.
 
 Audio cũng đã trích xong: `tools/decode_audio.py` → 55 file (15 MIDI + 40 MP3) trong `web-port/assets/audio/`.

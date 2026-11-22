@@ -63,11 +63,12 @@ export const STATES = {
   OPTIONS: 'options',
   EXIT_CONFIRM: 'exitConfirm',
   FARM: 'farm',
+  SHOP: 'shop',
 };
 
 /** Trạng thái khởi đầu sau boot. */
 export function newGame() {
-  return { state: STATES.SPLASH, menuIndex: 0, text: null, tick: 0 };
+  return { state: STATES.SPLASH, menuIndex: 0, text: null, tick: 0, farm: null };
 }
 
 /**
@@ -137,6 +138,133 @@ export function menuRowAt(y) {
 /** Bước mô phỏng 1 tick 120ms (đếm tick cho hiệu ứng nhấp nháy con trỏ). */
 export function stepTick(g) {
   return { ...g, tick: g.tick + 1 };
+}
+
+/* ================= PHASE C — nông trại ================= */
+
+export const GRID_N = 4;                 // 4×4 = 16 ô đất
+export const PLOTS = GRID_N * GRID_N;
+
+/** 4 cây trồng — nhãn lấy từ text gốc (page_1), kinh tế tự cân đối. */
+export const CROPS = [
+  { id: 'wheat', cost: 10, sell: 18, growMs: 60000, seedCost: 10, nameRef: { page: 1, idx: 116 } },   // Trồng Lúa mì
+  { id: 'lettuce', cost: 15, sell: 28, growMs: 90000, seedCost: 15, nameRef: { page: 1, idx: 136 } }, // Xà lách
+  { id: 'lemon', cost: 25, sell: 45, growMs: 150000, seedCost: 25, nameRef: { page: 1, idx: 143 } },  // Cây chanh vàng
+  { id: 'apple', cost: 40, sell: 75, growMs: 240000, seedCost: 40, nameRef: { page: 1, idx: 108 } },  // Trồng Cây táo
+];
+
+export const START_COINS = 50;
+export const SAVE_KEY = 'gf3_save_farm1';
+
+export const PLOT_EMPTY = 'empty';
+export const PLOT_GROWING = 'growing';
+export const PLOT_READY = 'ready';
+
+/** Farm state khởi tạo. */
+export function newFarm() {
+  return {
+    coins: START_COINS,
+    inv: { wheat: 0, lettuce: 0, lemon: 0, apple: 0 },
+    plots: Array(PLOTS).fill(null),   // null | {crop, plantedAt, wateredAt}
+    selectedCrop: 0,
+  };
+}
+
+/** Trạng thái ô đất tại thời điểm now (derived, không mutate). */
+export function plotState(plot, now) {
+  if (!plot) return PLOT_EMPTY;
+  if (plot.wateredAt != null && now - plot.wateredAt >= CROPS.find((c) => c.id === plot.crop).growMs) {
+    return PLOT_READY;
+  }
+  return PLOT_GROWING;
+}
+
+/**
+ * Trồng tại ô i. Trả về {farm, error} — error: 'occupied' | 'no_coins'.
+ */
+export function plantAt(farm, i, now) {
+  if (farm.plots[i]) return { farm, error: 'occupied' };
+  const crop = CROPS[farm.selectedCrop];
+  if (farm.coins < crop.cost) return { farm, error: 'no_coins' };
+  const plots = farm.plots.slice();
+  plots[i] = { crop: crop.id, plantedAt: now, wateredAt: null };
+  return { farm: { ...farm, plots, coins: farm.coins - crop.cost }, error: null };
+}
+
+/** Tưới tại ô i (chỉ ô đã trồng chưa tưới). */
+export function waterAt(farm, i, now) {
+  const plot = farm.plots[i];
+  if (!plot || plot.wateredAt != null) return { farm, error: 'not_plantable' };
+  const plots = farm.plots.slice();
+  plots[i] = { ...plot, wateredAt: now };
+  return { farm: { ...farm, plots }, error: null };
+}
+
+/** Gặt tại ô i → cộng kho. error: 'empty' | 'not_ready'. */
+export function harvestAt(farm, i, now) {
+  const plot = farm.plots[i];
+  if (!plot) return { farm, error: 'empty' };
+  if (plotState(plot, now) !== PLOT_READY) return { farm, error: 'not_ready' };
+  const inv = { ...farm.inv, [plot.crop]: (farm.inv[plot.crop] || 0) + 1 };
+  const plots = farm.plots.slice();
+  plots[i] = null;
+  return { farm: { ...farm, plots, inv }, error: null, crop: plot.crop };
+}
+
+/** Bán toàn bộ kho ở Quầy hàng → coins. */
+export function sellAll(farm) {
+  let coins = farm.coins;
+  for (const crop of CROPS) coins += (farm.inv[crop.id] || 0) * crop.sell;
+  return { ...farm, coins, inv: { wheat: 0, lettuce: 0, lemon: 0, apple: 0 } };
+}
+
+/** Toạ độ canvas 240×320 → index ô đất (grid bắt đầu x=36,y=70, cell 36, gap 4). */
+export function plotIndexAt(x, y) {
+  const gx = (SCREEN_W - GRID_N * 36) / 2, gy = 70, cell = 36;
+  const c = Math.floor((x - gx) / cell), r = Math.floor((y - gy) / cell);
+  if (c < 0 || r < 0 || c >= GRID_N || r >= GRID_N) return -1;
+  // loại điểm rơi vào khoảng gap
+  if ((x - gx) % cell > cell - 4 || (y - gy) % cell > cell - 4) return -1;
+  return r * GRID_N + c;
+}
+
+/** Toolbar hạt giống: hàng y≈272, mỗi ô 52px từ x=12 → index crop. */
+export function toolbarIndexAt(x, y) {
+  if (y < 260 || y > 292) return -1;
+  const c = Math.floor((x - 12) / 52);
+  return c >= 0 && c < CROPS.length ? c : -1;
+}
+
+/** Hành động ngữ cảnh khi chạm ô i: trồng → tưới → gặt. */
+export function farmTap(farm, i, now) {
+  const st = plotState(farm.plots[i], now);
+  if (st === PLOT_EMPTY) return plantAt(farm, i, now);
+  if (st === PLOT_READY) return harvestAt(farm, i, now);
+  if (farm.plots[i].wateredAt == null) return waterAt(farm, i, now);
+  return { farm, error: null }; // đang lớn, không làm gì
+}
+
+/* ---------- save/load (serializer pure; localStorage ở game.js) ---------- */
+export function serializeFarm(farm) {
+  return JSON.stringify({ v: 1, coins: farm.coins, inv: farm.inv, plots: farm.plots, selectedCrop: farm.selectedCrop });
+}
+
+export function deserializeFarm(json) {
+  try {
+    const d = JSON.parse(json);
+    if (d && d.v === 1 && Array.isArray(d.plots) && d.plots.length === PLOTS
+        && typeof d.coins === 'number' && d.coins >= 0 && d.inv) {
+      return {
+        coins: d.coins,
+        inv: { wheat: d.inv.wheat || 0, lettuce: d.inv.lettuce || 0, lemon: d.inv.lemon || 0, apple: d.inv.apple || 0 },
+        plots: d.plots.map((p) => (p && CROPS.some((c) => c.id === p.crop))
+          ? { crop: p.crop, plantedAt: Number(p.plantedAt) || 0, wateredAt: p.wateredAt != null ? Number(p.wateredAt) : null }
+          : null),
+        selectedCrop: (d.selectedCrop >= 0 && d.selectedCrop < CROPS.length) ? d.selectedCrop : 0,
+      };
+    }
+  } catch (e) { /* corrupt → fresh */ }
+  return null;
 }
 
 /** Tra chuỗi từ dữ liệu en.json (đã fetch) theo chỉ dẫn TXT. */
