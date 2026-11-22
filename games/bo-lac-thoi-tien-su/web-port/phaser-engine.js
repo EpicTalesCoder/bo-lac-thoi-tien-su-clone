@@ -26,6 +26,32 @@ export function mountPhaserRuntime({
   const offCtx = offscreen.getContext('2d');
   offCtx.imageSmoothingEnabled = false;
 
+  // Background Web Worker ticker: keeps simulation & 1v1 multiplayer snapshots running at full 120ms speed
+  // even when the player switches to another browser tab or minimizes the window (where rAF pauses completely)!
+  let lastSimAt = performance.now();
+  const runBackgroundCatchup = () => {
+    const now = performance.now();
+    const elapsed = now - lastSimAt;
+    if (!document.hidden && elapsed < tickMs * 1.75) return;
+    const steps = Math.min(5, Math.floor(elapsed / tickMs));
+    if (steps <= 0) return;
+    lastSimAt += steps * tickMs;
+    if (now - lastSimAt > tickMs * 4) lastSimAt = now;
+    for (let i = 0; i < steps; i++) {
+      onStepSimulation(now);
+    }
+  };
+  let bgWorker = null;
+  try {
+    const blob = new Blob([`setInterval(() => postMessage(1), ${Math.max(40, Math.round(tickMs))});`], {
+      type: 'application/javascript',
+    });
+    bgWorker = new Worker(URL.createObjectURL(blob));
+    bgWorker.onmessage = runBackgroundCatchup;
+  } catch {
+    setInterval(runBackgroundCatchup, Math.max(40, Math.round(tickMs)));
+  }
+
   const PhaserGlobal = typeof window !== 'undefined' ? window.Phaser : null;
 
   if (!PhaserGlobal) {
@@ -42,6 +68,7 @@ export function mountPhaserRuntime({
       acc += dt;
       while (acc >= tickMs) {
         acc -= tickMs;
+        lastSimAt = performance.now();
         onStepSimulation(now);
       }
       const subTick = Math.max(0, Math.min(0.99, acc / tickMs));
@@ -64,7 +91,7 @@ export function mountPhaserRuntime({
         onRenderFrame(directCtx);
       },
       requestRedraw() {
-        onRenderFrame(directCtx);
+        if (!document.hidden) onRenderFrame(directCtx);
       },
     };
   }
@@ -106,7 +133,10 @@ export function mountPhaserRuntime({
     }
 
     flushToGpu() {
-      if (!phaserTexture) return;
+      if (!phaserTexture || document.hidden) {
+        dirty = true;
+        return;
+      }
       onRenderFrame(offCtx);
       const texCtx = phaserTexture.getContext();
       texCtx.imageSmoothingEnabled = false;
@@ -122,6 +152,7 @@ export function mountPhaserRuntime({
       let stepped = false;
       while (acc >= tickMs) {
         acc -= tickMs;
+        lastSimAt = performance.now();
         onStepSimulation(time);
         stepped = true;
       }
@@ -144,8 +175,18 @@ export function mountPhaserRuntime({
     transparent: false,
     backgroundColor: '#000000',
     audio: { noAudio: true },
+    pauseOnBlur: false,
     banner: false,
     scene: [J2MEPhaserScene],
+  });
+
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+      lastSimAt = performance.now();
+      dirty = true;
+      const scene = game.scene?.getScene?.('J2MEPhaserScene');
+      if (scene && phaserTexture) scene.flushToGpu();
+    }
   });
 
   return {
