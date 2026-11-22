@@ -62,43 +62,59 @@ function tintCanvas(src, color, alpha) {
   return c;
 }
 
-const KIT = { poses: {}, weapons: [], explosions: [], debris: [], bars: {}, icons: {} };
+/* Bảng frame chính xác giải mã từ file dữ liệu cu2 của JAR gốc
+ * (aO[row] = dx,dy,w,h,ofsX,ofsY,imgIdx). Lính = u3(0,0,40x39) quay PHẢI.
+ * Muzzle flash = u0 rows 43-48 (vàng loại A / xanh loại B). Nổ lớn = u6 33-42. */
+const FR = {
+  soldier: [3, 0, 0, 40, 39],
+  flashYellow: [[0, 0, 21, 27], [21, 0, 23, 30], [44, 0, 24, 29]],
+  flashBlue: [[0, 30, 21, 27], [21, 30, 23, 30], [44, 30, 24, 29]],
+  boomBig: [[68, 0, 24, 36], [22, 0, 22, 42], [63, 36, 19, 38], [44, 0, 24, 36], [0, 0, 22, 42], [44, 36, 19, 38], [0, 42, 38, 34], [82, 36, 32, 31], [92, 0, 24, 25], [82, 67, 28, 32]],
+  boomSmall: [[0, 76, 12, 12], [24, 76, 12, 12], [12, 76, 12, 12], [36, 76, 12, 13], [0, 88, 12, 12], [12, 88, 12, 12], [24, 88, 12, 12], [52, 76, 14, 14], [66, 76, 16, 16]],
+  flagRed: [[0, 0, 15, 14], [0, 14, 15, 14], [0, 28, 15, 14]],
+  flagGreen: [[15, 0, 15, 14], [15, 14, 15, 14], [15, 28, 15, 14]],
+  base: [7, 0, 0, 24, 23],
+  guns: { saw: [5, 0, 0, 37, 14], mg: [5, 37, 17, 37, 8], shot: [5, 0, 0, 37, 14], rock: [5, 37, 0, 42, 17], plas: [5, 0, 14, 37, 16], beam: [5, 0, 14, 37, 16] },
+  rocketBall: [6, 68, 0, 24, 36],
+};
+
+const KIT = { soldier: null, flash: [], boomBig: [], boomSmall: [], flagRed: [], flagGreen: [], base: null, weapons: [], rocketBall: null, bars: {}, icons: {} };
+
+function cropImg(imgIdx, x, y, w, h) {
+  const src = IMG[`u${imgIdx}`];
+  if (!src) return null;
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  c.getContext('2d').drawImage(src, x, y, w, h, 0, 0, w, h);
+  return c;
+}
 
 function buildKit() {
-  if (!IMG.u2) return;
-  // 3 pose lính từ 1/3 trên của u2 (lunge/chạy, bò, đứng ngắm)
-  const poseDefs = [['run', 0, 0, 38, 36], ['prone', 38, 0, 38, 36], ['aim', 76, 0, 38, 36]];
-  for (const [key, x, y, w, h] of poseDefs) {
-    const base = trimCanvas(IMG.u2, x, y, w, h);
-    KIT.poses[key] = {
-      green: base,
-      red: tintCanvas(base, '#ff2d2d', 0.34),
-      yellow: tintCanvas(base, '#ffd84d', 0.30),
-    };
+  if (!IMG.u3) return;
+  const body = cropImg(...FR.soldier);
+  KIT.soldier = {
+    green: body,
+    red: tintCanvas(body, '#ff3b2d', 0.38),
+    yellow: tintCanvas(body, '#ffd84d', 0.32),
+  };
+  KIT.flash = FR.flashYellow.map(([x, y, w, h]) => cropImg(0, x, y, w, h));
+  KIT.flashBlue = FR.flashBlue.map(([x, y, w, h]) => cropImg(0, x, y, w, h));
+  KIT.boomBig = FR.boomBig.map(([x, y, w, h]) => cropImg(6, x, y, w, h)).filter(Boolean);
+  KIT.boomSmall = FR.boomSmall.map(([x, y, w, h]) => cropImg(6, x, y, w, h)).filter(Boolean);
+  KIT.flagRed = FR.flagRed.map(([x, y, w, h]) => cropImg(4, x, y, w, h));
+  KIT.flagGreen = FR.flagGreen.map(([x, y, w, h]) => cropImg(4, x, y, w, h));
+  KIT.base = cropImg(...FR.base);
+  KIT.rocketBall = cropImg(...FR.rocketBall);
+  // icon vũ khí theo thứ tự slot 1-6
+  const order = ['saw', 'mg', 'shot', 'rock', 'plas', 'beam'];
+  for (const k of order) {
+    const g = FR.guns[k];
+    KIT.weapons.push(g ? cropImg(...g) : null);
   }
-  // 6 icon vũ khí từ u5 (79x30 → 6 mảnh 13px)
-  if (IMG.u5) {
-    for (let i = 0; i < 6; i++) KIT.weapons.push(trimCanvas(IMG.u5, i * 13, 0, 13, 30));
-  }
-  // nổ: u0 2x2 (51x40), u6 2x2 (58x50)
-  if (IMG.u0) {
-    KIT.explosions.small = [[0, 0, 51, 40], [52, 0, 51, 40], [0, 40, 51, 40], [52, 40, 51, 40]].map(([x, y, w, h]) => trimCanvas(IMG.u0, x, y, w, h));
-  }
-  if (IMG.u6) {
-    KIT.explosions.big = [[0, 0, 58, 50], [58, 0, 58, 50], [0, 50, 58, 51], [58, 50, 58, 51]].map(([x, y, w, h]) => trimCanvas(IMG.u6, x, y, w, h));
-  }
-  // mảnh vỡ u1 (86x35 → 3 mảnh)
-  if (IMG.u1) {
-    for (let i = 0; i < 3; i++) KIT.debris.push(trimCanvas(IMG.u1, i * 28, 0, 28, 35));
-  }
-  // thanh máu u8: (2,0,32,11) nhỏ, (38,0,32,11) nhỏ2, (0,15,72,11) khung ngang, (0,30,72,69) cột
+  // thanh máu HUD từ u8
   if (IMG.u8) {
-    KIT.bars.small = trimCanvas(IMG.u8, 2, 0, 32, 11);
-    KIT.bars.small2 = trimCanvas(IMG.u8, 38, 0, 32, 11);
     KIT.bars.frame = trimCanvas(IMG.u8, 0, 15, 72, 11);
-    KIT.bars.vcol = trimCanvas(IMG.u8, 0, 30, 72, 69);
   }
-  // radar + icon nhỏ từ s0
   if (IMG.s0) {
     KIT.icons.radar = trimCanvas(IMG.s0, 0, 0, 58, 88);
     KIT.icons.dot1 = trimCanvas(IMG.s0, 0, 90, 22, 17);
@@ -365,50 +381,73 @@ function soldierColor(team) { return team === 1 ? '#ff5544' : '#66cc55'; }
 
 function drawSoldier(g, m, s, ix, iy, cam) {
   if (s.dead) return;
-  const teamKey = s.team === 1 ? 'red' : (s.team > 1 ? 'yellow' : 'green');
-  const pose = s.fireT > 140 ? 'aim' : (Math.abs(s.x - s.px) + Math.abs(s.y - s.py) > 0.4 ? 'run' : 'aim');
-  const kitPoses = KIT.poses[pose] || KIT.poses.aim;
-  const spr = kitPoses[teamKey] || kitPoses.green;
-  const flip = Math.cos(s.dir) < -0.25;
+  const moving = Math.abs(s.x - s.px) + Math.abs(s.y - s.py) > 0.4;
+  const bob = moving && Math.floor(m.time / 120) % 2 === 0 ? 1 : 0;
+  const flip = Math.cos(s.dir) < 0;
+  const teamKey = s.team === 1 ? 'red' : (s.team > 1 ? (s.id % 2 ? 'yellow' : 'red') : 'green');
+  const spr = (KIT.soldier && KIT.soldier[teamKey]) || KIT.soldier;
+  if (!spr) return;
   const dw = spr.width, dh = spr.height;
-  const dx = ix - dw / 2, dy = iy - dh / 2;
   g.save();
-  g.translate(ix, iy);
+  g.translate(ix, iy + bob);
   if (flip) g.scale(-1, 1);
-  g.drawImage(spr, -dw / 2, -dh / 2);
+  // chân trúng vị trí entity: vẽ thân lệch lên
+  g.drawImage(spr, -dw / 2, -dh / 2 - 6);
   g.restore();
   if (s.hitT > 0) {
     g.globalAlpha = Math.min(0.6, s.hitT / 300);
     g.fillStyle = '#fff';
-    g.fillRect(dx, dy, dw, dh);
+    g.fillRect(ix - dw / 2, iy - dh / 2 - 6, dw, dh);
     g.globalAlpha = 1;
   }
   // vòng người chơi
   if (!s.bot) {
     g.strokeStyle = '#fff'; g.globalAlpha = 0.7;
-    g.beginPath(); g.arc(ix, iy, 11, 0, Math.PI * 2); g.stroke();
+    g.beginPath(); g.arc(ix, iy, 13, 0, Math.PI * 2); g.stroke();
     g.globalAlpha = 1;
+  }
+  // muzzle flash 3 frame trỏ theo hướng bắn
+  if (s.fireT > 40 && KIT.flash.length) {
+    const fi = Math.floor(s.fireT / 90) % KIT.flash.length;
+    const fl = KIT.flash[fi];
+    const gx = ix + Math.cos(s.dir) * 14, gy = iy - 12 + Math.sin(s.dir) * 14;
+    g.save();
+    g.translate(gx, gy);
+    g.rotate(s.dir);
+    const fs = 0.6;
+    g.globalAlpha = Math.min(1, s.fireT / 200);
+    g.drawImage(fl, -fl.width * fs / 2, -fl.height * fs / 2, fl.width * fs, fl.height * fs);
+    g.restore();
+    g.globalAlpha = 1;
+  }
+  // súng trên tay
+  const w = WEAPONS[s.weapon];
+  const icon = KIT.weapons[s.weapon];
+  const hx = ix + Math.cos(s.dir) * 12, hy = iy - 10 + Math.sin(s.dir) * 12;
+  if (icon) {
+    g.save();
+    g.translate(hx, hy);
+    g.rotate(s.dir + (flip ? Math.PI : 0));
+    g.drawImage(icon, -icon.width / 4, -icon.height / 2);
+    g.restore();
+  } else {
+    g.strokeStyle = w.color; g.lineWidth = 2;
+    g.beginPath(); g.moveTo(ix + Math.cos(s.dir) * 6, iy + Math.sin(s.dir) * 6); g.lineTo(hx, hy); g.stroke();
+    g.lineWidth = 1;
   }
   // cầm cờ
   if (s.carrying >= 0 && m.flags) {
     const f = m.flags[s.carrying];
-    g.fillStyle = f.team === 1 ? '#ff5544' : '#66cc55';
-    g.fillRect(ix - 2, iy - dh / 2 - 10, 8, 6);
-    g.fillStyle = '#ccc'; g.fillRect(ix - 3, iy - dh / 2 - 12, 1, 12);
+    const flags = f.team === 1 ? KIT.flagRed : KIT.flagGreen;
+    if (flags.length) {
+      const ff = flags[Math.floor(m.time / 150) % flags.length];
+      g.drawImage(ff, ix - 8, iy - dh / 2 - 16);
+    }
   }
   // thanh máu nhỏ trên đầu địch
   if (s.bot && s.hp < 100) {
-    g.fillStyle = '#300'; g.fillRect(ix - 8, dy - 4, 16, 2);
-    g.fillStyle = soldierColor(s.team); g.fillRect(ix - 8, dy - 4, 16 * Math.max(0, s.hp) / 100, 2);
-  }
-  // súng trên tay khi bắn
-  if (s.fireT > 0) {
-    const w = WEAPONS[s.weapon];
-    g.strokeStyle = w.color; g.lineWidth = 2;
-    const gx = ix + Math.cos(s.dir) * 8, gy = iy + Math.sin(s.dir) * 8;
-    g.beginPath(); g.moveTo(ix + Math.cos(s.dir) * 3, iy + Math.sin(s.dir) * 3); g.lineTo(gx, gy); g.stroke();
-    g.fillStyle = '#ffe97a'; g.fillRect(gx - 1, gy - 1, 3, 3);
-    g.lineWidth = 1;
+    g.fillStyle = '#300'; g.fillRect(ix - 10, iy - dh / 2 - 10, 20, 2);
+    g.fillStyle = soldierColor(s.team); g.fillRect(ix - 10, iy - dh / 2 - 10, 20 * Math.max(0, s.hp) / 100, 2);
   }
 }
 
@@ -433,14 +472,19 @@ function drawWorld(g, m, cam, lerpT) {
       g.fillText(p.type === 'heart' ? '+' : 'S', x, y + 3);
     }
   }
-  // cờ
+  // cờ + căn cứ (sprite gốc: cờ u4 3 frame, căn cứ u7)
   if (m.flags) {
+    const tf = Math.floor(Date.now() / 150) % 3;
     for (const f of m.flags) {
       const x = f.x - cam.x, y = f.y - cam.y;
-      g.fillStyle = '#ddd'; g.fillRect(x - 1, y - 16, 2, 18);
-      g.fillStyle = f.team === 1 ? '#ff5544' : '#66cc55';
-      const wave = Math.sin(Date.now() / 180) * 2;
-      g.fillRect(x + 1, y - 16, 9, 6 + wave);
+      if (KIT.base) g.drawImage(KIT.base, x - 12, y - 4);
+      const flags = f.team === 1 ? KIT.flagRed : KIT.flagGreen;
+      if (flags.length) {
+        g.drawImage(flags[tf], x - 8, y - 16);
+      } else {
+        g.fillStyle = f.team === 1 ? '#ff5544' : '#66cc55';
+        g.fillRect(x + 1, y - 16, 9, 6);
+      }
     }
   }
   // lính
@@ -459,18 +503,31 @@ function drawWorld(g, m, cam, lerpT) {
       continue;
     }
     const x = b.x - cam.x, y = b.y - cam.y;
+    if (b.aoe && KIT.rocketBall) {
+      // đạn rocket = cầu lửa
+      const rb = KIT.rocketBall;
+      g.save();
+      g.translate(x, y);
+      g.rotate(Math.atan2(b.dy, b.dx));
+      g.drawImage(rb, -6, -6, 14, 14);
+      g.restore();
+      g.globalAlpha = 0.35; g.fillStyle = '#ffb84d';
+      g.fillRect(x - b.dx * 4 - 1, y - b.dy * 4 - 1, 3, 3);
+      g.globalAlpha = 1;
+      continue;
+    }
     g.fillStyle = b.color;
     const sz = b.aoe ? 4 : 2;
     g.fillRect(x - sz / 2, y - sz / 2, sz, sz);
     if (b.trail) { g.globalAlpha = 0.4; g.fillRect(x - b.dx * 2, y - b.dy * 2, 2, 2); g.globalAlpha = 1; }
   }
-  // nổ
+  // nổ: chuỗi frame cầu lửa u6 (lớn 10 frame, nhỏ 9 frame)
   for (const e of m.explosions) {
-    const set = e.small ? (KIT.explosions.small || []) : (KIT.explosions.big || []);
-    if (!set.length) continue;
+    const set = e.small ? KIT.boomSmall : KIT.boomBig;
+    if (!set || !set.length) continue;
     const fi = Math.min(set.length - 1, Math.floor(e.t / 110));
     const spr = set[fi];
-    const scale = e.small ? 0.7 : 1.1;
+    const scale = e.small ? 0.8 : 1.25;
     g.drawImage(spr, e.x - cam.x - spr.width * scale / 2, e.y - cam.y - spr.height * scale / 2, spr.width * scale, spr.height * scale);
   }
   // hạt
