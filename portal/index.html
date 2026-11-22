@@ -196,14 +196,16 @@
   </div>
   <script type="module">
     const grid = document.getElementById('game-grid');
-    const res = await fetch('./games/games-manifest.json');
+    const res = await fetch('../games/games-manifest.json');
     const games = await res.json();
+    // manifest ghi path tương đối từ ROOT repo; trang portal ở /portal/ nên cần dịch ../
+    const fromRoot = (p) => String(p || '').replace(/^\.\//, '../');
     for (const g of games) {
       const card = document.createElement('article');
       card.className = 'card';
       card.innerHTML = `
         <div class="cover-wrap">
-          <img src="${g.coverImage}" alt="${g.title}">
+          <img src="${fromRoot(g.coverImage)}" alt="${g.title}">
           <span class="res-tag">${g.resolution}</span>
         </div>
         <div class="card-body">
@@ -213,8 +215,8 @@
             ${(g.features || []).map((f) => `<span class="tag">${f}</span>`).join('')}
           </div>
           <div class="actions">
-            <a class="btn btn-primary" href="${g.playUrl}">▶ Mở Menu Game</a>
-            <a class="btn btn-secondary" href="${g.directGameUrl}">⚡ Vào Thẳng Màn 1</a>
+            <a class="btn btn-primary" href="${fromRoot(g.playUrl)}">▶ Mở Menu Game</a>
+            <a class="btn btn-secondary" href="${fromRoot(g.directGameUrl)}">⚡ Vào Thẳng Màn 1</a>
           </div>
         </div>
       `;

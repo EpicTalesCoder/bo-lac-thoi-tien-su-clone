@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Green Farm 3 — Phaser 3 Web Port</title>
+</head>
+<body style="background:#111;color:#eee;font-family:monospace;text-align:center;padding:32px">
+  <h1>Green Farm 3 <small style="color:#888">(Gameloft · 240×320 · bản VI)</small></h1>
+  <canvas id="game" width="240" height="320" style="border:1px solid #444;image-rendering:pixelated" autofocus></canvas>
+  <p id="status" style="color:#ffd84d">Đang nạp runtime…</p>
+  <p style="color:#8fa88f;font-size:12px">Phím: mũi tên/WASD di chuyển · Enter/5 Chọn · Q/E phím mềm · click canvas cũng được</p>
+  <p><a href="../../../index.html" style="color:#9cff7b">← Quay lại Cổng Game</a></p>
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.min.js"></script>
+  <script type="module">
+    import './game.js';
+    const statusEl = document.getElementById('status');
+    requestAnimationFrame(() => setTimeout(() => { statusEl.textContent = 'Sẵn sàng — bấm phím bất kỳ để vào menu'; }, 300));
+  </script>
+</body>
+</html>

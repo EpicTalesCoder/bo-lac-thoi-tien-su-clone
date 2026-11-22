@@ -16,5 +16,46 @@
       "10 màn Chiến dịch + Trận tùy chỉnh",
       "5 ngôn ngữ gốc (/0../4) & Web Audio MIDI (/sa)"
     ]
+  },
+  {
+    "slug": "total-tournament",
+    "title": "Total Tournament",
+    "originalTitle": "Total Tournament",
+    "vendor": "Net Lizard",
+    "resolution": "240×320",
+    "genre": "Top-down team action (shooter)",
+    "jarFile": "games/total-tournament/original/total-tournament.jar",
+    "playUrl": "./games/total-tournament/web-port/index.html",
+    "directGameUrl": "./games/total-tournament/web-port/index.html",
+    "coverImage": "./games/total-tournament/web-port/assets/li1.png",
+    "status": "playable",
+    "features": [
+      "Phaser 3 WebGL pipeline · canvas 240×320 · sim tick 120ms như MIDP",
+      "5 chế độ: Tử chiến (DM), Đồng đội 4v4, Sinh tồn theo đợt, Cướp cờ (CTF), Anh hùng cuối",
+      "6 loại vũ khí: cưa điện, súng máy, shotgun, bazooka (nổ lan), plasma, beam",
+      "AI bot tấn công/trinh sát với LOS raycast · radar minimap · âm thanh WebAudio tổng hợp",
+      "Song ngữ VI/EN lưu localStorage · kỷ lục theo chế độ",
+      "Sprite giải mã từ JAR gốc (XOR 3 tầng) — analysis/ có source decompiled"
+    ]
+  },
+  {
+    "slug": "green-farm-3",
+    "title": "Green Farm 3",
+    "originalTitle": "Green Farm 3",
+    "vendor": "Gameloft",
+    "resolution": "240×320",
+    "genre": "Mô phỏng nông trại",
+    "jarFile": "games/green-farm-3/original/green-farm-3-240x320.jar",
+    "playUrl": "./games/green-farm-3/web-port/index.html",
+    "directGameUrl": "./games/green-farm-3/web-port/index.html",
+    "coverImage": "./games/green-farm-3/web-port/assets/icon.png",
+    "status": "playable",
+    "features": [
+      "PLAYABLE: trồng → tưới → chờ cây lớn (thời gian thật) → gặt → bán ở Quầy hàng",
+      "4 cây từ bản gốc: Lúa mì, Xà lách, Chanh vàng, Cây táo (text VI decode từ JAR)",
+      "Save localStorage tự động — reload giữ nguyên nông trại",
+      "Menu + GIỚI THIỆU + TRỢ GIÚP tiếng Việt · nhạc MP3 gốc + SFX",
+      "2.884 sprite PNG + 55 audio decode từ GLLib BSprite"
+    ]
   }
 ]
