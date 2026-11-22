@@ -37,5 +37,24 @@
       "Song ngữ VI/EN lưu localStorage · kỷ lục theo chế độ",
       "Sprite giải mã từ JAR gốc (XOR 3 tầng) — analysis/ có source decompiled"
     ]
+  },
+  {
+    "slug": "green-farm-3",
+    "title": "Green Farm 3",
+    "originalTitle": "Green Farm 3",
+    "vendor": "Gameloft",
+    "resolution": "240×320",
+    "genre": "Mô phỏng nông trại",
+    "jarFile": "games/green-farm-3/original/green-farm-3-240x320.jar",
+    "playUrl": "./games/green-farm-3/web-port/index.html",
+    "directGameUrl": "./games/green-farm-3/web-port/index.html",
+    "coverImage": "./games/green-farm-3/web-port/assets/icon.png",
+    "status": "in-progress",
+    "features": [
+      "Giao diện tiếng Việt decode xong (3.834 chuỗi, 12 trang + 19 mục IAP)",
+      "2.884 sprite PNG decode từ GLLib BSprite (packs 2/5/7/8/11)",
+      "55 file nhạc trích từ pack 3 (15 MIDI + 40 MP3)",
+      "Original JAR (SHA-256 verified) + CFR decompile 44.307 dòng + bytecode evidence"
+    ]
   }
 ]
