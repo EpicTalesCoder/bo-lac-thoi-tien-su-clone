@@ -1,0 +1,25 @@
+public interface com.nokia.mid.ui.DirectGraphics {
+  public abstract void setARGBColor(int);
+
+  public abstract void drawTriangle(int, int, int, int, int, int, int);
+
+  public abstract void fillTriangle(int, int, int, int, int, int, int);
+
+  public abstract void drawPolygon(int[], int, int[], int, int, int);
+
+  public abstract void fillPolygon(int[], int, int[], int, int, int);
+
+  public abstract void drawPixels(int[], boolean, int, int, int, int, int, int, int, int);
+
+  public abstract void drawPixels(byte[], byte[], int, int, int, int, int, int, int, int);
+
+  public abstract void drawPixels(short[], boolean, int, int, int, int, int, int, int, int);
+
+  public abstract void getPixels(int[], int, int, int, int, int, int, int);
+
+  public abstract void getPixels(byte[], byte[], int, int, int, int, int, int, int);
+
+  public abstract void getPixels(short[], int, int, int, int, int, int, int);
+
+  public abstract void drawImage(javax.microedition.lcdui.Image, int, int, int, int);
+}

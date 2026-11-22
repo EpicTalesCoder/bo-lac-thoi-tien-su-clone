@@ -1,0 +1,3 @@
+public interface com.nokia.mid.sound.SoundListener {
+  public abstract void soundStateChanged(com.nokia.mid.sound.Sound, int);
+}
