@@ -93,6 +93,9 @@ export function mountPhaserRuntime({
       requestRedraw() {
         if (!document.hidden) onRenderFrame(directCtx);
       },
+      markDirty() {
+        // Canvas2D fallback draws on next rAF frame
+      },
     };
   }
 
@@ -216,6 +219,9 @@ export function mountPhaserRuntime({
       if (scene && phaserTexture) {
         scene.flushToGpu();
       }
+    },
+    markDirty() {
+      dirty = true;
     },
   };
 }

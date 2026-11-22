@@ -2728,6 +2728,7 @@ function assignHuntTask(unitId, animalOcc, defendOnly = false) {
   const inRange = Math.max(Math.abs(ax - ux), Math.abs(ay - uy)) <= getUnitRange(unitId);
   const planned = inRange ? { path: [], stepProgress: 0 } : planUnitPath(unitId, ax, ay, true);
   if (planned === null) return false;
+  e[7777 + unitId] = 3; // Sprint when chasing or fighting wild animals (Deer, Boar, Tiger)!
   state.tasks.set(unitId, {
     kind: 'hunt',
     path: planned.path,
@@ -3592,7 +3593,11 @@ function isUnitSprinting(unitId) {
   const e = d.entityData;
   const task = state.tasks.get(unitId) || state.enemyTasks.get(unitId);
   const isCombatSprint =
-    task && (task.kind === 'armForBattle' || task.kind === 'attackUnit' || task.kind === 'attackBuilding');
+    task &&
+    (task.kind === 'armForBattle' ||
+      task.kind === 'attackUnit' ||
+      task.kind === 'attackBuilding' ||
+      (task.kind === 'hunt' && task.phase !== 'pickup'));
   return (
     ((e[7777 + unitId] & 0xff) > 0 || isCombatSprint) &&
     (e[1414 + unitId] & 0xff) >= 12 &&
@@ -3605,12 +3610,14 @@ function getUnitStepTicks(unitId, dx, dy) {
   const d = state.data;
   let speedIdx = Math.max(2, Math.min(8, (d.entityData[1010 + unitId] & 0xff) || 8));
   if (isUnitSprinting(unitId)) {
-    // Authentic J2ME sprint speed (b.java:2092 / mo[15]): ~2x faster (4 ticks/tile cardinal, 6 diagonal)
+    // Authentic J2ME sprint speed (~2x faster than walk)
     speedIdx = Math.max(4, speedIdx - 4);
   }
   const isDiagonal = dx !== 0 && dy !== 0;
   const tableVal = d.mapTableData[d.mapTableOffsets[15] + (isDiagonal ? 9 : 0) + speedIdx] & 0xff;
-  return tableVal || (isDiagonal ? 11 : 8);
+  const raw = tableVal || (isDiagonal ? 11 : 8);
+  // Crisp, responsive RTS pace (~28% snappier than slow 960ms/tile walk: ~6t/8t walk, ~3t/4t sprint)
+  return Math.max(2, Math.round(raw * 0.72));
 }
 
 function getUnitCarryCap(unitId) {
@@ -8235,7 +8242,8 @@ canvas.addEventListener('pointermove', (event) => {
     state.selectionBox.x1 = Math.max(0, Math.min(LOGICAL_WIDTH, x));
     state.selectionBox.y1 = Math.max(topUi, Math.min(bottomTop, y));
     state.cursor = screenToMapCell(state.selectionBox.x1, state.selectionBox.y1);
-    draw();
+    if (phaserRuntime?.markDirty) phaserRuntime.markDirty();
+    else draw();
     return;
   }
   const topHudHeight = state.selectedUnit > 0 && !state.storyDialog && !state.missionResult ? (state.data.mapTopUi ?? 22) + 48 : (state.data.mapTopUi ?? 22);
@@ -8246,7 +8254,9 @@ canvas.addEventListener('pointermove', (event) => {
       if (state.buildType !== null) updateBuildPreview();
     }
   }
-  draw();
+  // Schedule 1 crisp VSync GPU flush at 60 FPS instead of blocking the main thread on every 200-500Hz pointermove!
+  if (phaserRuntime?.markDirty) phaserRuntime.markDirty();
+  else draw();
 });
 
 canvas.addEventListener('pointerleave', () => {
@@ -8685,8 +8695,8 @@ Promise.all([
             const maxCamX = Math.max(0, d.width - getViewportCols());
             const maxCamY = Math.max(0, d.height - getViewportRows());
             const dtSec = (dt || 16.6) / 1000;
-            const stepX = dtSec * 34; // 34 tiles/sec horizontal pan
-            const stepY = dtSec * 44; // 44 tiles/sec fast vertical pan (matches 22x16 tile aspect ratio!)
+            const stepX = dtSec * 44; // 44 tiles/sec snappy horizontal pan
+            const stepY = dtSec * 56; // 56 tiles/sec snappy vertical pan (matches 22x16 tile aspect ratio!)
             const curX = state.smoothCamX ?? state.cameraX ?? 0;
             const curY = state.smoothCamY ?? state.cameraY ?? 0;
             const nextX = Math.max(0, Math.min(maxCamX, curX + vx * stepX));
