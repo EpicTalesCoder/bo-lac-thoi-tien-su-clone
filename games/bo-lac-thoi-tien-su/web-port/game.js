@@ -1666,22 +1666,15 @@ function getAssignedBuilderCount(bid, excludeUnitId = 0) {
       seen.add(uid);
       continue;
     }
-    // Keep counting builders who temporarily stepped away to grab a weapon / defend / eat / rest
+    // Keep counting builders who temporarily stepped away to grab a weapon / defend / eat / rest / heal
     // so the construction site does NOT falsely display "!" (abandoned)!
-    if (
-      t.kind === 'armForBattle' ||
-      t.kind === 'attackUnit' ||
-      t.kind === 'attackBuilding' ||
-      t.kind === 'eat' ||
-      t.kind === 'rest'
-    ) {
-      const saved = state.savedJobs.get(uid);
-      if (saved?.kind === 'build' && saved.bid === bid && (e[1919 + uid] & 0xff) > 0) {
-        seen.add(uid);
-      }
+    const saved = state.savedJobs.get(uid);
+    if (saved?.kind === 'build' && saved.bid === bid && (e[1919 + uid] & 0xff) > 0) {
+      seen.add(uid);
     }
   }
-  return seen.size;
+  const remoteCnt = state.remoteBuilderCounts?.get?.(bid) || 0;
+  return Math.max(seen.size, remoteCnt);
 }
 
 function assignBuildTask(unitId, bld, carryWood = false) {
@@ -2208,6 +2201,7 @@ function isBuildingSlot0ActiveInside(bid) {
 
 function isBuildingSlot0Occupied(bid) {
   if (!state.data) return false;
+  if (state.remoteStaffedBids?.has?.(bid)) return true;
   const e = state.data.entityData;
   let u = e[8993 + bid];
   let g = 0;
@@ -2223,17 +2217,11 @@ function isBuildingSlot0Occupied(bid) {
     }
     if (t.kind === 'chefFetch' && t.kitchen?.bid === bid) return true;
     if ((t.kind === 'blacksmithFetch' || t.kind === 'blacksmithDeliver') && t.workshop?.bid === bid) return true;
-    if (
-      t.kind === 'armForBattle' ||
-      t.kind === 'attackUnit' ||
-      t.kind === 'attackBuilding' ||
-      t.kind === 'eat' ||
-      t.kind === 'rest'
-    ) {
-      const saved = state.savedJobs.get(uid);
-      if (saved?.kind === 'workBuilding' && saved.bid === bid) {
-        if (!Array.isArray(saved.preferredSlots) || saved.preferredSlots.includes(0)) return true;
-      }
+  }
+  for (const [uid, saved] of state.savedJobs.entries()) {
+    if ((e[1919 + uid] & 0xff) <= 0) continue;
+    if (saved?.kind === 'workBuilding' && saved.bid === bid) {
+      if (!Array.isArray(saved.preferredSlots) || saved.preferredSlots.includes(0)) return true;
     }
   }
   return false;
@@ -7069,7 +7057,7 @@ function openCanvasBuildingMenu(bld) {
       label: 'VÀO SÀN NHẢY DISCO',
       iconAnim: 13,
       action: () => {
-        if (!isBuildingSlot0ActiveInside(bld.bid)) {
+        if (!isBuildingSlot0Occupied(bld.bid)) {
           showWarning('⚠ Sàn disco chưa có DJ chơi nhạc! Hãy cử DJ lên bàn nhạc trước.');
           state.canvasMenu = null;
           render();
@@ -7536,22 +7524,23 @@ function drawFrameToCtx(targetCtx) {
     if (state.data) {
       state.selectedUnitName = state.selectedUnit ? getVillagerName(state.data, state.selectedUnit) : '';
       const bMap = new Map();
-      const staffSet = new Set();
+      const staffSet = new Set(state.remoteStaffedBids || []);
       for (const b of getPlayerBuildings(state.localTribe ?? 0)) {
         if (b.underConstruction) bMap.set(b.bid, getAssignedBuilderCount(b.bid));
-        else if ((b.targetType === 4 || b.targetType === 7) && isBuildingSlot0Occupied(b.bid)) staffSet.add(b.bid);
+        else if (isBuildingSlot0Occupied(b.bid)) staffSet.add(b.bid);
       }
       for (const [uid, t] of state.tasks.entries()) {
         if (t.kind === 'chefFetch' && t.kitchen?.bid) staffSet.add(t.kitchen.bid);
+        else if ((t.kind === 'blacksmithFetch' || t.kind === 'blacksmithDeliver') && t.workshop?.bid) staffSet.add(t.workshop.bid);
         else if (
           t.kind === 'workBuilding' &&
-          (t.target?.targetType === 4 || t.target?.targetType === 7) &&
+          t.target?.bid &&
           (!t.preferredSlots || t.preferredSlots.includes(0))
         ) {
           staffSet.add(t.target.bid);
         }
       }
-      // Keep building marked as staffed while its slot-0 worker (DJ / Chef) temporarily steps out to eat, sleep, heal, or defend!
+      // Keep ALL buildings marked as staffed while their slot-0 worker (Chef/Blacksmith/DJ/Shaman) temporarily steps out!
       for (const [uid, saved] of state.savedJobs.entries()) {
         if (
           (state.data.entityData[1919 + uid] & 0xff) > 0 &&

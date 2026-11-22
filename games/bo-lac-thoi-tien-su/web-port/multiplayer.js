@@ -1093,16 +1093,64 @@ export function packWorldSnapshot(data, state) {
     ]);
   }
 
+  // Compute authoritative staffed slot-0 buildings & assigned builder counts for ALL tribes (so Guests
+  // never see false "!" / "chưa có người chủ trì" while their Chef/Blacksmith/DJ/Builder fetches materials or eats!)
+  const staffedBidsSet = new Set();
+  const builderMap = new Map();
+  for (let bid = 1; bid <= 60; bid++) {
+    if ((e[8505 + bid] & 0xff) <= 0) continue;
+    let cur = e[8993 + bid];
+    let g = 0;
+    let bCnt = 0;
+    while (cur > 0 && g++ < 16) {
+      if ((e[1919 + cur] & 0xff) > 0) {
+        bCnt++;
+        if (e[4646 + cur] === 0) staffedBidsSet.add(bid);
+      }
+      cur = e[4545 + cur];
+    }
+    if (e[8627 + bid] === 1 && bCnt > 0) builderMap.set(bid, bCnt);
+  }
+  if (state.tasks) {
+    for (const [uid, t] of state.tasks.entries()) {
+      if ((e[1919 + uid] & 0xff) <= 0) continue;
+      if (t.kind === 'chefFetch' && t.kitchen?.bid) staffedBidsSet.add(t.kitchen.bid);
+      else if ((t.kind === 'blacksmithFetch' || t.kind === 'blacksmithDeliver') && t.workshop?.bid) staffedBidsSet.add(t.workshop.bid);
+      else if (t.kind === 'workBuilding' && t.target?.bid && (!Array.isArray(t.preferredSlots) || t.preferredSlots.includes(0))) {
+        staffedBidsSet.add(t.target.bid);
+      } else if (t.kind === 'build' && t.target?.bid) {
+        builderMap.set(t.target.bid, (builderMap.get(t.target.bid) || 0) + 1);
+      } else if (t.kind === 'buildFetch' && t.buildBld?.bid) {
+        builderMap.set(t.buildBld.bid, (builderMap.get(t.buildBld.bid) || 0) + 1);
+      }
+    }
+  }
+  if (state.savedJobs) {
+    for (const [uid, saved] of state.savedJobs.entries()) {
+      if ((e[1919 + uid] & 0xff) <= 0) continue;
+      if (saved?.kind === 'workBuilding' && saved.bid && (!Array.isArray(saved.preferredSlots) || saved.preferredSlots.includes(0))) {
+        staffedBidsSet.add(saved.bid);
+      } else if (saved?.kind === 'build' && saved.bid) {
+        builderMap.set(saved.bid, (builderMap.get(saved.bid) || 0) + 1);
+      }
+    }
+  }
+
   return {
     tick: state.animTick,
     tribeCount: data.tribeCount || 2,
     units,
     buildings,
+    staffedBids: [...staffedBidsSet],
+    builderCounts: [...builderMap.entries()],
     res0: (data.resources?.[0] || []).slice(0, 18),
     res1: (data.resources?.[1] || []).slice(0, 18),
     resAll: [0, 1, 2, 3].map((t) => (data.resources?.[t] || []).slice(0, 18)),
     projectiles: (state.projectiles || []).map((p) => ({
       x0: p.x0, y0: p.y0, x1: p.x1, y1: p.y1, age: p.age, duration: p.duration, weaponId: p.weaponId,
+    })),
+    hitEffects: (state.hitEffects || []).map((fx) => ({
+      x: fx.x, y: fx.y, kind: fx.kind, age: fx.age, duration: fx.duration,
     })),
     deathEffects: (state.deathEffects || []).map((fx) => ({
       uid: fx.uid, x: fx.x, y: fx.y, dir: fx.dir, animId: fx.animId, frame: fx.frame, maxFrames: fx.maxFrames,
@@ -1240,7 +1288,10 @@ export function applyWorldSnapshot(data, state, snap, revealFogFn, getBuildingSp
   }
 
   state.projectiles = snap.projectiles || [];
+  state.hitEffects = snap.hitEffects || [];
   state.deathEffects = snap.deathEffects || [];
+  state.remoteStaffedBids = new Set(snap.staffedBids || []);
+  state.remoteBuilderCounts = new Map(snap.builderCounts || []);
   if (snap.winner !== null && snap.winner !== undefined) {
     state.mpWinner = snap.winner;
   }
