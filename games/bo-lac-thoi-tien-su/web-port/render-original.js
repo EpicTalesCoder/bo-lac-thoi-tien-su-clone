@@ -491,7 +491,7 @@ function drawMapObject(ctx, data, n, layer, ah, ai, camX, camY, originY, animTic
         if (kind === 6) {
           frame = (animTick + camY + ai + idx * 2) % 120;
           if (slotId === 1 || (slotId === 2 && (e[8627 + n9] === 1 || e[8627 + n9] === 2))) {
-            if (n9 >= 31) animId++;
+            if (buildingOwner(n, data) === 1) animId++;
             shouldDraw = true;
           } else if (slotId !== 2) {
             shouldDraw = true;
@@ -1736,8 +1736,22 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
           }
           drawComposite(ctx, data, shorts[1][idx] & 0xfff, px, py, imageCache);
         } else if (kind === 2 || (kind === 6 && slotId !== 2)) {
-          drawAnimation(ctx, data, shorts[1][idx] & 0xfff, px, py, animTick, imageCache);
+          let animId = shorts[1][idx] & 0xfff;
+          if (kind === 6 && slotId === 1 && (state.localTribe ?? 0) === 1) animId++;
+          drawAnimation(ctx, data, animId, px, py, animTick, imageCache);
         }
+      }
+      if (data.tribeCount === 4 || state.mpMode) {
+        const myTribe = state.localTribe ?? 0;
+        const fx = bx + 3;
+        const fy = by + 2;
+        ctx.fillStyle = '#1a1206';
+        ctx.fillRect(fx, fy - 1, 2, 10);
+        ctx.fillRect(fx + 1, fy - 1, 8, 6);
+        ctx.fillStyle = FACTION_COLORS[myTribe] || '#ffffff';
+        ctx.fillRect(fx + 2, fy, 6, 4);
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(fx + 2, fy, 2, 1);
       }
       ctx.globalAlpha = 1;
     }
