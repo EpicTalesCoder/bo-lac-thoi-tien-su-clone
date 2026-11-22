@@ -17,8 +17,14 @@ def main():
         shutil.rmtree(DIST)
     DIST.mkdir(parents=True, exist_ok=True)
 
-    # Copy portal index.html
+    # Copy portal index.html + legal pages (Terms of Service & Privacy Policy for Discord Activity)
     shutil.copy2(ROOT / "portal" / "index.html", DIST / "index.html")
+    for page in ("terms", "privacy"):
+        src_page = ROOT / "portal" / f"{page}.html"
+        if src_page.exists():
+            shutil.copy2(src_page, DIST / f"{page}.html")
+            (DIST / page).mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_page, DIST / page / "index.html")
 
     # Copy games manifest
     (DIST / "games").mkdir(parents=True, exist_ok=True)
