@@ -34,7 +34,24 @@ export const SOURCE_VIEW = Object.freeze({
   SHOP: 'farm-shop',
   BARN: 'farm-barn',
   QUESTS: 'farm-quests',
+  SEED_PICKER: 'farm-seed-picker',
+  KITCHEN: 'farm-kitchen',
+  MANOR: 'farm-manor',
+  COOP: 'farm-coop',
+  MAILBOX: 'farm-mailbox',
+  COLLECTIONS: 'farm-collections',
+  LAND: 'farm-land',
+  NEIGHBORS: 'farm-neighbors',
 });
+
+export const LAND_ZONES = Object.freeze([
+  { id: 'center', name: 'Khu Trung Tâm (Mặc định)', minX: 820, maxX: 1320, minY: 320, maxY: 640, cost: 0, unlockLevel: 1 },
+  { id: 'west', name: 'Đồng Cỏ Phía Tây', minX: 520, maxX: 840, minY: 320, maxY: 660, cost: 250, unlockLevel: 1 },
+  { id: 'south', name: 'Bãi Chăn Nuôi Phía Nam', minX: 820, maxX: 1360, minY: 620, maxY: 880, cost: 400, unlockLevel: 2 },
+  { id: 'east', name: 'Vườn Cây Ăn Quả Phía Đông', minX: 1300, maxX: 1700, minY: 320, maxY: 680, cost: 650, unlockLevel: 3 },
+  { id: 'far_west', name: 'Thung Lũng Tây Nam', minX: 240, maxX: 840, minY: 640, maxY: 960, cost: 1000, unlockLevel: 5 },
+  { id: 'far_east', name: 'Đồi Nắng Đông Nam', minX: 1340, maxX: 1960, minY: 640, maxY: 980, cost: 1500, unlockLevel: 7 },
+]);
 
 // Port of f.paint(Graphics): elapsed time is clamped to [0,1000] ms.
 export function sourceFrame(previousAt, now) {
@@ -209,6 +226,14 @@ function executePendingFarmerAction(session) {
   let actionAnim = 3;
   if (act.type === 'tile') {
     const plotBefore = session.plots.get(`${act.row},${act.col}`);
+    if (plotBefore && plotBefore.stage === 'tilled' && act.openSeedPicker) {
+      session.seedPickerTarget = { row: act.row, col: act.col, worldX: act.worldX, worldY: act.worldY };
+      session.panelCursor = 0;
+      session.view = SOURCE_VIEW.SEED_PICKER;
+      f.state = 'idle';
+      f.anim = 2;
+      return;
+    }
     if (!plotBefore || plotBefore.stage === 'tilled') actionAnim = 4;
     else if (plotBefore.stage === 'growing') actionAnim = 6;
     else actionAnim = 3;
@@ -216,6 +241,34 @@ function executePendingFarmerAction(session) {
     if (res?.ok) {
       addPopup(session, f.x, f.y - 24, res.popup || '✓', res.popupColor || '#9cff7b');
     }
+  } else if (act.type === 'plant_seed') {
+    actionAnim = 4;
+    const res = plantCropOnPlot(session, act.row, act.col, act.cropId);
+    if (res?.ok) {
+      advanceQuests(session, 'plant', 1);
+      addPopup(session, f.x, f.y - 24, `🌱 ${res.crop?.name || ''}`, '#9cff7b');
+    }
+  } else if (act.type === 'building') {
+    f.state = 'idle';
+    f.anim = 2;
+    openBuildingMenu(session, act.entityId);
+    return;
+  } else if (act.type === 'debris') {
+    actionAnim = 4;
+    clearDebris(session, act.opaqueKey, act.worldX, act.worldY);
+  } else if (act.type === 'place') {
+    actionAnim = 4;
+    const item = act.item;
+    if (item?.kind === 'tree') plantFruitTree(session, item.spec.id, act.worldX, act.worldY);
+    else if (item?.kind === 'animal') {
+      buyAnimal(session, item.spec.id, act.row, act.col);
+      const last = session.animals[session.animals.length - 1];
+      if (last) { last.worldX = act.worldX; last.worldY = act.worldY; }
+    } else if (item?.kind === 'decor') {
+      placeDecoration(session, item.spec.id, act.worldX, act.worldY);
+    }
+    session.activeTool = 'auto';
+    session.placementItem = null;
   } else if (act.type === 'tree') {
     actionAnim = 3;
     const res = harvestFruitTree(session, act.uid);
@@ -226,7 +279,7 @@ function executePendingFarmerAction(session) {
     actionAnim = 3;
     const res = collectOrFeedAnimal(session, act.uid);
     if (res?.ok) {
-      addPopup(session, f.x, f.y - 24, res.action === 'collected' ? '🥚 +XP' : '🌿 Đã cho ăn', '#ffd84d');
+      addPopup(session, f.x, f.y - 24, res.action === 'collected' ? `🥚 ${res.prodName || '+XP'}` : '🌿 Đã cho ăn', '#ffd84d');
     }
   }
   f.state = 'action';
@@ -363,12 +416,25 @@ export function createFarmSession(worldResources, textData = {}) {
     });
   }
 
-  const quests = (catalog.quests || []).slice(0, 8).map((q, i) => ({
+  const quests = (catalog.quests || []).slice(0, 12).map((q, i) => ({
     ...q,
     progress: 0,
     completed: false,
     claimed: false,
-    trackKind: i % 2 === 0 ? 'harvest' : 'sell',
+    trackKind: ['harvest', 'sell', 'cook', 'plant', 'clear', 'help'][i % 6],
+  }));
+
+  const neighborMail = (catalog.neighbors || []).slice(0, 5).map((nb, idx) => ({
+    id: `mail-${nb.id}`,
+    from: nb.name,
+    subject: idx === 0
+      ? 'Chào mừng cháu tiếp quản trang trại! Nhận quà khởi nghiệp nhé!'
+      : `Đơn đặt hàng của ${nb.name}: giao 2 nông sản nhận thưởng!`,
+    giftCoins: idx === 0 ? 100 : (80 + idx * 45),
+    giftXp: 15 + idx * 8,
+    claimed: false,
+    kind: idx === 0 ? 'gift' : 'order',
+    needQty: idx === 0 ? 0 : 2,
   }));
 
   const fruitTrees = rawTrees.map((rt, idx) => {
@@ -395,8 +461,8 @@ export function createFarmSession(worldResources, textData = {}) {
     targetX: startFarmerX,
     targetY: startFarmerY,
     speed: 150,
-    state: 'idle', // 'idle' | 'walk' | 'action'
-    anim: 2,       // e.java:1113: idle = anim 2
+    state: 'idle',
+    anim: 2,
     hFlip: false,
     actionMs: 0,
     directControl: false,
@@ -412,31 +478,51 @@ export function createFarmSession(worldResources, textData = {}) {
   return {
     ...base,
     view: base.dialogue.length > 0 ? SOURCE_VIEW.OPENING_SCRIPT : SOURCE_VIEW.WORLD_LAYER,
-    coins: 250,
+    coins: 350,
     cash: 15,
     xp: 0,
     level: 1,
     energy: 30,
     maxEnergy: 30,
+    energyRegenMs: 0,
+    barnCapacity: 40,
+    siloLevel: 1,
+    coopCapacity: 6,
+    shedCapacity: 6,
     cameraX,
     cameraY,
     cursorRow: firstReadyPlot ? firstReadyPlot.row : 24,
     cursorCol: firstReadyPlot ? firstReadyPlot.col : 28,
     selectedCropId: wheat?.id ?? 3004,
-    activeTool: 'auto',
-    shopTab: 'crops',
+    activeTool: 'auto', // 'auto' | 'plow' | 'clear' | 'place'
+    placementItem: null, // { kind: 'tree'|'animal'|'decor', spec }
+    seedPickerTarget: null, // { row, col, worldX, worldY }
+    shopTab: 'crops', // 'crops' | 'trees' | 'animals' | 'buildings' | 'decor'
     shopCursor: 0,
+    panelCursor: 0,
+    coopFilter: 'chicken',
     questCursor: 0,
     barnCursor: 0,
     farmer: farmerState,
     fruitTrees,
+    placedDecor: [],
+    clearedDebris: [],
+    unlockedZones: ['center'],
+    unlockedRooms: { 2: true }, // Nhà bếp sẵn sàng nấu ăn; 8 phòng Dinh thự còn lại sửa chữa dần
+    kitchenQueue: [],
+    nextCookUid: 1,
+    nextTreeUid: fruitTrees.length + 1,
+    nextDecorUid: 1,
+    collections: {},
+    neighborMail,
+    helpedNeighbors: {},
     popups: [],
     plots,
     animals: farmAnimals,
     nextAnimalUid,
     inventory: new Map(),
     quests,
-    toast: sourceText(textData, 4) || 'Chạm đất hoặc dùng phím mũi tên/WASD để di chuyển nông dân!',
+    toast: sourceText(textData, 4) || 'Chạm đất, Kho thóc, Nhà bếp, Chuồng trại hoặc mở Chợ 5 mục!',
     toastMs: 3500,
     catalog,
   };
@@ -557,6 +643,28 @@ export function stepFarmSession(session, dtMs, tileMap = null) {
       }
     }
   }
+  // Tick Kitchen cooking queue (table9[7])
+  for (const job of session.kitchenQueue || []) {
+    if (!job.ready) {
+      job.progressMs += dtMs;
+      if (job.progressMs >= job.cookMs) {
+        job.progressMs = job.cookMs;
+        job.ready = true;
+        session.toast = `🍳 Món ${job.name} đã nấu xong trong Nhà bếp!`;
+        session.toastMs = 2600;
+        changed = true;
+      }
+    }
+  }
+  // Energy regeneration (+1 every 20s)
+  if (session.energy < session.maxEnergy) {
+    session.energyRegenMs = (session.energyRegenMs || 0) + dtMs;
+    if (session.energyRegenMs >= 20000) {
+      session.energyRegenMs -= 20000;
+      session.energy = Math.min(session.maxEnergy, session.energy + 1);
+      changed = true;
+    }
+  }
   return changed;
 }
 
@@ -651,7 +759,7 @@ export function harvestPlot(session, row, col) {
   const plot = session.plots.get(`${row},${col}`);
   if (!plot || plot.stage !== 'ready') return { ok: false };
   const crop = session.catalog?.crops?.find(c => c.id === plot.cropId);
-  const itemId = plot.cropId;
+  const itemId = crop?.harvestGoodId ?? plot.cropId;
   const itemName = plot.cropName || crop?.name || 'Nông sản';
   const sellPrice = crop?.sellPrice ?? 20;
   const xp = crop?.xp ?? 3;
@@ -669,9 +777,17 @@ export function harvestPlot(session, row, col) {
 
   awardFarmXp(session, xp);
   advanceQuests(session, 'harvest', 1);
-  session.toast = `🌾 Thu hoạch ${itemName} (+${xp} XP)`;
-  session.toastMs = 2000;
-  return { ok: true, itemId, itemName };
+  // 15% chance to discover a rare collectible (table9[16]) for Phòng sưu tập!
+  const coll = session.catalog?.collectibles || [];
+  if (coll.length > 0 && ((session.xp + row + col) % 7 === 0)) {
+    const found = coll[(session.xp + row) % Math.min(coll.length, Math.max(3, session.level + 2))];
+    session.collections[found.id] = (session.collections[found.id] || 0) + 1;
+    session.toast = `🌾 Thu ${itemName} (+${xp} XP) & nhặt được cổ vật ${found.name}!`;
+  } else {
+    session.toast = `🌾 Thu hoạch ${itemName} (+${xp} XP)`;
+  }
+  session.toastMs = 2200;
+  return { ok: true, itemId, itemName, popup: `🌾 +${xp} XP`, popupColor: '#ffd84d' };
 }
 
 export function buyAnimal(session, animalId, row, col) {
@@ -711,8 +827,9 @@ export function collectOrFeedAnimal(session, animalUid) {
   const animal = session.animals.find(a => a.uid === animalUid);
   if (!animal) return { ok: false };
   if (animal.ready) {
-    const prodId = animal.animalId + 2000;
-    const prodName = `Sản phẩm ${animal.name}`;
+    const spec = session.catalog?.animals?.find(s => s.id === animal.animalId);
+    const prodId = spec?.productGoodId ?? (animal.animalId + 2000);
+    const prodName = spec?.productName ?? `Sản phẩm ${animal.name}`;
     const existing = session.inventory.get(prodId) || { id: prodId, name: prodName, qty: 0, sellPrice: animal.sellPrice };
     existing.qty += 1;
     session.inventory.set(prodId, existing);
@@ -721,9 +838,9 @@ export function collectOrFeedAnimal(session, animalUid) {
     animal.progressMs = 0;
     awardFarmXp(session, animal.xp);
     advanceQuests(session, 'harvest', 1);
-    session.toast = `🥚 Thu hoạch từ ${animal.name} (+${animal.xp} XP)`;
+    session.toast = `🥚 Thu ${prodName} từ ${animal.name} (+${animal.xp} XP)`;
     session.toastMs = 2000;
-    return { ok: true, action: 'collected' };
+    return { ok: true, action: 'collected', prodId, prodName };
   }
   if (!animal.fed) {
     animal.fed = true;
@@ -788,6 +905,329 @@ export function interactAtFarmTile(session, row, col, worldX = null, worldY = nu
   return { ok: false };
 }
 
+export function isPointInUnlockedLand(session, wx, wy) {
+  const unlocked = session.unlockedZones || ['center'];
+  return LAND_ZONES.some(z => unlocked.includes(z.id) && wx >= z.minX && wx <= z.maxX && wy >= z.minY && wy <= z.maxY);
+}
+
+export function buyLandZone(session, zoneId) {
+  const zone = LAND_ZONES.find(z => z.id === zoneId);
+  if (!zone) return { ok: false };
+  if (session.unlockedZones.includes(zoneId)) return { ok: false, reason: 'owned' };
+  if (session.level < zone.unlockLevel) {
+    session.toast = `${zone.name} mở khóa ở Cấp ${zone.unlockLevel}!`;
+    session.toastMs = 2200;
+    return { ok: false, reason: 'locked' };
+  }
+  if (session.coins < zone.cost) {
+    session.toast = `Cần ${zone.cost} Xu để mua ${zone.name}!`;
+    session.toastMs = 2200;
+    return { ok: false, reason: 'no_coins' };
+  }
+  session.coins -= zone.cost;
+  session.unlockedZones.push(zoneId);
+  awardFarmXp(session, 25);
+  session.toast = `🗺️ Đã mở rộng ${zone.name}! (+25 XP)`;
+  session.toastMs = 2600;
+  return { ok: true, zone };
+}
+
+export function plantFruitTree(session, cropId, wx, wy) {
+  const spec = session.catalog?.crops?.find(c => c.id === cropId && c.isTree);
+  if (!spec) return { ok: false, reason: 'not_tree' };
+  if (session.level < spec.unlockLevel) {
+    session.toast = `${spec.name} mở khóa ở Cấp ${spec.unlockLevel}!`;
+    session.toastMs = 2200;
+    return { ok: false, reason: 'locked' };
+  }
+  if (session.coins < spec.buyPrice) {
+    session.toast = `Cần ${spec.buyPrice} Xu để trồng ${spec.name}!`;
+    session.toastMs = 2200;
+    return { ok: false, reason: 'no_coins' };
+  }
+  const iso = worldToIso(wx, wy);
+  const snapped = isoToWorld(iso.ix, iso.iy);
+  session.coins -= spec.buyPrice;
+  const tree = {
+    uid: session.nextTreeUid++,
+    cropId: spec.id,
+    name: spec.name,
+    worldX: snapped.wx,
+    worldY: snapped.wy,
+    worldBlock: spec.worldBlock,
+    ready: false,
+    progressMs: 0,
+    growMs: spec.growSec * 1000,
+  };
+  session.fruitTrees.push(tree);
+  awardFarmXp(session, 6);
+  advanceQuests(session, 'plant', 1);
+  session.toast = `🌳 Đã trồng ${spec.name} (-${spec.buyPrice} Xu)`;
+  session.toastMs = 2200;
+  return { ok: true, tree };
+}
+
+export function placeDecoration(session, decorId, wx, wy) {
+  const spec = session.catalog?.decorations?.find(d => d.id === decorId);
+  if (!spec) return { ok: false };
+  if (session.level < spec.unlockLevel) {
+    session.toast = `${spec.name} mở khóa ở Cấp ${spec.unlockLevel}!`;
+    session.toastMs = 2000;
+    return { ok: false, reason: 'locked' };
+  }
+  if (session.coins < spec.buyPrice) {
+    session.toast = `Cần ${spec.buyPrice} Xu để đặt ${spec.name}!`;
+    session.toastMs = 2000;
+    return { ok: false, reason: 'no_coins' };
+  }
+  const iso = worldToIso(wx, wy);
+  const snapped = isoToWorld(iso.ix, iso.iy);
+  session.coins -= spec.buyPrice;
+  const item = {
+    uid: session.nextDecorUid++,
+    decorId: spec.id,
+    name: spec.name,
+    worldX: snapped.wx,
+    worldY: snapped.wy,
+    worldBlock: spec.worldBlock,
+    paletteIndex: spec.paletteIndex,
+    frame: spec.frame,
+  };
+  session.placedDecor.push(item);
+  awardFarmXp(session, 5);
+  session.toast = `🏡 Đã đặt ${spec.name} (-${spec.buyPrice} Xu)`;
+  session.toastMs = 2000;
+  return { ok: true, item };
+}
+
+export function clearDebris(session, opaqueKey, wx, wy) {
+  if (session.clearedDebris.includes(opaqueKey)) return { ok: false };
+  if (session.energy < 2) {
+    session.toast = 'Hết năng lượng (cần 2 ⚡ để dọn dẹp)!';
+    session.toastMs = 2000;
+    return { ok: false, reason: 'no_energy' };
+  }
+  session.energy -= 2;
+  session.clearedDebris.push(opaqueKey);
+  session.coins += 15;
+  awardFarmXp(session, 5);
+  advanceQuests(session, 'clear', 1);
+  // Chance to find a collectible when clearing bushes/rocks
+  const coll = session.catalog?.collectibles || [];
+  if (coll.length > 0) {
+    const found = coll[opaqueKey % Math.min(coll.length, Math.max(4, session.level + 2))];
+    session.collections[found.id] = (session.collections[found.id] || 0) + 1;
+    addPopup(session, wx, wy - 20, `+15G & ${found.name}!`, '#9cff7b');
+    session.toast = `🪓 Đã dọn đất (+15 Xu, +5 XP, nhặt ${found.name})!`;
+  } else {
+    addPopup(session, wx, wy - 20, '+15 Xu +5 XP', '#9cff7b');
+    session.toast = '🪓 Đã dọn chướng ngại (+15 Xu, +5 XP)!';
+  }
+  session.toastMs = 2200;
+  return { ok: true };
+}
+
+export function startKitchenRecipe(session, recipeId) {
+  const recipe = session.catalog?.recipes?.find(r => r.id === recipeId);
+  if (!recipe) return { ok: false };
+  if (session.level < recipe.unlockLevel) {
+    session.toast = `${recipe.name} mở khóa ở Cấp ${recipe.unlockLevel}!`;
+    session.toastMs = 2200;
+    return { ok: false, reason: 'locked' };
+  }
+  if ((session.kitchenQueue?.length || 0) >= 4) {
+    session.toast = 'Bếp đang đầy (tối đa 4 món cùng lúc)!';
+    session.toastMs = 2000;
+    return { ok: false, reason: 'full' };
+  }
+  for (const ing of recipe.ingredients) {
+    const have = session.inventory.get(ing.goodId)?.qty || 0;
+    if (have < ing.qty) {
+      session.toast = `Thiếu nguyên liệu: cần ${ing.qty}× ${ing.name} (có ${have})!`;
+      session.toastMs = 2400;
+      return { ok: false, reason: 'missing_ingredient' };
+    }
+  }
+  for (const ing of recipe.ingredients) {
+    const entry = session.inventory.get(ing.goodId);
+    entry.qty -= ing.qty;
+    if (entry.qty <= 0) session.inventory.delete(ing.goodId);
+  }
+  const job = {
+    uid: session.nextCookUid++,
+    recipeId: recipe.id,
+    name: recipe.name,
+    outputGoodId: recipe.outputGoodId,
+    sellPrice: recipe.sellPrice,
+    xp: recipe.xp,
+    progressMs: 0,
+    cookMs: recipe.cookSec * 1000,
+    ready: false,
+  };
+  session.kitchenQueue.push(job);
+  session.toast = `🍳 Đang nấu ${recipe.name} (${recipe.cookSec}s)...`;
+  session.toastMs = 2000;
+  return { ok: true, job };
+}
+
+export function collectKitchenDish(session, jobUid) {
+  const idx = (session.kitchenQueue || []).findIndex(j => j.uid === jobUid && j.ready);
+  if (idx < 0) return { ok: false };
+  const [job] = session.kitchenQueue.splice(idx, 1);
+  const existing = session.inventory.get(job.outputGoodId) || {
+    id: job.outputGoodId, name: job.name, qty: 0, sellPrice: job.sellPrice,
+  };
+  existing.qty += 1;
+  session.inventory.set(job.outputGoodId, existing);
+  awardFarmXp(session, job.xp);
+  advanceQuests(session, 'cook', 1);
+  session.toast = `🍽️ Đã nhận ${job.name} vào Kho (+${job.xp} XP)!`;
+  session.toastMs = 2200;
+  return { ok: true, job };
+}
+
+export function repairManorRoom(session, entityId) {
+  const room = session.catalog?.buildings?.find(b => b.entityId === entityId && b.isManorRoom);
+  if (!room) return { ok: false };
+  if (session.unlockedRooms[entityId]) return { ok: false, reason: 'repaired' };
+  const cost = Math.max(150, Math.min(5000, room.repairCost || 300));
+  if (session.coins < cost) {
+    session.toast = `Cần ${cost} Xu để sửa ${room.name}!`;
+    session.toastMs = 2200;
+    return { ok: false, reason: 'no_coins' };
+  }
+  session.coins -= cost;
+  session.unlockedRooms[entityId] = true;
+  awardFarmXp(session, 30);
+  session.toast = `🏛️ Đã sửa xong ${room.name}! (+30 XP)`;
+  session.toastMs = 2600;
+  return { ok: true, room };
+}
+
+export function upgradeBarn(session) {
+  const cost = 150 + Math.floor((session.barnCapacity - 40) * 10);
+  if (session.coins < cost) {
+    session.toast = `Cần ${cost} Xu để nâng cấp Kho thóc (+20 sức chứa)!`;
+    session.toastMs = 2200;
+    return { ok: false, reason: 'no_coins' };
+  }
+  session.coins -= cost;
+  session.barnCapacity += 20;
+  awardFarmXp(session, 15);
+  session.toast = `🏚️ Đã nâng cấp Kho thóc lên ${session.barnCapacity} chỗ!`;
+  session.toastMs = 2200;
+  return { ok: true };
+}
+
+export function claimMail(session, mailId) {
+  const m = (session.neighborMail || []).find(item => item.id === mailId && !item.claimed);
+  if (!m) return { ok: false };
+  if (m.kind === 'order') {
+    let totalItems = 0;
+    for (const it of session.inventory.values()) totalItems += it.qty;
+    if (totalItems < m.needQty) {
+      session.toast = `Cần có ít nhất ${m.needQty} nông sản trong Kho để giao đơn cho ${m.from}!`;
+      session.toastMs = 2400;
+      return { ok: false, reason: 'need_goods' };
+    }
+    let remain = m.needQty;
+    for (const [id, it] of session.inventory.entries()) {
+      const take = Math.min(it.qty, remain);
+      it.qty -= take;
+      remain -= take;
+      if (it.qty <= 0) session.inventory.delete(id);
+      if (remain <= 0) break;
+    }
+  }
+  m.claimed = true;
+  session.coins += m.giftCoins;
+  awardFarmXp(session, m.giftXp);
+  advanceQuests(session, 'sell', 1);
+  session.toast = `✉️ Nhận thưởng từ ${m.from}: +${m.giftCoins} Xu, +${m.giftXp} XP!`;
+  session.toastMs = 2400;
+  return { ok: true };
+}
+
+export function helpNeighbor(session, neighborId) {
+  const nb = session.catalog?.neighbors?.find(n => n.id === neighborId);
+  if (!nb) return { ok: false };
+  if (session.helpedNeighbors[neighborId]) {
+    session.toast = `Bạn đã giúp trang trại ${nb.name} hôm nay rồi!`;
+    session.toastMs = 1800;
+    return { ok: false, reason: 'already_helped' };
+  }
+  if (session.energy < 2) {
+    session.toast = 'Cần 2 ⚡ Năng lượng để giúp hàng xóm!';
+    session.toastMs = 2000;
+    return { ok: false, reason: 'no_energy' };
+  }
+  session.energy -= 2;
+  session.helpedNeighbors[neighborId] = true;
+  session.coins += 45;
+  awardFarmXp(session, 12);
+  advanceQuests(session, 'help', 1);
+  session.toast = `🤝 Đã giúp ${nb.name} tưới vườn! (+45 Xu, +12 XP)`;
+  session.toastMs = 2400;
+  return { ok: true };
+}
+
+export function sellCollectible(session, collectibleId) {
+  const count = session.collections?.[collectibleId] || 0;
+  if (count <= 0) return { ok: false };
+  const spec = session.catalog?.collectibles?.find(c => c.id === collectibleId);
+  const reward = spec?.sellPrice || 50;
+  session.collections[collectibleId] = count - 1;
+  session.coins += reward;
+  awardFarmXp(session, 8);
+  session.toast = `🏺 Đã bán cổ vật ${spec?.name || ''} (+${reward} Xu)!`;
+  session.toastMs = 2000;
+  return { ok: true };
+}
+
+// Port of a.java:22482-22650: dispatch building click to its authentic Green Farm 3 UI screen
+export function openBuildingMenu(session, entityId) {
+  session.panelCursor = 0;
+  if (entityId === 2 || entityId === 14) {
+    session.view = SOURCE_VIEW.KITCHEN;
+    return 'kitchen';
+  }
+  if (entityId === 0) {
+    session.view = SOURCE_VIEW.COLLECTIONS;
+    return 'collections';
+  }
+  if (entityId >= 1 && entityId <= 8) {
+    session.view = SOURCE_VIEW.MANOR;
+    return 'manor';
+  }
+  if (entityId === 10 || entityId === 13 || entityId === 9) {
+    session.view = SOURCE_VIEW.BARN;
+    return 'barn';
+  }
+  if (entityId === 11) {
+    session.coopFilter = 'chicken';
+    session.view = SOURCE_VIEW.COOP;
+    return 'coop';
+  }
+  if (entityId === 12) {
+    session.coopFilter = 'livestock';
+    session.view = SOURCE_VIEW.COOP;
+    return 'coop';
+  }
+  if (entityId === 15) {
+    session.view = SOURCE_VIEW.MAILBOX;
+    return 'mailbox';
+  }
+  if (entityId === 17) {
+    // Pond: restore +5 energy
+    session.energy = Math.min(session.maxEnergy, session.energy + 5);
+    session.toast = '💧 Lấy nước mát ở Ao (+5 ⚡ Năng lượng)!';
+    session.toastMs = 2000;
+    return 'pond';
+  }
+  session.view = SOURCE_VIEW.MANOR;
+  return 'manor';
+}
+
 export function serializeFarmSession(session) {
   return JSON.stringify({
     coins: session.coins,
@@ -796,10 +1236,24 @@ export function serializeFarmSession(session) {
     level: session.level,
     energy: session.energy,
     maxEnergy: session.maxEnergy,
+    barnCapacity: session.barnCapacity,
+    siloLevel: session.siloLevel,
     selectedCropId: session.selectedCropId,
     plots: [...session.plots.values()],
+    fruitTrees: session.fruitTrees,
+    placedDecor: session.placedDecor,
+    clearedDebris: session.clearedDebris,
+    unlockedZones: session.unlockedZones,
+    unlockedRooms: session.unlockedRooms,
+    kitchenQueue: session.kitchenQueue,
+    collections: session.collections,
+    neighborMail: session.neighborMail,
+    helpedNeighbors: session.helpedNeighbors,
     animals: session.animals,
     nextAnimalUid: session.nextAnimalUid,
+    nextTreeUid: session.nextTreeUid,
+    nextDecorUid: session.nextDecorUid,
+    nextCookUid: session.nextCookUid,
     inventory: [...session.inventory.values()],
     quests: session.quests,
   });
@@ -816,12 +1270,26 @@ export function restoreFarmSession(raw, worldResources, textData = {}) {
     if (typeof data.level === 'number') session.level = data.level;
     if (typeof data.energy === 'number') session.energy = data.energy;
     if (typeof data.maxEnergy === 'number') session.maxEnergy = data.maxEnergy;
+    if (typeof data.barnCapacity === 'number') session.barnCapacity = data.barnCapacity;
+    if (typeof data.siloLevel === 'number') session.siloLevel = data.siloLevel;
     if (data.selectedCropId) session.selectedCropId = data.selectedCropId;
     if (Array.isArray(data.plots)) {
       session.plots = new Map(data.plots.map(p => [`${p.row},${p.col}`, p]));
     }
+    if (Array.isArray(data.fruitTrees)) session.fruitTrees = data.fruitTrees;
+    if (Array.isArray(data.placedDecor)) session.placedDecor = data.placedDecor;
+    if (Array.isArray(data.clearedDebris)) session.clearedDebris = data.clearedDebris;
+    if (Array.isArray(data.unlockedZones)) session.unlockedZones = data.unlockedZones;
+    if (data.unlockedRooms && typeof data.unlockedRooms === 'object') session.unlockedRooms = data.unlockedRooms;
+    if (Array.isArray(data.kitchenQueue)) session.kitchenQueue = data.kitchenQueue;
+    if (data.collections && typeof data.collections === 'object') session.collections = data.collections;
+    if (Array.isArray(data.neighborMail)) session.neighborMail = data.neighborMail;
+    if (data.helpedNeighbors && typeof data.helpedNeighbors === 'object') session.helpedNeighbors = data.helpedNeighbors;
     if (Array.isArray(data.animals)) session.animals = data.animals;
     if (typeof data.nextAnimalUid === 'number') session.nextAnimalUid = data.nextAnimalUid;
+    if (typeof data.nextTreeUid === 'number') session.nextTreeUid = data.nextTreeUid;
+    if (typeof data.nextDecorUid === 'number') session.nextDecorUid = data.nextDecorUid;
+    if (typeof data.nextCookUid === 'number') session.nextCookUid = data.nextCookUid;
     if (Array.isArray(data.inventory)) {
       session.inventory = new Map(data.inventory.map(it => [it.id, it]));
     }

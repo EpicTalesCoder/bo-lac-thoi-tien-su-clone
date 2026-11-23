@@ -200,61 +200,155 @@ export function decodeFarmCatalog(pack9, textData = {}) {
   const t0 = decodeConfigTable(readPackBlock(pack9, 0));
   const t1 = decodeConfigTable(readPackBlock(pack9, 1));
   const t2 = decodeConfigTable(readPackBlock(pack9, 2));
+  const t3 = decodeConfigTable(readPackBlock(pack9, 3));
+  const t4 = decodeConfigTable(readPackBlock(pack9, 4));
+  const t7 = decodeConfigTable(readPackBlock(pack9, 7));
+  const t8 = decodeConfigTable(readPackBlock(pack9, 8));
+  const t16 = decodeConfigTable(readPackBlock(pack9, 16));
   const t25 = decodeConfigTable(readPackBlock(pack9, 25));
   const t26 = decodeConfigTable(readPackBlock(pack9, 26));
 
-  const crops = t2.rows.map((r) => ({
-    id: r[1],
-    name: txt(r[2]) || `Cây #${r[1]}`,
-    unlockLevel: Math.max(1, r[8] || 1),
-    buyPrice: Math.max(5, r[6] || 10),
-    growSec: Math.max(8, Math.round((r[11] || 90) / 10)), // scaled 10x faster for snappy web play while keeping /9 ratios
-    rawGrowSec: r[11] || 90,
-    yieldScore: Math.max(5, r[16] || 12),
-    sellPrice: Math.max(12, Math.round((r[6] || 10) * 1.8) + Math.max(4, Math.round((r[16] || 12) * 0.5))),
-    xp: Math.max(2, Math.round((r[16] || 10) / 3)),
-    // Port of a.java:13125-13134 & e.java:1625: col 9 is the /5 world BSprite block
-    worldBlock: r[9],
-    iconBlock: r[3],
-    iconFrame: r[4],
-  }));
-
-  const goods = t1.rows.map((r) => ({
+  const goods = t1.rows.map((r, idx) => ({
+    index: idx,
     id: r[1],
     name: txt(r[2]) || `Vật phẩm #${r[1]}`,
     buyPrice: Math.max(0, r[5] || 0),
-    sellPrice: Math.max(5, r[7] || r[6] || 15),
+    sellPrice: Math.max(8, r[7] || r[6] || 18),
   }));
+  const findGoodByName = (name) => {
+    const clean = String(name || '').replace(/^Cây\s+/i, '').trim().toLowerCase();
+    return goods.find(g => g.name.toLowerCase() === clean)
+      || goods.find(g => clean && g.name.toLowerCase().includes(clean))
+      || null;
+  };
+
+  const crops = t2.rows.map((r, idx) => {
+    const name = txt(r[2]) || `Cây #${r[1]}`;
+    const isTree = idx >= 12;
+    const good = findGoodByName(name);
+    const buyPrice = Math.max(isTree ? 150 : 10, r[6] || (isTree ? 250 : 15));
+    return {
+      index: idx,
+      id: r[1],
+      name,
+      isTree,
+      unlockLevel: Math.max(1, r[8] || 1),
+      buyPrice,
+      growSec: Math.max(8, Math.round((r[11] || 90) / 10)),
+      rawGrowSec: r[11] || 90,
+      yieldScore: Math.max(5, r[16] || 12),
+      sellPrice: good?.sellPrice ?? Math.max(15, Math.round(buyPrice * 1.8) + 6),
+      xp: Math.max(2, Math.round((r[16] || 10) / 3)),
+      harvestGoodId: good?.id ?? r[1],
+      // Port of a.java:13125-13134 & e.java:1625: col 9 is the /5 world BSprite block
+      worldBlock: r[9],
+      iconBlock: r[3],
+      iconFrame: r[4],
+    };
+  });
 
   const animals = t0.rows
     .filter((r) => txt(r[2]) && (r[6] > 0 || r[9] > 0))
-    .slice(0, 18)
-    .map((r) => ({
+    .slice(0, 24)
+    .map((r) => {
+      const name = txt(r[2]);
+      const low = name.toLowerCase();
+      const prodGood = low.includes('gà') ? goods[1]
+        : (low.includes('bò') || low.includes('dê')) ? goods[2]
+        : low.includes('cừu') ? (goods.find(g => g.name.toLowerCase().includes('lông')) || goods[3])
+        : goods[1];
+      const kind = low.includes('gà') ? 'chicken' : 'livestock';
+      return {
+        id: r[1],
+        name,
+        kind,
+        buyPrice: Math.max(100, r[6] || r[9] || 200),
+        prodSec: Math.max(12, Math.round((r[11] || 180) / 10)),
+        sellPrice: prodGood?.sellPrice ?? Math.max(25, Math.round((r[6] || 200) * 0.18)),
+        productGoodId: prodGood?.id ?? (r[1] + 2000),
+        productName: prodGood?.name ?? `Sản phẩm ${name}`,
+        xp: Math.max(5, Math.round((r[6] || 200) / 40)),
+        // Port of a.java:13457-13508: col 31 = /5 BSprite block, col 32 = palette, col 33 = idle frame
+        worldBlock: r[31],
+        paletteIndex: Math.max(0, r[32] || 0),
+        idleFrame: Math.max(0, r[33] || 0),
+        iconFrame: Math.max(0, r[4] || 0),
+      };
+    });
+
+  const buildings = t3.rows.map((r, idx) => ({
+    entityId: idx,
+    id: r[1],
+    name: txt(r[2]) || `Công trình #${idx}`,
+    isManorRoom: idx <= 8,
+    repairCost: Math.max(0, r[6] || 0),
+    worldBlock: r[25],
+    frame: Math.max(0, r[26] || 0),
+  }));
+
+  const decorations = t4.rows
+    .filter((r) => txt(r[2]) && r[12] >= 0 && r[12] < 160)
+    .map((r, idx) => ({
+      index: idx,
       id: r[1],
       name: txt(r[2]),
-      buyPrice: Math.max(100, r[6] || r[9] || 200),
-      prodSec: Math.max(12, Math.round((r[11] || 180) / 10)),
-      sellPrice: Math.max(25, Math.round((r[6] || 200) * 0.18)),
-      xp: Math.max(5, Math.round((r[6] || 200) / 40)),
-      // Port of a.java:13457-13508: col 31 = /5 BSprite block, col 32 = palette, col 33 = idle frame
-      worldBlock: r[31],
-      paletteIndex: Math.max(0, r[32] || 0),
-      idleFrame: Math.max(0, r[33] || 0),
-      iconFrame: Math.max(0, r[4] || 0),
+      buyPrice: Math.max(25, r[6] || 50),
+      unlockLevel: Math.max(1, r[8] || 1),
+      worldBlock: r[12],
+      paletteIndex: Math.max(0, r[13] || 0),
+      frame: Math.max(0, r[11] || 0),
     }));
+
+  const recipes = t7.rows.map((r, idx) => {
+    const name = txt(r[2]) || `Món #${idx + 1}`;
+    const ingList = [];
+    const g1 = goods[r[6]];
+    if (g1 && r[7] > 0) ingList.push({ goodId: g1.id, name: g1.name, qty: r[7] });
+    const g2 = goods[r[9]];
+    if (g2 && r[10] > 0 && r[9] !== r[6]) ingList.push({ goodId: g2.id, name: g2.name, qty: r[10] });
+    const outGood = findGoodByName(name);
+    return {
+      index: idx,
+      id: r[1],
+      name,
+      unlockLevel: Math.max(1, r[3] || 1),
+      cookSec: Math.max(6, (r[5] || 5) * 2),
+      ingredients: ingList,
+      outputGoodId: outGood?.id ?? r[1],
+      sellPrice: outGood?.sellPrice ?? Math.max(35, (idx + 2) * 18),
+      xp: Math.max(5, Math.round((r[5] || 5) * 1.5)),
+    };
+  });
+
+  const neighbors = t8.rows.map((r, idx) => ({
+    index: idx,
+    id: r[1],
+    name: txt(r[2]) || `Hàng xóm #${idx + 1}`,
+    worldBlock: r[3],
+    pack10Block: 5 + idx,
+  }));
+
+  const collectibles = t16.rows.map((r, idx) => ({
+    index: idx,
+    id: r[1],
+    name: txt(r[2]) || `Cổ vật #${idx + 1}`,
+    minLevel: Math.max(1, r[4] || 1),
+    sellPrice: Math.max(30, r[5] || 50),
+    rewardCoins: Math.max(50, r[6] || 100),
+  }));
 
   const quests = t25.rows.map((r, idx) => ({
     id: r[0],
     title: txt(r[3]) || `Nhiệm vụ #${idx + 1}`,
     description: txt(r[6]) || '',
     targetCount: Math.max(1, r[8] || 1),
-    rewardCoins: Math.max(50, (idx + 1) * 45),
-    rewardXp: Math.max(15, (idx + 1) * 12),
+    rewardCoins: Math.max(60, (idx + 1) * 55),
+    rewardXp: Math.max(15, (idx + 1) * 14),
   }));
 
   const levelXp = t26.rows.map((r) => Math.max(20, (r[1] || 30) * 2));
 
-  return { crops, goods, animals, quests, levelXp };
+  return { crops, goods, animals, buildings, decorations, recipes, neighbors, collectibles, quests, levelXp };
 }
 
 /**

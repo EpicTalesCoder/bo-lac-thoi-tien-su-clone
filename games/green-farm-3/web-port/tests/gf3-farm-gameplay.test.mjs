@@ -55,7 +55,7 @@ test('farm loop: plow -> plant -> water -> grow -> harvest -> sell -> save/resto
 
   const hv = harvestPlot(s, 8, 8);
   assert.equal(hv.ok, true);
-  assert.equal(s.inventory.get(3004).qty, 1);
+  assert.equal(s.inventory.get(hv.itemId).qty, 1);
 
   const sold = sellAllGoods(s);
   assert.equal(sold.ok, true);

@@ -1,24 +1,29 @@
 /**
- * Green Farm 3 web port powered by decoded /5 BSprite, /9 config tables, /10 world map, and EN text packs.
+ * Green Farm 3 1:1 web port powered by decoded /5 world BSprites, /7 UI BSprites,
+ * /9 config tables (crops, trees, animals, 19 buildings, 83 recipes, 63 decor,
+ * 10 neighbors, 15 collectibles, 20 quests), /10 58x58 world map, and EN text packs.
  */
 import { mountPhaserRuntime } from './phaser-engine.js';
 import { decodeBSpriteBlock, loadSplitPack, moduleToCanvasImage, readPackBlock } from './bsprite-loader.js';
 import { drawBSpriteBlockAnim, drawBSpriteBlockFrame, drawBSpriteFrame, drawBSpriteTileMap, withMIDPClip } from './render-original.js';
 import { loadOriginalWorldResources } from './gf3-resource-loader.js';
 import {
-  SCREEN_W, SCREEN_H, KEY, SOURCE_VIEW, advanceEvidenceView, mapKeyCode,
-  createFarmSession, stepFarmSession, interactAtFarmTile, buyAnimal, sellGood,
+  SCREEN_W, SCREEN_H, KEY, SOURCE_VIEW, LAND_ZONES, advanceEvidenceView, mapKeyCode,
+  createFarmSession, stepFarmSession, buyAnimal, sellGood,
   sellAllGoods, claimQuestReward, serializeFarmSession, restoreFarmSession,
   xpForNextLevel, sourceFrame, sourceText, sourceTileAt,
-  setFarmerWalkTarget, moveFarmerByVector, clampWorldCamera,
+  setFarmerWalkTarget, moveFarmerByVector,
+  buyLandZone, startKitchenRecipe, collectKitchenDish, repairManorRoom,
+  upgradeBarn, claimMail, helpNeighbor, sellCollectible, collectOrFeedAnimal,
 } from './gf-core.js';
 
-const SAVE_KEY = 'gf3-farm-save-v3';
+const SAVE_KEY = 'gf3-farm-save-v4';
 const canvasEl = typeof document !== 'undefined' ? document.getElementById('game') : null;
 const IMG = {};
 const SPRITES = { icon: 'assets/icon.png' };
 let sourceWorld = null;
 let sourcePack5 = null;
+let sourcePack7 = null;
 let sourceTileSprite = null;
 let sourceTileImages = null;
 let sourceOpeningFrame = null;
@@ -27,6 +32,7 @@ let app = null;
 let audioElement = null;
 let previousFrameAt = 0;
 const spriteBlockCache = new Map();
+const uiSpriteCache = new Map();
 
 function getSpriteBlock(blockId, paletteIndex = 0) {
   if (!sourcePack5 || !Number.isInteger(blockId) || blockId < 0 || blockId >= 160) return null;
@@ -51,6 +57,22 @@ function getSpriteBlock(blockId, paletteIndex = 0) {
   return entry;
 }
 
+function getUiSpriteBlock(blockId) {
+  if (!sourcePack7 || !Number.isInteger(blockId) || blockId < 0 || blockId >= 123) return null;
+  if (uiSpriteCache.has(blockId)) return uiSpriteCache.get(blockId);
+  let entry = null;
+  try {
+    const raw = readPackBlock(sourcePack7, blockId);
+    const sprite = decodeBSpriteBlock(raw, { paletteIndex: 0 });
+    const moduleImages = sprite.moduleImages.map(moduleToCanvasImage);
+    entry = { sprite, moduleImages };
+  } catch {
+    entry = null;
+  }
+  uiSpriteCache.set(blockId, entry);
+  return entry;
+}
+
 function loadImage(name, source) {
   return new Promise((resolve) => {
     const image = new Image();
@@ -60,15 +82,19 @@ function loadImage(name, source) {
   });
 }
 
-// Port of a.java:1853-1865, a.java:1979-1985, e.java:2981-2997.
+// Port of a.java:1853-1865, a.java:1979-1985, a.java:2144-2169, e.java:2981-2997.
 async function loadOriginalResources() {
   sourceWorld = await loadOriginalWorldResources({ textData });
   sourcePack5 = await loadSplitPack(new URL('assets/packs/5/5', import.meta.url).href);
-  const pack5 = sourcePack5;
-  sourceTileSprite = decodeBSpriteBlock(readPackBlock(pack5, 0));
+  try {
+    sourcePack7 = await loadSplitPack(new URL('assets/packs/7/7', import.meta.url).href);
+  } catch {
+    sourcePack7 = null;
+  }
+  sourceTileSprite = decodeBSpriteBlock(readPackBlock(sourcePack5, 0));
   sourceTileImages = sourceTileSprite.moduleImages.map(moduleToCanvasImage);
 
-  const openingPackSprite = decodeBSpriteBlock(readPackBlock(pack5, 100));
+  const openingPackSprite = decodeBSpriteBlock(readPackBlock(sourcePack5, 100));
   const openingRecord = JSON.parse(await (await fetch(
     new URL('assets/sprites/source-frames/pack5-b100-f0.json', import.meta.url),
   )).text());
@@ -132,22 +158,17 @@ function renderOpeningEvidence(ctx) {
   drawBSpriteFrame(ctx, sourceOpeningFrame, IMG.openingModules, 0, 0);
   const event = app.session.dialogue[app.session.dialogueIndex];
   const copy = event ? sourceText(textData, event.textId) : '';
-  ctx.fillStyle = 'rgba(15, 24, 14, 0.86)';
+  ctx.fillStyle = 'rgba(15, 24, 14, 0.88)';
   ctx.fillRect(4, 246, SCREEN_W - 8, 68);
   ctx.strokeStyle = '#9cff7b';
   ctx.strokeRect(4.5, 246.5, SCREEN_W - 9, 67);
-  // Wrap Vietnamese story lines
   const words = String(copy).split(' ');
   const lines = [];
   let line = '';
   for (const w of words) {
     const test = line ? `${line} ${w}` : w;
-    if (test.length > 36) {
-      lines.push(line);
-      line = w;
-    } else {
-      line = test;
-    }
+    if (test.length > 36) { lines.push(line); line = w; }
+    else line = test;
   }
   if (line) lines.push(line);
   lines.slice(0, 4).forEach((ln, i) => {
@@ -156,15 +177,24 @@ function renderOpeningEvidence(ctx) {
   drawText(ctx, 'Chạm hoặc Enter để tiếp tục ▶', SCREEN_W - 8, 309, { align: 'right', size: 8, color: '#ffd84d', bold: true });
 }
 
-// Port of a.java:1853-1865, a.java:1881-1991, e.java:1710-1744 & i.java:315-350:
-// render 58x58 original BSprite world map + Y-sorted /5 BSprite buildings, props, plots, crops, animals & Farmer.
+const KEY_BUILDING_LABELS = Object.freeze({
+  2: 'Nhà bếp',
+  10: 'Kho thóc',
+  11: 'Chuồng gà',
+  12: 'Chuồng thú',
+  13: 'Tháp chứa',
+  15: 'Hòm thư',
+  17: 'Ao',
+});
+
+// Port of a.java:1853-1865, a.java:1881-1991, e.java:1710-1744 & i.java:315-350
 function renderFarmWorld(ctx) {
   ctx.fillStyle = '#2d4c1e';
   ctx.fillRect(0, 0, SCREEN_W, SCREEN_H);
   const s = app.session;
   const tm = sourceWorld?.tileMap;
-  const viewY = 26;
-  const viewH = SCREEN_H - 54;
+  const viewY = 28;
+  const viewH = SCREEN_H - 56;
   if (tm && sourceTileSprite && sourceTileImages) {
     drawBSpriteTileMap(ctx, tm, sourceTileSprite, sourceTileImages, {
       x: 0,
@@ -181,9 +211,10 @@ function renderFarmWorld(ctx) {
   const ox = -s.cameraX;
   const oy = viewY - s.cameraY;
   const tick = s.frame || 0;
+  const clearedSet = new Set(s.clearedDebris || []);
 
   withMIDPClip(ctx, 0, viewY, SCREEN_W, viewH, () => {
-    // Pass 1: Tilled soil plots drawn from original /5 BSprite block 6 (e.java:1744: this.G = 6)
+    // Pass 1: Original tilled soil plots (/5 block 6 — e.java:1744)
     const soilEntry = getSpriteBlock(6, 0);
     for (const plot of s.plots.values()) {
       const wx = plot.worldX ?? (plot.col * tw + (tw >> 1));
@@ -191,19 +222,16 @@ function renderFarmWorld(ctx) {
       const sx = wx + ox;
       const sy = wy + oy;
       if (sx < -64 || sy < viewY - 48 || sx > SCREEN_W + 64 || sy > viewY + viewH + 48) continue;
-      if (soilEntry) {
-        drawBSpriteBlockFrame(ctx, soilEntry.sprite, soilEntry.moduleImages, 0, sx, sy, 0);
-      }
+      if (soilEntry) drawBSpriteBlockFrame(ctx, soilEntry.sprite, soilEntry.moduleImages, 0, sx, sy, 0);
     }
 
-    // Pass 2: Y-sorted painter's order for buildings, fences, trees, Farmer, crops & animals
+    // Pass 2: Y-sorted world entities, buildings, decor, fruit trees, Farmer, crops & animals
     const drawList = [];
 
-    // 2a. Original /10[3..4] farm structures, props, trees & bushes
-    // (exclude cat 49 plots, cat 54 animals, cat 52 fruit trees, and cat 42 player Farmer — all managed live!)
     for (const ent of sourceWorld?.farmEntities || []) {
       if (ent.category === 49 || ent.category === 54 || ent.category === 52) continue;
       if (ent.category === 42 && ent.entityId === -1) continue;
+      if (ent.category === 48 && clearedSet.has(ent.opaqueKey)) continue;
       const sx = ent.x + ox;
       const sy = ent.y + oy;
       if (sx < -140 || sy < viewY - 140 || sx > SCREEN_W + 140 || sy > viewY + viewH + 140) continue;
@@ -217,11 +245,35 @@ function renderFarmWorld(ctx) {
           } else {
             drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, ent.frame, sx, sy, 0);
           }
+          // Subtle interactive badges on key buildings (Nhà bếp, Kho thóc, Hòm thư...)
+          if (ent.category === 50 && KEY_BUILDING_LABELS[ent.entityId]) {
+            const label = KEY_BUILDING_LABELS[ent.entityId];
+            let badge = label;
+            if (ent.entityId === 2 && (s.kitchenQueue || []).some(j => j.ready)) badge = '🍳 Xong!';
+            else if (ent.entityId === 15 && (s.neighborMail || []).some(m => !m.claimed)) badge = '✉️ Thư mới';
+            ctx.fillStyle = 'rgba(18, 30, 14, 0.72)';
+            ctx.fillRect(sx - 24, sy - 32, 48, 11);
+            drawText(ctx, badge, sx, sy - 24, { align: 'center', size: 7, color: '#fff7c2', bold: true });
+          }
         },
       });
     }
 
-    // 2a-bis. Live harvestable Fruit Trees (cat 52 — e.java:1804-1818: frame 0 growing, frame 1 ripe fruit)
+    // Player-placed Decorations (/9[4])
+    for (const dec of s.placedDecor || []) {
+      const sx = dec.worldX + ox;
+      const sy = dec.worldY + oy;
+      if (sx < -80 || sy < viewY - 80 || sx > SCREEN_W + 80 || sy > viewY + viewH + 80) continue;
+      drawList.push({
+        sortY: dec.worldY,
+        draw: () => {
+          const entry = getSpriteBlock(dec.worldBlock, dec.paletteIndex || 0);
+          if (entry) drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, dec.frame || 0, sx, sy, 0);
+        },
+      });
+    }
+
+    // Live Fruit Trees (cat 52)
     for (const tree of s.fruitTrees || []) {
       const sx = tree.worldX + ox;
       const sy = tree.worldY + oy;
@@ -230,33 +282,23 @@ function renderFarmWorld(ctx) {
         sortY: tree.worldY,
         draw: () => {
           const entry = getSpriteBlock(tree.worldBlock, 0);
-          if (entry) {
-            drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, tree.ready ? 1 : 0, sx, sy, 0);
-          }
-          if (tree.ready) {
-            drawText(ctx, '★', sx + 10, sy - 22, { size: 9, color: '#ffd84d', bold: true });
-          }
+          if (entry) drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, tree.ready ? 1 : 0, sx, sy, 0);
+          if (tree.ready) drawText(ctx, '★', sx + 10, sy - 22, { size: 9, color: '#ffd84d', bold: true });
         },
       });
     }
 
-    // 2a-ter. Live controllable Player Farmer (/5 block 2 — e.java:1107-1176)
+    // Live Player Farmer (/5 block 2 — e.java:1107-1176)
     if (s.farmer) {
       const fx = s.farmer.x + ox;
       const fy = s.farmer.y + oy;
-      // Draw subtle destination diamond when walking to a tapped target
       if (s.farmer.state === 'walk' && !s.farmer.directControl) {
         const tx = s.farmer.targetX + ox;
         const ty = s.farmer.targetY + oy;
         ctx.strokeStyle = 'rgba(255, 245, 90, 0.85)';
-        ctx.lineWidth = 1;
         ctx.beginPath();
-        ctx.moveTo(tx, ty - 5);
-        ctx.lineTo(tx + 10, ty);
-        ctx.lineTo(tx, ty + 5);
-        ctx.lineTo(tx - 10, ty);
-        ctx.closePath();
-        ctx.stroke();
+        ctx.moveTo(tx, ty - 5); ctx.lineTo(tx + 10, ty); ctx.lineTo(tx, ty + 5); ctx.lineTo(tx - 10, ty);
+        ctx.closePath(); ctx.stroke();
       }
       drawList.push({
         sortY: s.farmer.y + 3,
@@ -270,7 +312,7 @@ function renderFarmWorld(ctx) {
       });
     }
 
-    // 2b. Live growing & ready crops from /5[crop.worldBlock] (e.java:1726-1742: F=0 sprout, F=1 growing, F=2 ready)
+    // Live Growing & Ready Crops (/5[crop.worldBlock])
     for (const plot of s.plots.values()) {
       if (!plot.cropId || plot.stage === 'tilled') continue;
       const wx = plot.worldX ?? (plot.col * tw + (tw >> 1));
@@ -286,19 +328,14 @@ function renderFarmWorld(ctx) {
         sortY: wy + 1,
         draw: () => {
           const entry = getSpriteBlock(cropBlock, 0);
-          if (entry) {
-            drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, frameIdx, sx, sy, 0);
-          }
-          if (plot.stage === 'ready') {
-            drawText(ctx, '★', sx + 10, sy - 10, { size: 9, color: '#ffd84d', bold: true });
-          } else if (plot.watered) {
-            drawText(ctx, '💧', sx + 9, sy - 8, { size: 7, color: '#7dd3fc' });
-          }
+          if (entry) drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, frameIdx, sx, sy, 0);
+          if (plot.stage === 'ready') drawText(ctx, '★', sx + 10, sy - 10, { size: 9, color: '#ffd84d', bold: true });
+          else if (plot.watered) drawText(ctx, '💧', sx + 9, sy - 8, { size: 7, color: '#7dd3fc' });
         },
       });
     }
 
-    // 2c. Live farm animals from /5[animal.worldBlock] with exact paletteIndex (a.java:13457-13508)
+    // Live Farm Animals (/5[animal.worldBlock] with exact paletteIndex)
     for (const a of s.animals) {
       const wx = a.worldX ?? (a.col * tw + (tw >> 1));
       const wy = a.worldY ?? (a.row * th + (th >> 1));
@@ -320,11 +357,8 @@ function renderFarmWorld(ctx) {
               drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, idleFrame, sx, sy, 0);
             }
           }
-          if (a.ready) {
-            drawText(ctx, '★', sx + 10, sy - 14, { size: 9, color: '#ffd84d', bold: true });
-          } else if (!a.fed) {
-            drawText(ctx, '!', sx + 10, sy - 14, { size: 9, color: '#ff6b6b', bold: true });
-          }
+          if (a.ready) drawText(ctx, '★', sx + 10, sy - 14, { size: 9, color: '#ffd84d', bold: true });
+          else if (!a.fed) drawText(ctx, '!', sx + 10, sy - 14, { size: 9, color: '#ff6b6b', bold: true });
         },
       });
     }
@@ -332,135 +366,323 @@ function renderFarmWorld(ctx) {
     drawList.sort((a, b) => a.sortY - b.sortY);
     for (const item of drawList) item.draw();
 
-    // Floating feedback popups (+XP / +Xu / Harvest)
+    // Floating feedback popups
     for (const p of s.popups || []) {
-      const px = p.x + ox;
-      const py = p.y + oy;
-      drawText(ctx, p.text, px, py, { align: 'center', size: 9, color: p.color || '#ffd84d', bold: true });
+      drawText(ctx, p.text, p.x + ox, p.y + oy, { align: 'center', size: 9, color: p.color || '#ffd84d', bold: true });
     }
 
-    // Active tile cursor outline (non-obstructive isometric diamond)
+    // Isometric diamond cursor
     const cx = s.cursorCol * tw + ox + (tw >> 1);
     const cy = s.cursorRow * th + oy + (th >> 1);
-    ctx.strokeStyle = '#fff55a';
+    ctx.strokeStyle = s.activeTool === 'place' ? '#58ff8a' : s.activeTool === 'plow' ? '#ffa94d' : '#fff55a';
     ctx.lineWidth = 1.5;
     ctx.beginPath();
-    ctx.moveTo(cx, cy - (th >> 1));
-    ctx.lineTo(cx + (tw >> 1), cy);
-    ctx.lineTo(cx, cy + (th >> 1));
-    ctx.lineTo(cx - (tw >> 1), cy);
-    ctx.closePath();
-    ctx.stroke();
+    ctx.moveTo(cx, cy - (th >> 1)); ctx.lineTo(cx + (tw >> 1), cy);
+    ctx.lineTo(cx, cy + (th >> 1)); ctx.lineTo(cx - (tw >> 1), cy);
+    ctx.closePath(); ctx.stroke();
     ctx.lineWidth = 1;
   });
 
-  // Top HUD Bar (0..26)
-  ctx.fillStyle = '#172414';
-  ctx.fillRect(0, 0, SCREEN_W, 26);
-  ctx.fillStyle = '#2d4727';
-  ctx.fillRect(0, 25, SCREEN_W, 1);
-  const seed = s.catalog?.crops?.find(c => c.id === s.selectedCropId);
-  drawText(ctx, `Lv.${s.level} (${s.xp}/${xpForNextLevel(s)})`, 6, 11, { size: 9, color: '#9cff7b', bold: true });
-  drawText(ctx, `💰 ${s.coins} Xu`, SCREEN_W - 6, 11, { align: 'right', size: 9, color: '#ffd84d', bold: true });
-  drawText(ctx, `Giống: ${seed?.name || 'Lúa mì'} (${seed?.buyPrice || 10}G)`, 6, 22, { size: 8, color: '#e6f0de', maxWidth: 165 });
-  const doneQ = s.quests?.filter(q => q.completed && !q.claimed).length || 0;
-  if (doneQ > 0) drawText(ctx, `🎁 ${doneQ} NV`, SCREEN_W - 6, 22, { align: 'right', size: 8, color: '#ffd84d', bold: true });
+  // Top HUD Bar (0..28) with /7 UI icon accent & XP progress bar
+  ctx.fillStyle = '#182b13';
+  ctx.fillRect(0, 0, SCREEN_W, 28);
+  ctx.fillStyle = '#3c612d';
+  ctx.fillRect(0, 27, SCREEN_W, 1);
 
-  // Toast banner above bottom bar
+  const uiHud = getUiSpriteBlock(1);
+  if (uiHud) {
+    withMIDPClip(ctx, 2, 2, 16, 16, () => {
+      drawBSpriteBlockFrame(ctx, uiHud.sprite, uiHud.moduleImages, 0, 10, 10, 0);
+    });
+  }
+  const xpNeed = xpForNextLevel(s);
+  const xpRatio = Math.max(0, Math.min(1, s.xp / Math.max(1, xpNeed)));
+  drawText(ctx, `Lv.${s.level}`, 20, 11, { size: 9, color: '#9cff7b', bold: true });
+  ctx.fillStyle = '#0d180a';
+  ctx.fillRect(46, 4, 46, 7);
+  ctx.fillStyle = '#74e352';
+  ctx.fillRect(47, 5, Math.round(44 * xpRatio), 5);
+  drawText(ctx, `⚡${s.energy}/${s.maxEnergy}`, 96, 11, { size: 8, color: '#7dd3fc', bold: true });
+  drawText(ctx, `💰${s.coins}`, SCREEN_W - 6, 11, { align: 'right', size: 9, color: '#ffd84d', bold: true });
+
+  const toolNames = { auto: '✋ Tay', plow: '⛏️ Cày đất', clear: '🪓 Dọn cỏ', place: `📍 Đặt ${s.placementItem?.spec?.name || ''}` };
+  drawText(ctx, `${toolNames[s.activeTool] || '✋ Tay'} · Đất:${s.unlockedZones?.length || 1}/6`, 6, 23, { size: 8, color: '#e6f0de', maxWidth: 165 });
+  const doneQ = s.quests?.filter(q => q.completed && !q.claimed).length || 0;
+  const readyCook = (s.kitchenQueue || []).filter(j => j.ready).length;
+  const rightHint = readyCook > 0 ? `🍳 ${readyCook} món` : doneQ > 0 ? `🎁 ${doneQ} NV` : `💵 ${s.cash}`;
+  drawText(ctx, rightHint, SCREEN_W - 6, 23, { align: 'right', size: 8, color: '#ffd84d', bold: true });
+
+  // Placement mode hint banner
+  if (s.activeTool === 'place' && s.placementItem) {
+    ctx.fillStyle = 'rgba(18, 42, 16, 0.9)';
+    ctx.fillRect(4, 30, SCREEN_W - 8, 16);
+    ctx.strokeStyle = '#58ff8a';
+    ctx.strokeRect(4.5, 30.5, SCREEN_W - 9, 15);
+    drawText(ctx, `Chạm bãi cỏ để đặt ${s.placementItem.spec.name} (Esc: Hủy)`, SCREEN_W / 2, 41, { align: 'center', size: 8, color: '#b7ffc6', bold: true });
+  }
+
+  // Toast banner
   if (s.toast) {
-    ctx.fillStyle = 'rgba(14, 22, 13, 0.88)';
+    ctx.fillStyle = 'rgba(14, 22, 13, 0.9)';
     ctx.fillRect(4, SCREEN_H - 48, SCREEN_W - 8, 18);
     ctx.strokeStyle = '#ffd84d';
     ctx.strokeRect(4.5, SCREEN_H - 47.5, SCREEN_W - 9, 17);
     drawText(ctx, s.toast, SCREEN_W / 2, SCREEN_H - 36, { align: 'center', size: 8, color: '#fff7c2', maxWidth: SCREEN_W - 14 });
   }
 
-  // Bottom Toolbar (SCREEN_H - 28 .. SCREEN_H)
-  ctx.fillStyle = '#172414';
+  // Bottom 5-button Authentic Green Farm Toolbar (SCREEN_H - 28 .. SCREEN_H)
+  ctx.fillStyle = '#182b13';
   ctx.fillRect(0, SCREEN_H - 28, SCREEN_W, 28);
-  const tabs = ['CHỢ', 'KHO', 'N.VỤ', 'LƯU'];
+  const tabs = ['C.CỤ', 'CHỢ', 'KHO', 'NHÀ', 'NV/HX'];
   const bw = Math.floor(SCREEN_W / tabs.length);
   tabs.forEach((lbl, i) => {
-    const bx = i * bw + 3;
-    ctx.fillStyle = '#263a21';
-    ctx.fillRect(bx, SCREEN_H - 24, bw - 6, 20);
-    ctx.strokeStyle = '#6f9e5d';
-    ctx.strokeRect(bx + 0.5, SCREEN_H - 23.5, bw - 7, 19);
-    drawText(ctx, lbl, bx + (bw - 6) / 2, SCREEN_H - 11, { align: 'center', size: 9, color: '#f2f7ec', bold: true });
+    const bx = i * bw + 2;
+    ctx.fillStyle = (i === 0 && s.activeTool !== 'auto') ? '#3d612a' : '#263a21';
+    ctx.fillRect(bx, SCREEN_H - 24, bw - 4, 20);
+    ctx.strokeStyle = '#78ab63';
+    ctx.strokeRect(bx + 0.5, SCREEN_H - 23.5, bw - 5, 19);
+    drawText(ctx, lbl, bx + (bw - 4) / 2, SCREEN_H - 11, { align: 'center', size: 8, color: '#f2f7ec', bold: true });
   });
 }
 
-function renderPanelList(ctx, title, subtitle, rows, cursorIdx, footer) {
+function renderPanelList(ctx, title, subtitle, rows, cursorIdx, footer, tabBar = null) {
   ctx.fillStyle = '#121c11';
   ctx.fillRect(0, 0, SCREEN_W, SCREEN_H);
-  ctx.fillStyle = '#1e2f1c';
-  ctx.fillRect(0, 0, SCREEN_W, 38);
-  drawText(ctx, title, 10, 15, { size: 11, color: '#ffd84d', bold: true });
-  drawText(ctx, subtitle, 10, 30, { size: 8, color: '#9cff7b' });
+  ctx.fillStyle = '#1e3319';
+  ctx.fillRect(0, 0, SCREEN_W, tabBar ? 54 : 38);
+  drawText(ctx, title, 8, 14, { size: 10, color: '#ffd84d', bold: true });
+  drawText(ctx, subtitle, 8, 28, { size: 8, color: '#9cff7b', maxWidth: SCREEN_W - 16 });
 
-  const start = Math.max(0, Math.min(Math.max(0, rows.length - 8), cursorIdx - 4));
-  for (let i = 0; i < 8 && start + i < rows.length; i++) {
+  let listTop = 42;
+  if (tabBar && tabBar.length > 0) {
+    const tw = Math.floor((SCREEN_W - 8) / tabBar.length);
+    tabBar.forEach((t, i) => {
+      const tx = 4 + i * tw;
+      ctx.fillStyle = t.active ? '#3c6629' : '#182814';
+      ctx.fillRect(tx + 1, 34, tw - 2, 17);
+      ctx.strokeStyle = t.active ? '#ffd84d' : '#416136';
+      ctx.strokeRect(tx + 1.5, 34.5, tw - 3, 16);
+      drawText(ctx, t.label, tx + tw / 2, 46, { align: 'center', size: 8, color: t.active ? '#fff7c2' : '#c6d6be', bold: t.active });
+    });
+    listTop = 58;
+  }
+
+  const maxVisible = tabBar ? 8 : 9;
+  const rowH = 26;
+  const start = Math.max(0, Math.min(Math.max(0, rows.length - maxVisible), cursorIdx - Math.floor(maxVisible / 2)));
+  for (let i = 0; i < maxVisible && start + i < rows.length; i += 1) {
     const idx = start + i;
     const item = rows[idx];
-    const y = 44 + i * 28;
+    const y = listTop + i * rowH;
     ctx.fillStyle = idx === cursorIdx ? '#2e4728' : '#192617';
-    ctx.fillRect(6, y, SCREEN_W - 12, 24);
+    ctx.fillRect(6, y, SCREEN_W - 12, rowH - 3);
     ctx.strokeStyle = idx === cursorIdx ? '#ffd84d' : '#334d2d';
-    ctx.strokeRect(6.5, y + 0.5, SCREEN_W - 13, 23);
-    let textX = 12;
+    ctx.strokeRect(6.5, y + 0.5, SCREEN_W - 13, rowH - 4);
+    let textX = 11;
     if (item.spriteBlock != null) {
       const entry = getSpriteBlock(item.spriteBlock, item.paletteIndex || 0);
       if (entry) {
-        withMIDPClip(ctx, 8, y + 2, 22, 20, () => {
+        withMIDPClip(ctx, 8, y + 2, 22, 19, () => {
           drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, item.spriteFrame ?? 0, 19, y + 17, 0);
         });
         textX = 33;
       }
     }
-    drawText(ctx, item.left, textX, y + 15, { size: 9, color: item.locked ? '#889483' : '#f2f7ec', maxWidth: 162 - textX });
-    drawText(ctx, item.right, SCREEN_W - 12, y + 15, { align: 'right', size: 9, color: item.rightColor || '#ffd84d', bold: true });
+    drawText(ctx, item.left, textX, y + 14, { size: 8, color: item.locked ? '#889483' : '#f2f7ec', maxWidth: 162 - textX });
+    drawText(ctx, item.right, SCREEN_W - 10, y + 14, { align: 'right', size: 8, color: item.rightColor || '#ffd84d', bold: true });
   }
 
-  ctx.fillStyle = '#1e2f1c';
-  ctx.fillRect(0, SCREEN_H - 28, SCREEN_W, 28);
-  drawText(ctx, footer, SCREEN_W / 2, SCREEN_H - 11, { align: 'center', size: 8, color: '#e6f0de' });
+  ctx.fillStyle = '#1e3319';
+  ctx.fillRect(0, SCREEN_H - 26, SCREEN_W, 26);
+  drawText(ctx, footer, SCREEN_W / 2, SCREEN_H - 10, { align: 'center', size: 8, color: '#e6f0de' });
+}
+
+function getShopItems(s) {
+  if (s.shopTab === 'crops') return s.catalog.crops.filter(c => c.id !== 3000 && !c.isTree);
+  if (s.shopTab === 'trees') return s.catalog.crops.filter(c => c.isTree);
+  if (s.shopTab === 'animals') return s.catalog.animals;
+  if (s.shopTab === 'land') return LAND_ZONES;
+  return s.catalog.decorations || [];
 }
 
 function renderShop(ctx) {
   const s = app.session;
-  const list = s.shopTab === 'crops'
-    ? s.catalog.crops.filter(c => c.id !== 3000)
-    : s.catalog.animals;
-  const rows = list.map((it) => ({
-    left: s.shopTab === 'crops' ? `${it.name} (Lv.${it.unlockLevel})` : it.name,
-    right: `${it.buyPrice} Xu`,
-    locked: s.shopTab === 'crops' && s.level < it.unlockLevel,
-    rightColor: s.coins >= it.buyPrice ? '#ffd84d' : '#ff7b70',
-    spriteBlock: it.worldBlock,
-    spriteFrame: s.shopTab === 'crops' ? 2 : (it.idleFrame ?? 0),
-    paletteIndex: it.paletteIndex ?? 0,
+  const tabDefs = [
+    { id: 'crops', label: 'HẠT' },
+    { id: 'trees', label: 'CÂY' },
+    { id: 'animals', label: 'THÚ' },
+    { id: 'land', label: 'ĐẤT' },
+    { id: 'decor', label: 'ĐỒ' },
+  ].map(t => ({ ...t, active: s.shopTab === t.id }));
+
+  const list = getShopItems(s);
+  const rows = list.map((it) => {
+    if (s.shopTab === 'land') {
+      const owned = (s.unlockedZones || []).includes(it.id);
+      return {
+        left: `${it.name} (Lv.${it.unlockLevel})`,
+        right: owned ? 'ĐÃ MUA' : `${it.cost} Xu`,
+        locked: !owned && s.level < it.unlockLevel,
+        rightColor: owned ? '#9cff7b' : (s.coins >= it.cost ? '#ffd84d' : '#ff7b70'),
+      };
+    }
+    const locked = (it.unlockLevel || 1) > s.level;
+    return {
+      left: `${it.name}${it.unlockLevel > 1 ? ` (Lv.${it.unlockLevel})` : ''}`,
+      right: `${it.buyPrice} Xu`,
+      locked,
+      rightColor: s.coins >= it.buyPrice ? '#ffd84d' : '#ff7b70',
+      spriteBlock: it.worldBlock,
+      spriteFrame: s.shopTab === 'crops' ? 2 : s.shopTab === 'trees' ? 1 : (it.idleFrame ?? it.frame ?? 0),
+      paletteIndex: it.paletteIndex ?? 0,
+    };
+  });
+  renderPanelList(ctx, 'CỬA HÀNG NÔNG TRẠI (5 MỤC)', `Xu: ${s.coins} · Cấp: ${s.level} · Chạm mục để mua/đặt`, rows, s.shopCursor, 'Chạm dòng để mua · Q: Đổi tab · E/Esc: Đóng', tabDefs);
+}
+
+function renderSeedPicker(ctx) {
+  const s = app.session;
+  const crops = s.catalog.crops.filter(c => c.id !== 3000 && !c.isTree);
+  const rows = crops.map((c) => ({
+    left: `${c.name} (${c.growSec}s · Lv.${c.unlockLevel})`,
+    right: `${c.buyPrice} Xu`,
+    locked: s.level < c.unlockLevel,
+    rightColor: s.coins >= c.buyPrice ? '#9cff7b' : '#ff7b70',
+    spriteBlock: c.worldBlock,
+    spriteFrame: 2,
   }));
-  const tabName = s.shopTab === 'crops' ? 'CHỢ HẠT GIỐNG (/9[2])' : 'CHỢ VẬT NUÔI (/9[0])';
-  renderPanelList(ctx, tabName, `Xu: ${s.coins} · Cấp: ${s.level} · Tab: Q đổi mục`, rows, s.shopCursor, 'Chạm chọn · Q: Đổi Giống/Thú · E/Esc: Đóng');
+  renderPanelList(ctx, 'CHỌN HẠT GIỐNG ĐỂ GIEO (/9[2])', `Xu: ${s.coins} · Cấp: ${s.level} · Chọn cây trồng vào ô đất`, rows, s.panelCursor, 'Chạm hạt giống để trồng ngay · E/Esc: Đóng');
 }
 
 function renderBarn(ctx) {
   const s = app.session;
   const items = [...s.inventory.values()];
-  const rows = items.length > 0
-    ? items.map(it => ({ left: `${it.name} ×${it.qty}`, right: `Bán +${it.sellPrice * it.qty}G` }))
-    : [{ left: 'Kho đang trống — hãy thu hoạch cây/thú!', right: '0G' }];
-  renderPanelList(ctx, 'KHO NÔNG SẢN (/9[1])', `Xu hiện có: ${s.coins} · Tổng món: ${items.reduce((a, b) => a + b.qty, 0)}`, rows, s.barnCursor, 'Chạm để bán · Q: Bán tất cả · E/Esc: Đóng');
+  const totalQty = items.reduce((a, b) => a + b.qty, 0);
+  const upCost = 150 + Math.floor((s.barnCapacity - 40) * 10);
+  const rows = [
+    { left: `⬆ Nâng cấp Kho thóc (+20 chỗ)`, right: `${upCost} Xu`, rightColor: s.coins >= upCost ? '#9cff7b' : '#ff7b70' },
+    ...(items.length > 0
+      ? items.map(it => ({ left: `${it.name} ×${it.qty}`, right: `Bán +${it.sellPrice * it.qty}G` }))
+      : [{ left: 'Kho đang trống — hãy thu hoạch cây/thú!', right: '0G' }]),
+  ];
+  renderPanelList(ctx, `KHO THÓC (${totalQty}/${s.barnCapacity})`, `Xu: ${s.coins} · Nông sản & thành phẩm Nhà bếp`, rows, s.barnCursor, 'Chạm để bán/nâng cấp · Q: Bán hết · E/Esc: Đóng');
 }
 
-function renderQuests(ctx) {
+function renderKitchen(ctx) {
   const s = app.session;
-  const rows = (s.quests || []).map(q => ({
-    left: q.title,
-    right: q.claimed ? 'ĐÃ NHẬN' : q.completed ? `NHẬN +${q.rewardCoins}G` : `${q.progress}/${q.targetCount}`,
-    rightColor: q.completed && !q.claimed ? '#9cff7b' : '#ffd84d',
+  const queueRows = (s.kitchenQueue || []).map(j => ({
+    left: j.ready ? `✅ ${j.name} (XONG!)` : `⏳ ${j.name} (${Math.ceil((j.cookMs - j.progressMs) / 1000)}s)`,
+    right: j.ready ? 'NHẬN' : 'ĐANG NẤU',
+    rightColor: j.ready ? '#9cff7b' : '#ffd84d',
   }));
-  renderPanelList(ctx, 'NHIỆM VỤ (/9[25])', `Xu: ${s.coins} · Cấp: ${s.level}`, rows, s.questCursor, 'Chạm NV hoàn thành để nhận thưởng · E/Esc: Đóng');
+  const recipeRows = (s.catalog.recipes || []).slice(0, 40).map((r) => {
+    const canCook = s.level >= r.unlockLevel && r.ingredients.every(ing => (s.inventory.get(ing.goodId)?.qty || 0) >= ing.qty);
+    const ingStr = r.ingredients.map(i => `${i.name}×${i.qty}`).join('+');
+    return {
+      left: `${r.name} (${ingStr || 'Miễn phí'})`,
+      right: s.level < r.unlockLevel ? `Lv.${r.unlockLevel}` : canCook ? 'NẤU' : 'Thiếu NL',
+      locked: !canCook,
+      rightColor: canCook ? '#9cff7b' : '#ff9f70',
+    };
+  });
+  renderPanelList(ctx, 'NHÀ BẾP — CHẾ BIẾN (/9[7])', `Đang nấu: ${s.kitchenQueue?.length || 0}/4 · Cấp: ${s.level}`, [...queueRows, ...recipeRows], s.panelCursor, 'Chạm món đủ nguyên liệu để nấu · E/Esc: Đóng');
+}
+
+function renderManor(ctx) {
+  const s = app.session;
+  const rooms = (s.catalog.buildings || []).filter(b => b.isManorRoom);
+  const quickLinks = [
+    { left: '🍳 Vào Nhà bếp (83 công thức)', right: 'MỞ', rightColor: '#9cff7b' },
+    { left: '🏺 Vào Phòng sưu tập (15 cổ vật)', right: 'MỞ', rightColor: '#9cff7b' },
+    { left: '✉️ Mở Hòm thư & Đơn hàng', right: 'MỞ', rightColor: '#9cff7b' },
+    { left: '🗺️ Mua đất mở rộng trang trại', right: `${s.unlockedZones?.length || 1}/6`, rightColor: '#ffd84d' },
+  ];
+  const roomRows = rooms.map((r) => {
+    const done = !!s.unlockedRooms?.[r.entityId];
+    const cost = Math.max(150, Math.min(5000, r.repairCost || 300));
+    return {
+      left: `🏛️ ${r.name}`,
+      right: done ? 'ĐÃ SỬA' : `Sửa ${cost}G`,
+      rightColor: done ? '#9cff7b' : (s.coins >= cost ? '#ffd84d' : '#ff7b70'),
+      spriteBlock: r.worldBlock,
+      spriteFrame: r.frame || 0,
+    };
+  });
+  renderPanelList(ctx, 'DINH THỰ & CÔNG TRÌNH (/9[3])', `Xu: ${s.coins} · Sửa 9 phòng & mở nhanh các nhà`, [...quickLinks, ...roomRows], s.panelCursor, 'Chạm để vào nhà hoặc sửa phòng · E/Esc: Đóng');
+}
+
+function renderCoop(ctx) {
+  const s = app.session;
+  const isChicken = s.coopFilter === 'chicken';
+  const animals = s.animals.filter(a => {
+    const spec = s.catalog.animals.find(sp => sp.id === a.animalId);
+    return isChicken ? (spec?.kind === 'chicken' || a.worldBlock === 8) : (spec?.kind !== 'chicken' && a.worldBlock !== 8);
+  });
+  const rows = [
+    { left: `➕ Mua thêm ${isChicken ? 'Gà' : 'Vật nuôi'} tại Chợ`, right: 'MỞ CHỢ', rightColor: '#9cff7b' },
+    ...animals.map(a => ({
+      left: a.name,
+      right: a.ready ? 'THU HOẠCH' : a.fed ? 'ĐANG LỚN' : 'CHO ĂN',
+      rightColor: a.ready ? '#9cff7b' : !a.fed ? '#ff7b70' : '#ffd84d',
+      spriteBlock: a.worldBlock,
+      paletteIndex: a.paletteIndex,
+      spriteFrame: a.idleFrame || 0,
+    })),
+  ];
+  renderPanelList(ctx, isChicken ? 'CHUỒNG GÀ (1003)' : 'CHUỒNG THÚ (1004)', `Số lượng: ${animals.length}/${isChicken ? s.coopCapacity : s.shedCapacity}`, rows, s.panelCursor, 'Chạm vật nuôi để thu hoạch/cho ăn · E/Esc: Đóng');
+}
+
+function renderMailbox(ctx) {
+  const s = app.session;
+  const rows = (s.neighborMail || []).map(m => ({
+    left: `${m.from}: ${m.subject}`,
+    right: m.claimed ? 'ĐÃ NHẬN' : m.kind === 'gift' ? `NHẬN +${m.giftCoins}G` : `GIAO +${m.giftCoins}G`,
+    rightColor: m.claimed ? '#889483' : '#9cff7b',
+  }));
+  renderPanelList(ctx, 'HÒM THƯ & ĐƠN HÀNG (1007)', `Xu: ${s.coins} · Quà tặng & đơn hàng từ hàng xóm`, rows, s.panelCursor, 'Chạm thư để nhận quà/giao đơn · E/Esc: Đóng');
+}
+
+function renderCollections(ctx) {
+  const s = app.session;
+  const rows = (s.catalog.collectibles || []).map(c => {
+    const qty = s.collections?.[c.id] || 0;
+    return {
+      left: `🏺 ${c.name} (Có: ${qty})`,
+      right: qty > 0 ? `Bán +${c.sellPrice}G` : `Lv.${c.minLevel}`,
+      locked: qty === 0,
+      rightColor: qty > 0 ? '#9cff7b' : '#889483',
+    };
+  });
+  renderPanelList(ctx, 'PHÒNG SƯU TẬP CỔ VẬT (/9[16])', 'Thu hoạch cây & dọn cỏ/đá để tìm 15 cổ vật quý!', rows, s.panelCursor, 'Chạm cổ vật đã tìm được để bán · E/Esc: Đóng');
+}
+
+function renderQuestsOrNeighbors(ctx) {
+  const s = app.session;
+  const isNb = s.view === SOURCE_VIEW.NEIGHBORS;
+  const tabDefs = [
+    { id: 'quests', label: 'NHIỆM VỤ', active: !isNb },
+    { id: 'neighbors', label: '10 HÀNG XÓM', active: isNb },
+  ];
+  if (isNb) {
+    const rows = (s.catalog.neighbors || []).map(nb => {
+      const done = !!s.helpedNeighbors?.[nb.id];
+      return {
+        left: `🏡 Trang trại ${nb.name}`,
+        right: done ? 'ĐÃ GIÚP' : 'GIÚP (+45G)',
+        rightColor: done ? '#889483' : '#9cff7b',
+        spriteBlock: nb.worldBlock,
+        spriteFrame: 0,
+      };
+    });
+    renderPanelList(ctx, 'HÀNG XÓM (/9[8])', `Năng lượng: ⚡${s.energy}/${s.maxEnergy} · Giúp hàng xóm kiếm Xu & XP`, rows, s.panelCursor, 'Chạm hàng xóm để ghé thăm & giúp · E/Esc: Đóng', tabDefs);
+  } else {
+    const rows = (s.quests || []).map(q => ({
+      left: q.title,
+      right: q.claimed ? 'ĐÃ NHẬN' : q.completed ? `NHẬN +${q.rewardCoins}G` : `${q.progress}/${q.targetCount}`,
+      rightColor: q.completed && !q.claimed ? '#9cff7b' : '#ffd84d',
+    }));
+    renderPanelList(ctx, 'NHIỆM VỤ (/9[25])', `Xu: ${s.coins} · Cấp: ${s.level}`, rows, s.questCursor, 'Chạm NV hoàn thành để nhận thưởng · E/Esc: Đóng', tabDefs);
+  }
 }
 
 function renderFrame(ctx, now) {
@@ -468,10 +690,17 @@ function renderFrame(ctx, now) {
   previousFrameAt = timing.now;
   app.session.frame += 1;
   app.session.lastFrameAt = timing.now;
-  if (app.session.view === SOURCE_VIEW.OPENING_SCRIPT) renderOpeningEvidence(ctx);
-  else if (app.session.view === SOURCE_VIEW.SHOP) renderShop(ctx);
-  else if (app.session.view === SOURCE_VIEW.BARN) renderBarn(ctx);
-  else if (app.session.view === SOURCE_VIEW.QUESTS) renderQuests(ctx);
+  const v = app.session.view;
+  if (v === SOURCE_VIEW.OPENING_SCRIPT) renderOpeningEvidence(ctx);
+  else if (v === SOURCE_VIEW.SHOP) renderShop(ctx);
+  else if (v === SOURCE_VIEW.SEED_PICKER) renderSeedPicker(ctx);
+  else if (v === SOURCE_VIEW.BARN) renderBarn(ctx);
+  else if (v === SOURCE_VIEW.KITCHEN) renderKitchen(ctx);
+  else if (v === SOURCE_VIEW.MANOR) renderManor(ctx);
+  else if (v === SOURCE_VIEW.COOP) renderCoop(ctx);
+  else if (v === SOURCE_VIEW.MAILBOX) renderMailbox(ctx);
+  else if (v === SOURCE_VIEW.COLLECTIONS) renderCollections(ctx);
+  else if (v === SOURCE_VIEW.QUESTS || v === SOURCE_VIEW.NEIGHBORS) renderQuestsOrNeighbors(ctx);
   else renderFarmWorld(ctx);
 }
 
@@ -483,9 +712,8 @@ function clampCamera(s) {
   const th = tm?.tileHeight || 18;
   const mapW = (tm?.width || 58) * tw;
   const mapH = (tm?.height || 58) * th;
-  const viewH = SCREEN_H - 54;
+  const viewH = SCREEN_H - 56;
   s.cameraX = Math.max(0, Math.min(mapW - SCREEN_W, Math.round(s.cameraX)));
-  // Real non-empty tile map starts at row 16 (y = 288)
   s.cameraY = Math.max(288, Math.min(mapH - viewH, Math.round(s.cameraY)));
 }
 
@@ -495,15 +723,8 @@ function onPointerDown(event) {
   const x = (event.clientX - rect.left) * (SCREEN_W / rect.width);
   const y = (event.clientY - rect.top) * (SCREEN_H / rect.height);
   const s = app.session;
-  if (s.view === SOURCE_VIEW.WORLD_LAYER && y >= 26 && y < SCREEN_H - 28) {
-    dragState = {
-      pointerId: event.pointerId,
-      startX: x,
-      startY: y,
-      camX: s.cameraX,
-      camY: s.cameraY,
-      dragged: false,
-    };
+  if (s.view === SOURCE_VIEW.WORLD_LAYER && y >= 28 && y < SCREEN_H - 28) {
+    dragState = { pointerId: event.pointerId, startX: x, startY: y, camX: s.cameraX, camY: s.cameraY, dragged: false };
     try { canvasEl.setPointerCapture(event.pointerId); } catch { /* ignore */ }
     event.preventDefault();
     return;
@@ -535,21 +756,141 @@ function onPointerUp(event) {
   if (!wasDragged) handleTap(sx, sy, event);
 }
 
+function handlePanelAction(s, idx) {
+  const v = s.view;
+  if (v === SOURCE_VIEW.SHOP) {
+    const list = getShopItems(s);
+    const item = list[idx];
+    if (!item) return;
+    if (s.shopTab === 'land') {
+      buyLandZone(s, item.id);
+      saveSession();
+    } else if (s.shopTab === 'crops') {
+      if (s.level >= item.unlockLevel) {
+        s.selectedCropId = item.id;
+        s.toast = `Đã chọn giống ${item.name} — chạm ô đất để gieo!`;
+        s.toastMs = 2200;
+        s.view = SOURCE_VIEW.WORLD_LAYER;
+      } else {
+        s.toast = `${item.name} mở khóa ở Cấp ${item.unlockLevel}!`;
+        s.toastMs = 2000;
+      }
+    } else {
+      // Enter Placement Mode right on the farm map for Trees, Animals & Decor!
+      if ((item.unlockLevel || 1) > s.level) {
+        s.toast = `${item.name} mở khóa ở Cấp ${item.unlockLevel}!`;
+        s.toastMs = 2000;
+        return;
+      }
+      if (s.coins < item.buyPrice) {
+        s.toast = `Cần ${item.buyPrice} Xu để mua ${item.name}!`;
+        s.toastMs = 2000;
+        return;
+      }
+      const kind = s.shopTab === 'trees' ? 'tree' : s.shopTab === 'animals' ? 'animal' : 'decor';
+      s.activeTool = 'place';
+      s.placementItem = { kind, spec: item };
+      s.view = SOURCE_VIEW.WORLD_LAYER;
+      s.toast = `Chạm bãi cỏ để đặt ${item.name}!`;
+      s.toastMs = 2600;
+    }
+  } else if (v === SOURCE_VIEW.SEED_PICKER) {
+    const crops = s.catalog.crops.filter(c => c.id !== 3000 && !c.isTree);
+    const crop = crops[idx];
+    const target = s.seedPickerTarget;
+    if (crop && target) {
+      s.selectedCropId = crop.id;
+      s.seedPickerTarget = null;
+      s.view = SOURCE_VIEW.WORLD_LAYER;
+      setFarmerWalkTarget(s, target.worldX, target.worldY + 4, {
+        type: 'plant_seed', row: target.row, col: target.col, cropId: crop.id,
+      });
+      saveSession();
+    }
+  } else if (v === SOURCE_VIEW.BARN) {
+    if (idx === 0) {
+      upgradeBarn(s);
+      saveSession();
+    } else {
+      const items = [...s.inventory.values()];
+      const item = items[idx - 1];
+      if (item) { sellGood(s, item.id, item.qty); saveSession(); }
+    }
+  } else if (v === SOURCE_VIEW.KITCHEN) {
+    const qLen = s.kitchenQueue?.length || 0;
+    if (idx < qLen) {
+      const job = s.kitchenQueue[idx];
+      if (job?.ready) { collectKitchenDish(s, job.uid); saveSession(); }
+    } else {
+      const recipe = (s.catalog.recipes || [])[idx - qLen];
+      if (recipe) { startKitchenRecipe(s, recipe.id); saveSession(); }
+    }
+  } else if (v === SOURCE_VIEW.MANOR) {
+    if (idx === 0) { s.panelCursor = 0; s.view = SOURCE_VIEW.KITCHEN; }
+    else if (idx === 1) { s.panelCursor = 0; s.view = SOURCE_VIEW.COLLECTIONS; }
+    else if (idx === 2) { s.panelCursor = 0; s.view = SOURCE_VIEW.MAILBOX; }
+    else if (idx === 3) { s.shopTab = 'land'; s.shopCursor = 0; s.view = SOURCE_VIEW.SHOP; }
+    else {
+      const rooms = (s.catalog.buildings || []).filter(b => b.isManorRoom);
+      const room = rooms[idx - 4];
+      if (room) { repairManorRoom(s, room.entityId); saveSession(); }
+    }
+  } else if (v === SOURCE_VIEW.COOP) {
+    if (idx === 0) { s.shopTab = 'animals'; s.shopCursor = 0; s.view = SOURCE_VIEW.SHOP; }
+    else {
+      const isChicken = s.coopFilter === 'chicken';
+      const list = s.animals.filter(a => {
+        const spec = s.catalog.animals.find(sp => sp.id === a.animalId);
+        return isChicken ? (spec?.kind === 'chicken' || a.worldBlock === 8) : (spec?.kind !== 'chicken' && a.worldBlock !== 8);
+      });
+      const animal = list[idx - 1];
+      if (animal) { collectOrFeedAnimal(s, animal.uid); saveSession(); }
+    }
+  } else if (v === SOURCE_VIEW.MAILBOX) {
+    const m = s.neighborMail?.[idx];
+    if (m) { claimMail(s, m.id); saveSession(); }
+  } else if (v === SOURCE_VIEW.COLLECTIONS) {
+    const c = s.catalog.collectibles?.[idx];
+    if (c) { sellCollectible(s, c.id); saveSession(); }
+  } else if (v === SOURCE_VIEW.QUESTS) {
+    const q = s.quests?.[idx];
+    if (q) { claimQuestReward(s, q.id); saveSession(); }
+  } else if (v === SOURCE_VIEW.NEIGHBORS) {
+    const nb = s.catalog.neighbors?.[idx];
+    if (nb) { helpNeighbor(s, nb.id); saveSession(); }
+  }
+}
+
 function handleTap(x, y, event) {
   const s = app.session;
-
   if (s.view === SOURCE_VIEW.OPENING_SCRIPT) {
     app.session = advanceEvidenceView(s, KEY.FIRE);
     event.preventDefault();
     return;
   }
 
-  if (s.view === SOURCE_VIEW.SHOP || s.view === SOURCE_VIEW.BARN || s.view === SOURCE_VIEW.QUESTS) {
-    if (y >= SCREEN_H - 28) {
-      if (s.view === SOURCE_VIEW.SHOP && x < SCREEN_W / 2) {
-        s.shopTab = s.shopTab === 'crops' ? 'animals' : 'crops';
+  // Any modal panel screen
+  if (s.view !== SOURCE_VIEW.WORLD_LAYER) {
+    // Tab bar click for SHOP or QUESTS/NEIGHBORS
+    if (y >= 34 && y <= 52) {
+      if (s.view === SOURCE_VIEW.SHOP) {
+        const tabIds = ['crops', 'trees', 'animals', 'land', 'decor'];
+        const tIdx = Math.max(0, Math.min(4, Math.floor((x - 4) / ((SCREEN_W - 8) / 5))));
+        s.shopTab = tabIds[tIdx];
         s.shopCursor = 0;
-      } else if (s.view === SOURCE_VIEW.BARN && x < SCREEN_W / 2) {
+        event.preventDefault();
+        return;
+      }
+      if (s.view === SOURCE_VIEW.QUESTS || s.view === SOURCE_VIEW.NEIGHBORS) {
+        s.view = x < SCREEN_W / 2 ? SOURCE_VIEW.QUESTS : SOURCE_VIEW.NEIGHBORS;
+        s.panelCursor = 0;
+        event.preventDefault();
+        return;
+      }
+    }
+    // Footer close / quick action
+    if (y >= SCREEN_H - 26) {
+      if (s.view === SOURCE_VIEW.BARN && x < SCREEN_W / 2) {
         sellAllGoods(s);
         saveSession();
       } else {
@@ -558,70 +899,100 @@ function handleTap(x, y, event) {
       event.preventDefault();
       return;
     }
-    const rowIdx = Math.floor((y - 44) / 28);
-    if (rowIdx >= 0 && rowIdx < 8) {
-      if (s.view === SOURCE_VIEW.SHOP) {
-        const list = s.shopTab === 'crops' ? s.catalog.crops.filter(c => c.id !== 3000) : s.catalog.animals;
-        const start = Math.max(0, Math.min(Math.max(0, list.length - 8), s.shopCursor - 4));
-        const item = list[start + rowIdx];
-        if (item) {
-          if (s.shopTab === 'crops') {
-            if (s.level >= item.unlockLevel) {
-              s.selectedCropId = item.id;
-              s.toast = `Đã chọn giống ${item.name} (${item.buyPrice} Xu)`;
-              s.toastMs = 2000;
-              s.view = SOURCE_VIEW.WORLD_LAYER;
-            } else {
-              s.toast = `${item.name} mở khóa ở Cấp ${item.unlockLevel}!`;
-              s.toastMs = 2000;
-            }
-          } else {
-            const spotCol = s.cursorCol;
-            const spotRow = s.cursorRow;
-            buyAnimal(s, item.id, spotRow, spotCol);
-            saveSession();
-            s.view = SOURCE_VIEW.WORLD_LAYER;
-          }
-        }
-      } else if (s.view === SOURCE_VIEW.BARN) {
-        const items = [...s.inventory.values()];
-        const item = items[rowIdx];
-        if (item) {
-          sellGood(s, item.id, item.qty);
-          saveSession();
-        }
-      } else if (s.view === SOURCE_VIEW.QUESTS) {
-        const q = s.quests?.[rowIdx];
-        if (q) {
-          claimQuestReward(s, q.id);
-          saveSession();
-        }
-      }
+    const hasTabs = s.view === SOURCE_VIEW.SHOP || s.view === SOURCE_VIEW.QUESTS || s.view === SOURCE_VIEW.NEIGHBORS;
+    const listTop = hasTabs ? 58 : 42;
+    const maxVisible = hasTabs ? 8 : 9;
+    const rowIdx = Math.floor((y - listTop) / 26);
+    if (rowIdx >= 0 && rowIdx < maxVisible) {
+      const cur = s.view === SOURCE_VIEW.SHOP ? s.shopCursor
+        : s.view === SOURCE_VIEW.BARN ? s.barnCursor
+        : s.view === SOURCE_VIEW.QUESTS ? s.questCursor
+        : s.panelCursor;
+      const totalLen = s.view === SOURCE_VIEW.SHOP ? getShopItems(s).length
+        : s.view === SOURCE_VIEW.KITCHEN ? ((s.kitchenQueue?.length || 0) + (s.catalog.recipes?.length || 0))
+        : 30;
+      const start = Math.max(0, Math.min(Math.max(0, totalLen - maxVisible), cur - Math.floor(maxVisible / 2)));
+      handlePanelAction(s, start + rowIdx);
     }
     event.preventDefault();
     return;
   }
 
-  // Bottom Toolbar clicks
+  // Bottom 5-button Toolbar
   if (y >= SCREEN_H - 28) {
-    const tabIdx = Math.floor(x / (SCREEN_W / 4));
-    if (tabIdx === 0) s.view = SOURCE_VIEW.SHOP;
-    else if (tabIdx === 1) s.view = SOURCE_VIEW.BARN;
-    else if (tabIdx === 2) s.view = SOURCE_VIEW.QUESTS;
-    else {
-      saveSession();
-      s.toast = '💾 Đã lưu trang trại!';
-      s.toastMs = 1800;
+    const tabIdx = Math.max(0, Math.min(4, Math.floor(x / (SCREEN_W / 5))));
+    if (tabIdx === 0) {
+      const order = ['auto', 'plow', 'clear'];
+      const next = order[(order.indexOf(s.activeTool) + 1) % order.length];
+      s.activeTool = next;
+      s.placementItem = null;
+      const labels = { auto: '✋ Chế độ Tay (Tương tác nhà/cây/thú)', plow: '⛏️ Chế độ Cuốc (Chạm cỏ để cày ô đất)', clear: '🪓 Chế độ Dọn cỏ/đá (Tốn 2⚡)' };
+      s.toast = labels[next];
+      s.toastMs = 2000;
+    } else if (tabIdx === 1) {
+      s.view = SOURCE_VIEW.SHOP;
+    } else if (tabIdx === 2) {
+      s.barnCursor = 0;
+      s.view = SOURCE_VIEW.BARN;
+    } else if (tabIdx === 3) {
+      s.panelCursor = 0;
+      s.view = SOURCE_VIEW.MANOR;
+    } else {
+      s.view = SOURCE_VIEW.QUESTS;
     }
     event.preventDefault();
     return;
   }
 
-  // World tap -> check if user tapped a fruit tree, animal, plot, or open ground; walk Farmer there & act!
+  // World interaction tap
   const wx = x + s.cameraX;
-  const wy = (y - 26) + s.cameraY;
+  const wy = (y - 28) + s.cameraY;
+  const hit = sourceTileAt(sourceWorld.tileMap, x, y - 28, s.cameraX, s.cameraY);
 
-  // 1. Check nearby Fruit Tree (cat 52)
+  // Mode 1: Placement Mode (Fruit Tree / Animal / Decor)
+  if (s.activeTool === 'place' && s.placementItem && hit) {
+    setFarmerWalkTarget(s, wx, wy, { type: 'place', item: s.placementItem, row: hit.row, col: hit.column, worldX: wx, worldY: wy });
+    saveSession();
+    event.preventDefault();
+    return;
+  }
+
+  // Mode 2: Plow Mode -> walk & plow new soil plot immediately
+  if (s.activeTool === 'plow' && hit) {
+    s.cursorRow = hit.row;
+    s.cursorCol = hit.column;
+    setFarmerWalkTarget(s, wx, wy, { type: 'tile', row: hit.row, col: hit.column, worldX: wx, worldY: wy });
+    saveSession();
+    event.preventDefault();
+    return;
+  }
+
+  // Mode 3: Clear Debris Mode (cat 48)
+  const clearedSet = new Set(s.clearedDebris || []);
+  const hitDebris = (sourceWorld?.farmEntities || []).find(
+    e => e.category === 48 && !clearedSet.has(e.opaqueKey) && Math.hypot(e.x - wx, e.y - wy) <= 22,
+  );
+  if (s.activeTool === 'clear' && hitDebris) {
+    setFarmerWalkTarget(s, hitDebris.x, hitDebris.y + 8, {
+      type: 'debris', opaqueKey: hitDebris.opaqueKey, worldX: hitDebris.x, worldY: hitDebris.y,
+    });
+    saveSession();
+    event.preventDefault();
+    return;
+  }
+
+  // Mode 4: Auto Interaction (Buildings -> Fruit Trees -> Animals -> Plots -> Debris -> Walk)
+  // 4a. Check 19 Buildings (cat 50)
+  const hitBuilding = (sourceWorld?.farmEntities || []).find(
+    e => e.category === 50 && Math.hypot(e.x - wx, (e.y - 14) - wy) <= 32,
+  );
+  if (hitBuilding) {
+    setFarmerWalkTarget(s, hitBuilding.x, hitBuilding.y + 18, { type: 'building', entityId: hitBuilding.entityId });
+    event.preventDefault();
+    return;
+  }
+
+  // 4b. Check Fruit Trees (cat 52)
   const hitTree = (s.fruitTrees || []).find(t => Math.hypot(t.worldX - wx, (t.worldY - 12) - wy) <= 22);
   if (hitTree && hitTree.ready) {
     setFarmerWalkTarget(s, hitTree.worldX, hitTree.worldY + 10, { type: 'tree', uid: hitTree.uid });
@@ -629,12 +1000,8 @@ function handleTap(x, y, event) {
     return;
   }
 
-  // 2. Check nearby Farm Animal (cat 54)
-  const hitAnimal = (s.animals || []).find(a => {
-    const ax = a.worldX ?? (a.col * 36 + 18);
-    const ay = a.worldY ?? (a.row * 18 + 9);
-    return Math.hypot(ax - wx, ay - wy) <= 22;
-  });
+  // 4c. Check Animals (cat 54)
+  const hitAnimal = (s.animals || []).find(a => Math.hypot((a.worldX ?? a.col * 36 + 18) - wx, (a.worldY ?? a.row * 18 + 9) - wy) <= 22);
   if (hitAnimal) {
     const ax = hitAnimal.worldX ?? (hitAnimal.col * 36 + 18);
     const ay = hitAnimal.worldY ?? (hitAnimal.row * 18 + 9);
@@ -643,40 +1010,51 @@ function handleTap(x, y, event) {
     return;
   }
 
-  // 3. Check nearby existing tilled/growing/ready Plot (by world distance first, then tile grid)
+  // 4d. Check Plots (cat 49) — empty tilled plots open Seed Picker!
   let hitPlot = null;
   let bestDist = 22;
   for (const plot of s.plots.values()) {
     const px = plot.worldX ?? (plot.col * 36 + 18);
     const py = plot.worldY ?? (plot.row * 18 + 9);
     const d = Math.hypot(px - wx, py - wy);
-    if (d < bestDist) {
-      bestDist = d;
-      hitPlot = plot;
-    }
+    if (d < bestDist) { bestDist = d; hitPlot = plot; }
   }
   if (hitPlot) {
     s.cursorRow = hitPlot.row;
     s.cursorCol = hitPlot.col;
     const px = hitPlot.worldX ?? (hitPlot.col * 36 + 18);
     const py = hitPlot.worldY ?? (hitPlot.row * 18 + 9);
-    setFarmerWalkTarget(s, px, py + 6, { type: 'tile', row: hitPlot.row, col: hitPlot.col, worldX: px, worldY: py });
+    setFarmerWalkTarget(s, px, py + 6, {
+      type: 'tile',
+      row: hitPlot.row,
+      col: hitPlot.col,
+      worldX: px,
+      worldY: py,
+      openSeedPicker: hitPlot.stage === 'tilled',
+    });
     saveSession();
     event.preventDefault();
     return;
   }
 
-  // 4. Open ground tap -> walk Farmer to that exact spot (press Enter/Space or double-tap to plow!)
-  const hit = sourceTileAt(sourceWorld.tileMap, x, y - 26, s.cameraX, s.cameraY);
+  // 4e. Debris tap
+  if (hitDebris) {
+    setFarmerWalkTarget(s, hitDebris.x, hitDebris.y + 8, {
+      type: 'debris', opaqueKey: hitDebris.opaqueKey, worldX: hitDebris.x, worldY: hitDebris.y,
+    });
+    saveSession();
+    event.preventDefault();
+    return;
+  }
+
+  // 4f. Open grass tap -> walk Farmer there (double-tap plows new plot)
   if (hit) {
     const sameTile = (s.cursorRow === hit.row && s.cursorCol === hit.column);
     s.cursorRow = hit.row;
     s.cursorCol = hit.column;
     if (sameTile) {
-      // Second tap on same grass tile -> walk there & plow new plot
       setFarmerWalkTarget(s, wx, wy, { type: 'tile', row: hit.row, col: hit.column, worldX: wx, worldY: wy });
     } else {
-      // First tap on open ground -> walk Farmer smoothly to that spot!
       setFarmerWalkTarget(s, wx, wy, null);
     }
   }
@@ -684,14 +1062,10 @@ function handleTap(x, y, event) {
 }
 
 const heldKeys = new Set();
-
-function onKeyUp(event) {
-  heldKeys.delete(event.code);
-}
+function onKeyUp(event) { heldKeys.delete(event.code); }
 
 function getHeldMoveVector() {
-  let vx = 0;
-  let vy = 0;
+  let vx = 0; let vy = 0;
   if (heldKeys.has('ArrowLeft') || heldKeys.has('KeyA')) vx -= 1;
   if (heldKeys.has('ArrowRight') || heldKeys.has('KeyD')) vx += 1;
   if (heldKeys.has('ArrowUp') || heldKeys.has('KeyW')) vy -= 1;
@@ -703,8 +1077,7 @@ function onKeyDown(event) {
   if (!app?.session) return;
   const code = mapKeyCode(event.code, event.key);
   const s = app.session;
-  if (event.code === 'ArrowUp' || event.code === 'ArrowDown' || event.code === 'ArrowLeft' || event.code === 'ArrowRight'
-    || event.code === 'KeyW' || event.code === 'KeyA' || event.code === 'KeyS' || event.code === 'KeyD') {
+  if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'KeyW', 'KeyA', 'KeyS', 'KeyD'].includes(event.code)) {
     heldKeys.add(event.code);
   }
   if (s.view === SOURCE_VIEW.OPENING_SCRIPT) {
@@ -713,48 +1086,45 @@ function onKeyDown(event) {
     if (previous !== app.session) event.preventDefault();
     return;
   }
-  if (s.view === SOURCE_VIEW.SHOP || s.view === SOURCE_VIEW.BARN || s.view === SOURCE_VIEW.QUESTS) {
+  if (s.view !== SOURCE_VIEW.WORLD_LAYER) {
     if (code === KEY.SK_RIGHT) {
       s.view = SOURCE_VIEW.WORLD_LAYER;
       event.preventDefault();
     } else if (code === KEY.SK_LEFT) {
-      if (s.view === SOURCE_VIEW.SHOP) { s.shopTab = s.shopTab === 'crops' ? 'animals' : 'crops'; s.shopCursor = 0; }
-      else if (s.view === SOURCE_VIEW.BARN) { sellAllGoods(s); saveSession(); }
+      if (s.view === SOURCE_VIEW.SHOP) {
+        const order = ['crops', 'trees', 'animals', 'land', 'decor'];
+        s.shopTab = order[(order.indexOf(s.shopTab) + 1) % order.length];
+        s.shopCursor = 0;
+      } else if (s.view === SOURCE_VIEW.BARN) {
+        sellAllGoods(s); saveSession();
+      } else if (s.view === SOURCE_VIEW.QUESTS) {
+        s.view = SOURCE_VIEW.NEIGHBORS; s.panelCursor = 0;
+      } else if (s.view === SOURCE_VIEW.NEIGHBORS) {
+        s.view = SOURCE_VIEW.QUESTS;
+      }
       event.preventDefault();
     } else if (code === KEY.UP || code === KEY.DOWN) {
       const delta = code === KEY.UP ? -1 : 1;
       if (s.view === SOURCE_VIEW.SHOP) {
-        const len = (s.shopTab === 'crops' ? s.catalog.crops.filter(c => c.id !== 3000) : s.catalog.animals).length;
-        s.shopCursor = (s.shopCursor + delta + len) % Math.max(1, len);
+        const len = Math.max(1, getShopItems(s).length);
+        s.shopCursor = (s.shopCursor + delta + len) % len;
       } else if (s.view === SOURCE_VIEW.BARN) {
-        const len = Math.max(1, s.inventory.size);
+        const len = Math.max(1, s.inventory.size + 1);
         s.barnCursor = (s.barnCursor + delta + len) % len;
       } else if (s.view === SOURCE_VIEW.QUESTS) {
         const len = Math.max(1, s.quests?.length || 1);
         s.questCursor = (s.questCursor + delta + len) % len;
+      } else {
+        const len = s.view === SOURCE_VIEW.KITCHEN ? Math.max(1, (s.kitchenQueue?.length || 0) + 40) : 14;
+        s.panelCursor = (s.panelCursor + delta + len) % len;
       }
       event.preventDefault();
     } else if (code === KEY.FIRE || code === 5) {
-      if (s.view === SOURCE_VIEW.SHOP) {
-        const list = s.shopTab === 'crops' ? s.catalog.crops.filter(c => c.id !== 3000) : s.catalog.animals;
-        const item = list[s.shopCursor];
-        if (item) {
-          if (s.shopTab === 'crops' && s.level >= item.unlockLevel) {
-            s.selectedCropId = item.id;
-            s.view = SOURCE_VIEW.WORLD_LAYER;
-          } else if (s.shopTab === 'animals') {
-            buyAnimal(s, item.id, s.cursorRow, s.cursorCol);
-            saveSession();
-            s.view = SOURCE_VIEW.WORLD_LAYER;
-          }
-        }
-      } else if (s.view === SOURCE_VIEW.BARN) {
-        const item = [...s.inventory.values()][s.barnCursor];
-        if (item) { sellGood(s, item.id, item.qty); saveSession(); }
-      } else if (s.view === SOURCE_VIEW.QUESTS) {
-        const q = s.quests?.[s.questCursor];
-        if (q) { claimQuestReward(s, q.id); saveSession(); }
-      }
+      const idx = s.view === SOURCE_VIEW.SHOP ? s.shopCursor
+        : s.view === SOURCE_VIEW.BARN ? s.barnCursor
+        : s.view === SOURCE_VIEW.QUESTS ? s.questCursor
+        : s.panelCursor;
+      handlePanelAction(s, idx);
       event.preventDefault();
     }
     return;
@@ -766,25 +1136,35 @@ function onKeyDown(event) {
     moveFarmerByVector(s, vx, vy, 55, tm);
     event.preventDefault();
     return;
-  } else if (code === KEY.FIRE || code === 5) {
+  }
+  if (code === KEY.SK_RIGHT && s.activeTool === 'place') {
+    s.activeTool = 'auto';
+    s.placementItem = null;
+    event.preventDefault();
+    return;
+  }
+  if (code === KEY.FIRE || code === 5) {
     const fx = s.farmer ? s.farmer.x : (s.cursorCol * 36 + 18);
     const fy = s.farmer ? s.farmer.y : (s.cursorRow * 18 + 9);
+    const nearBuilding = (sourceWorld?.farmEntities || []).find(e => e.category === 50 && Math.hypot(e.x - fx, e.y - fy) <= 44);
     const nearTree = (s.fruitTrees || []).find(t => t.ready && Math.hypot(t.worldX - fx, t.worldY - fy) <= 34);
     const nearAnimal = (s.animals || []).find(a => Math.hypot((a.worldX ?? a.col * 36 + 18) - fx, (a.worldY ?? a.row * 18 + 9) - fy) <= 32);
-    let nearPlot = null;
-    let bestD = 32;
+    let nearPlot = null; let bestD = 32;
     for (const p of s.plots.values()) {
       const d = Math.hypot((p.worldX ?? p.col * 36 + 18) - fx, (p.worldY ?? p.row * 18 + 9) - fy);
       if (d < bestD) { bestD = d; nearPlot = p; }
     }
-    if (nearTree) {
+    if (nearPlot) {
+      setFarmerWalkTarget(s, nearPlot.worldX ?? fx, (nearPlot.worldY ?? fy) + 4, {
+        type: 'tile', row: nearPlot.row, col: nearPlot.col, worldX: nearPlot.worldX, worldY: nearPlot.worldY,
+        openSeedPicker: nearPlot.stage === 'tilled',
+      });
+    } else if (nearTree) {
       setFarmerWalkTarget(s, nearTree.worldX, nearTree.worldY + 8, { type: 'tree', uid: nearTree.uid });
     } else if (nearAnimal) {
       setFarmerWalkTarget(s, nearAnimal.worldX ?? fx, (nearAnimal.worldY ?? fy) + 6, { type: 'animal', uid: nearAnimal.uid });
-    } else if (nearPlot) {
-      setFarmerWalkTarget(s, nearPlot.worldX ?? fx, (nearPlot.worldY ?? fy) + 4, {
-        type: 'tile', row: nearPlot.row, col: nearPlot.col, worldX: nearPlot.worldX, worldY: nearPlot.worldY,
-      });
+    } else if (nearBuilding) {
+      setFarmerWalkTarget(s, nearBuilding.x, nearBuilding.y + 18, { type: 'building', entityId: nearBuilding.entityId });
     } else {
       setFarmerWalkTarget(s, fx, fy, { type: 'tile', row: s.cursorRow, col: s.cursorCol, worldX: fx, worldY: fy });
     }
@@ -792,6 +1172,7 @@ function onKeyDown(event) {
   } else if (code === KEY.SK_LEFT) {
     s.view = SOURCE_VIEW.SHOP;
   } else if (code === KEY.SK_RIGHT) {
+    s.barnCursor = 0;
     s.view = SOURCE_VIEW.BARN;
   } else return;
   event.preventDefault();
