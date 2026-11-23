@@ -236,3 +236,90 @@ export async function loadSourceFrame({ manifestUrl, moduleBaseUrl }) {
   }));
   return { manifest, moduleImages };
 }
+
+/**
+ * Draw any decoded /5 BSprite block frame at world/screen position (x, y).
+ * Port of d.java:1796-1855 (BSprite.paintFrame): iterates fmodules of frames[frameIndex],
+ * applies resolveFModuleTransform and drawRegionMIDP for image modules (type 0)
+ * and solid rectangles (type 0xFE), skipping markers (type 0xFD).
+ */
+export function drawBSpriteBlockFrame(ctx, sprite, moduleImages, frameIndex, x, y, frameTransform = 0) {
+  if (!sprite || !Array.isArray(sprite.frames) || sprite.frames.length === 0) return null;
+  const idx = Math.max(0, Math.min(sprite.frames.length - 1, frameIndex | 0));
+  const frame = sprite.frames[idx];
+  if (!frame) return null;
+  for (let p = 0; p < frame.fmoduleCount; p += 1) {
+    const fmodule = sprite.fmodules[frame.firstFmodule + p];
+    if (!fmodule) continue;
+    // Skip procedural / hyperframe flag 0x10 if encountered on non-image layers
+    if (fmodule.flags & 0x10) continue;
+    const module = sprite.modules[fmodule.moduleIndex];
+    if (!module) continue;
+    if (module.type === 0xfd) continue;
+    const resolved = resolveFModuleTransform(
+      fmodule.flags & 0x0f,
+      frameTransform & 7,
+      fmodule.offsetX,
+      fmodule.offsetY,
+      module.width ?? 0,
+      module.height ?? 0,
+    );
+    if (module.type === 0) {
+      const image = moduleImages[fmodule.moduleIndex];
+      if (!image) continue;
+      drawRegionMIDP(
+        ctx,
+        image,
+        0,
+        0,
+        module.width,
+        module.height,
+        resolved.transform,
+        Math.round(x + resolved.offsetX),
+        Math.round(y + resolved.offsetY),
+        MIDP_ANCHOR.LEFT | MIDP_ANCHOR.TOP,
+      );
+    } else if (module.type === 0xfe) {
+      const color = module.colorOrParameter >>> 0;
+      const alpha = color >>> 24;
+      if (alpha === 0xff || alpha === 0) {
+        ctx.fillStyle = `#${(color & 0xffffff).toString(16).padStart(6, '0')}`;
+        ctx.fillRect(
+          Math.round(x + resolved.offsetX),
+          Math.round(y + resolved.offsetY),
+          resolved.width,
+          resolved.height,
+        );
+      }
+    }
+  }
+  return sprite.bounds?.[idx] ?? null;
+}
+
+/**
+ * Draw an animated frame from a decoded /5 BSprite block using its animations table.
+ * Port of i.java:430-475 & d.java:1780-1795 (paintAFrame).
+ */
+export function drawBSpriteBlockAnim(ctx, sprite, moduleImages, animIndex, tick, x, y, frameTransform = 0) {
+  if (!sprite || !Array.isArray(sprite.animations) || sprite.animations.length === 0) {
+    return drawBSpriteBlockFrame(ctx, sprite, moduleImages, 0, x, y, frameTransform);
+  }
+  const aIdx = Math.max(0, Math.min(sprite.animations.length - 1, animIndex | 0));
+  const anim = sprite.animations[aIdx];
+  if (!anim || !anim.aframeCount || !Array.isArray(sprite.animationFrames)) {
+    return drawBSpriteBlockFrame(ctx, sprite, moduleImages, 0, x, y, frameTransform);
+  }
+  const step = Math.floor(tick / 6) % anim.aframeCount;
+  const aframe = sprite.animationFrames[anim.firstAframe + step];
+  if (!aframe) return drawBSpriteBlockFrame(ctx, sprite, moduleImages, 0, x, y, frameTransform);
+  const combinedTransform = ((frameTransform & 7) ^ (aframe.flags & 7)) & 7;
+  return drawBSpriteBlockFrame(
+    ctx,
+    sprite,
+    moduleImages,
+    aframe.frameIndex,
+    x + (aframe.offsetX || 0),
+    y + (aframe.offsetY || 0),
+    combinedTransform,
+  );
+}

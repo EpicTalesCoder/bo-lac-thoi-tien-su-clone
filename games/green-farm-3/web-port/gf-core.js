@@ -95,50 +95,114 @@ export function sourceText(textData, globalTextId) {
   return textData[`page_${page}`]?.[String(index)] ?? '';
 }
 
-// Port of a.java:18088-18129 & e.java:2732-3046: create full playable farm state from /9 & /10
+// Port of a.java:18088-18129, a.java:1725-1728, a.java:1881-1991 & e.java:2732-3046:
+// create full playable farm state directly from decoded /9 & /10 starting farm world.
 export function createFarmSession(worldResources, textData = {}) {
   const base = newEvidenceSession(worldResources);
   const catalog = worldResources?.catalog || { crops: [], goods: [], animals: [], quests: [], levelXp: [60, 120, 200] };
+  const tm = worldResources?.tileMap;
+  const tw = tm?.tileWidth || 36;
+  const th = tm?.tileHeight || 18;
   const wheat = catalog.crops.find(c => c.id === 3004) || catalog.crops[1] || catalog.crops[0];
   const tomato = catalog.crops.find(c => c.id === 3001) || catalog.crops[1] || wheat;
 
-  // Starting farm plots near camera center matching Cindy Lou's tutorial (page_0[4]: Wheat ready to harvest!)
+  const farmEntities = worldResources?.farmEntities || [];
+  const rawPlots = farmEntities.filter(e => e.category === 49);
+  const rawAnimals = farmEntities.filter(e => e.category === 54);
+  const farmer = farmEntities.find(e => e.category === 42 && e.entityId === -1);
+
   const plots = new Map();
-  const seedPlots = [
-    { row: 6, col: 2, crop: wheat, stage: 'ready', progressMs: (wheat?.growSec || 9) * 1000 },
-    { row: 6, col: 3, crop: wheat, stage: 'ready', progressMs: (wheat?.growSec || 9) * 1000 },
-    { row: 7, col: 2, crop: tomato, stage: 'growing', progressMs: Math.floor(((tomato?.growSec || 15) * 1000) / 2) },
-    { row: 7, col: 3, crop: null, stage: 'tilled', progressMs: 0 },
-  ];
-  for (const sp of seedPlots) {
-    plots.set(`${sp.row},${sp.col}`, {
-      row: sp.row,
-      col: sp.col,
-      cropId: sp.crop?.id ?? null,
-      cropName: sp.crop?.name ?? '',
-      stage: sp.stage, // 'tilled' | 'growing' | 'ready'
-      watered: sp.stage === 'growing',
-      progressMs: sp.progressMs,
-      growMs: (sp.crop?.growSec || 10) * 1000,
-    });
+  let firstReadyPlot = null;
+  if (rawPlots.length > 0) {
+    for (const rp of rawPlots) {
+      const col = Math.floor(rp.x / tw);
+      const row = Math.floor(rp.y / th);
+      const crop = rp.cropId ? (catalog.crops.find(c => c.id === rp.cropId) || wheat) : null;
+      const plotObj = {
+        row,
+        col,
+        worldX: rp.x,
+        worldY: rp.y,
+        cropId: crop?.id ?? null,
+        cropName: crop?.name ?? '',
+        stage: crop ? 'ready' : 'tilled',
+        watered: false,
+        progressMs: crop ? (crop.growSec || 9) * 1000 : 0,
+        growMs: (crop?.growSec || 10) * 1000,
+      };
+      plots.set(`${row},${col}`, plotObj);
+      if (plotObj.stage === 'ready' && !firstReadyPlot) firstReadyPlot = plotObj;
+    }
+  } else {
+    const seedPlots = [
+      { row: 24, col: 28, crop: wheat, stage: 'ready', progressMs: (wheat?.growSec || 9) * 1000 },
+      { row: 24, col: 29, crop: wheat, stage: 'ready', progressMs: (wheat?.growSec || 9) * 1000 },
+      { row: 25, col: 28, crop: tomato, stage: 'growing', progressMs: Math.floor(((tomato?.growSec || 15) * 1000) / 2) },
+      { row: 25, col: 29, crop: null, stage: 'tilled', progressMs: 0 },
+    ];
+    for (const sp of seedPlots) {
+      const plotObj = {
+        row: sp.row,
+        col: sp.col,
+        worldX: sp.col * tw + (tw >> 1),
+        worldY: sp.row * th + (th >> 1),
+        cropId: sp.crop?.id ?? null,
+        cropName: sp.crop?.name ?? '',
+        stage: sp.stage,
+        watered: sp.stage === 'growing',
+        progressMs: sp.progressMs,
+        growMs: (sp.crop?.growSec || 10) * 1000,
+      };
+      plots.set(`${sp.row},${sp.col}`, plotObj);
+      if (plotObj.stage === 'ready' && !firstReadyPlot) firstReadyPlot = plotObj;
+    }
   }
 
-  const starterAnimal = catalog.animals[0] || { id: 2004, name: 'Gà con Delaware', buyPrice: 200, prodSec: 15, sellPrice: 36, xp: 5 };
-  const farmAnimals = [
-    {
-      uid: 1,
+  let nextAnimalUid = 1;
+  const farmAnimals = [];
+  if (rawAnimals.length > 0) {
+    for (const ra of rawAnimals) {
+      const spec = catalog.animals.find(a => a.id === ra.animalId) || catalog.animals[0];
+      farmAnimals.push({
+        uid: nextAnimalUid++,
+        animalId: ra.animalId || spec?.id || 2004,
+        name: spec?.name || 'Vật nuôi',
+        row: Math.floor(ra.y / th),
+        col: Math.floor(ra.x / tw),
+        worldX: ra.x,
+        worldY: ra.y,
+        worldBlock: ra.block,
+        paletteIndex: ra.paletteIndex || 0,
+        idleFrame: ra.frame || 0,
+        fed: true,
+        ready: false,
+        progressMs: 0,
+        prodMs: (spec?.prodSec || 15) * 1000,
+        sellPrice: spec?.sellPrice || 36,
+        xp: spec?.xp || 5,
+      });
+    }
+  } else {
+    const starterAnimal = catalog.animals[0] || { id: 2004, name: 'Gà con Delaware', buyPrice: 200, prodSec: 15, sellPrice: 36, xp: 5, worldBlock: 8, paletteIndex: 0, idleFrame: 24 };
+    farmAnimals.push({
+      uid: nextAnimalUid++,
       animalId: starterAnimal.id,
       name: starterAnimal.name,
-      row: 9,
-      col: 3,
+      row: 26,
+      col: 29,
+      worldX: 29 * tw + (tw >> 1),
+      worldY: 26 * th + (th >> 1),
+      worldBlock: starterAnimal.worldBlock ?? 8,
+      paletteIndex: starterAnimal.paletteIndex ?? 0,
+      idleFrame: starterAnimal.idleFrame ?? 0,
       fed: true,
       ready: false,
       progressMs: 0,
       prodMs: (starterAnimal.prodSec || 15) * 1000,
       sellPrice: starterAnimal.sellPrice,
       xp: starterAnimal.xp,
-    },
-  ];
+    });
+  }
 
   const quests = (catalog.quests || []).slice(0, 8).map((q, i) => ({
     ...q,
@@ -147,6 +211,15 @@ export function createFarmSession(worldResources, textData = {}) {
     claimed: false,
     trackKind: i % 2 === 0 ? 'harvest' : 'sell',
   }));
+
+  // Port of a.java:1725-1728: center camera directly on the Farmer (x=1089, y=428) / starting farm plots
+  const focusX = farmer ? farmer.x : (firstReadyPlot ? firstReadyPlot.worldX : 1044);
+  const focusY = farmer ? farmer.y : (firstReadyPlot ? firstReadyPlot.worldY : 450);
+  const mapW = (tm?.width || 58) * tw;
+  const mapH = (tm?.height || 58) * th;
+  const viewH = SCREEN_H - 54;
+  const cameraX = Math.max(0, Math.min(mapW - SCREEN_W, Math.round(focusX - SCREEN_W / 2)));
+  const cameraY = Math.max(288, Math.min(mapH - viewH, Math.round(focusY - viewH / 2)));
 
   return {
     ...base,
@@ -157,20 +230,20 @@ export function createFarmSession(worldResources, textData = {}) {
     level: 1,
     energy: 30,
     maxEnergy: 30,
-    cameraX: 0,
-    cameraY: 0,
-    cursorRow: 6,
-    cursorCol: 2,
+    cameraX,
+    cameraY,
+    cursorRow: firstReadyPlot ? firstReadyPlot.row : 24,
+    cursorCol: firstReadyPlot ? firstReadyPlot.col : 28,
     selectedCropId: wheat?.id ?? 3004,
-    activeTool: 'auto', // 'auto' | 'plow' | 'plant' | 'water' | 'harvest'
-    shopTab: 'crops', // 'crops' | 'animals'
+    activeTool: 'auto',
+    shopTab: 'crops',
     shopCursor: 0,
     questCursor: 0,
     barnCursor: 0,
     plots,
     animals: farmAnimals,
-    nextAnimalUid: 2,
-    inventory: new Map(), // itemId -> { id, name, qty, sellPrice }
+    nextAnimalUid,
+    inventory: new Map(),
     quests,
     toast: sourceText(textData, 4) || 'Bấm vào Lúa mì chín để thu hoạch!',
     toastMs: 3500,
@@ -258,6 +331,8 @@ export function plowPlot(session, row, col) {
   session.plots.set(key, {
     row,
     col,
+    worldX: col * 36 + 18,
+    worldY: row * 18 + 9,
     cropId: null,
     cropName: '',
     stage: 'tilled',
@@ -350,6 +425,11 @@ export function buyAnimal(session, animalId, row, col) {
     name: spec.name,
     row,
     col,
+    worldX: col * 36 + 18,
+    worldY: row * 18 + 9,
+    worldBlock: spec.worldBlock ?? 8,
+    paletteIndex: spec.paletteIndex ?? 0,
+    idleFrame: spec.idleFrame ?? 0,
     fed: true,
     ready: false,
     progressMs: 0,

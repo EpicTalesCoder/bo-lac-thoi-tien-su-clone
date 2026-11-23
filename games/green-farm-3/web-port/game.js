@@ -3,7 +3,7 @@
  */
 import { mountPhaserRuntime } from './phaser-engine.js';
 import { decodeBSpriteBlock, loadSplitPack, moduleToCanvasImage, readPackBlock } from './bsprite-loader.js';
-import { drawBSpriteFrame, drawBSpriteTileMap } from './render-original.js';
+import { drawBSpriteBlockAnim, drawBSpriteBlockFrame, drawBSpriteFrame, drawBSpriteTileMap, withMIDPClip } from './render-original.js';
 import { loadOriginalWorldResources } from './gf3-resource-loader.js';
 import {
   SCREEN_W, SCREEN_H, KEY, SOURCE_VIEW, advanceEvidenceView, mapKeyCode,
@@ -12,11 +12,12 @@ import {
   xpForNextLevel, sourceFrame, sourceText, sourceTileAt,
 } from './gf-core.js';
 
-const SAVE_KEY = 'gf3-farm-save-v2';
+const SAVE_KEY = 'gf3-farm-save-v3';
 const canvasEl = typeof document !== 'undefined' ? document.getElementById('game') : null;
 const IMG = {};
 const SPRITES = { icon: 'assets/icon.png' };
 let sourceWorld = null;
+let sourcePack5 = null;
 let sourceTileSprite = null;
 let sourceTileImages = null;
 let sourceOpeningFrame = null;
@@ -24,6 +25,30 @@ let textData = null;
 let app = null;
 let audioElement = null;
 let previousFrameAt = 0;
+const spriteBlockCache = new Map();
+
+function getSpriteBlock(blockId, paletteIndex = 0) {
+  if (!sourcePack5 || !Number.isInteger(blockId) || blockId < 0 || blockId >= 160) return null;
+  const pal = Math.max(0, paletteIndex | 0);
+  const key = `${blockId}:${pal}`;
+  if (spriteBlockCache.has(key)) return spriteBlockCache.get(key);
+  let entry = null;
+  try {
+    const raw = readPackBlock(sourcePack5, blockId);
+    let sprite;
+    try {
+      sprite = decodeBSpriteBlock(raw, { paletteIndex: pal });
+    } catch {
+      sprite = decodeBSpriteBlock(raw, { paletteIndex: 0 });
+    }
+    const moduleImages = sprite.moduleImages.map(moduleToCanvasImage);
+    entry = { sprite, moduleImages };
+  } catch {
+    entry = null;
+  }
+  spriteBlockCache.set(key, entry);
+  return entry;
+}
 
 function loadImage(name, source) {
   return new Promise((resolve) => {
@@ -37,7 +62,8 @@ function loadImage(name, source) {
 // Port of a.java:1853-1865, a.java:1979-1985, e.java:2981-2997.
 async function loadOriginalResources() {
   sourceWorld = await loadOriginalWorldResources({ textData });
-  const pack5 = await loadSplitPack(new URL('assets/packs/5/5', import.meta.url).href);
+  sourcePack5 = await loadSplitPack(new URL('assets/packs/5/5', import.meta.url).href);
+  const pack5 = sourcePack5;
   sourceTileSprite = decodeBSpriteBlock(readPackBlock(pack5, 0));
   sourceTileImages = sourceTileSprite.moduleImages.map(moduleToCanvasImage);
 
@@ -129,18 +155,21 @@ function renderOpeningEvidence(ctx) {
   drawText(ctx, 'Chạm hoặc Enter để tiếp tục ▶', SCREEN_W - 8, 309, { align: 'right', size: 8, color: '#ffd84d', bold: true });
 }
 
-// Port of a.java:1853-1865 & i.java:315-350: render 58x58 BSprite world map + farm plots, animals & HUD
+// Port of a.java:1853-1865, a.java:1881-1991, e.java:1710-1744 & i.java:315-350:
+// render 58x58 original BSprite world map + Y-sorted /5 BSprite buildings, props, plots, crops, animals & Farmer.
 function renderFarmWorld(ctx) {
-  ctx.fillStyle = '#1d3618';
+  ctx.fillStyle = '#2d4c1e';
   ctx.fillRect(0, 0, SCREEN_W, SCREEN_H);
   const s = app.session;
   const tm = sourceWorld?.tileMap;
+  const viewY = 26;
+  const viewH = SCREEN_H - 54;
   if (tm && sourceTileSprite && sourceTileImages) {
     drawBSpriteTileMap(ctx, tm, sourceTileSprite, sourceTileImages, {
       x: 0,
-      y: 26,
+      y: viewY,
       width: SCREEN_W,
-      height: SCREEN_H - 54,
+      height: viewH,
       cameraX: s.cameraX,
       cameraY: s.cameraY,
     });
@@ -149,60 +178,122 @@ function renderFarmWorld(ctx) {
   const tw = tm?.tileWidth || 36;
   const th = tm?.tileHeight || 18;
   const ox = -s.cameraX;
-  const oy = 26 - s.cameraY;
+  const oy = viewY - s.cameraY;
+  const tick = s.frame || 0;
 
-  // Render tilled/growing/ready farm plots
-  for (const plot of s.plots.values()) {
-    const px = plot.col * tw + ox;
-    const py = plot.row * th + oy;
-    if (px + tw < 0 || py + th < 26 || px > SCREEN_W || py > SCREEN_H - 28) continue;
-
-    ctx.fillStyle = plot.watered ? '#5b391e' : '#784e2a';
-    ctx.fillRect(px + 2, py + 2, tw - 4, th - 4);
-    ctx.strokeStyle = '#3b2410';
-    ctx.strokeRect(px + 2.5, py + 2.5, tw - 5, th - 5);
-
-    if (plot.stage === 'growing') {
-      const ratio = Math.max(0.15, Math.min(1, plot.progressMs / Math.max(1, plot.growMs)));
-      ctx.fillStyle = plot.watered ? '#58d64a' : '#85c440';
-      const h = Math.round(4 + ratio * 7);
-      ctx.fillRect(px + 8, py + th - 4 - h, 4, h);
-      ctx.fillRect(px + 16, py + th - 5 - h, 4, h);
-      ctx.fillRect(px + 24, py + th - 4 - h, 4, h);
-    } else if (plot.stage === 'ready') {
-      ctx.fillStyle = '#ffd84d';
-      ctx.fillRect(px + 6, py + 4, 6, 10);
-      ctx.fillRect(px + 15, py + 3, 6, 11);
-      ctx.fillRect(px + 24, py + 4, 6, 10);
-      ctx.fillStyle = '#9cff7b';
-      ctx.fillRect(px + tw - 9, py + 1, 7, 7);
+  withMIDPClip(ctx, 0, viewY, SCREEN_W, viewH, () => {
+    // Pass 1: Tilled soil plots drawn from original /5 BSprite block 6 (e.java:1744: this.G = 6)
+    const soilEntry = getSpriteBlock(6, 0);
+    for (const plot of s.plots.values()) {
+      const wx = plot.worldX ?? (plot.col * tw + (tw >> 1));
+      const wy = plot.worldY ?? (plot.row * th + (th >> 1));
+      const sx = wx + ox;
+      const sy = wy + oy;
+      if (sx < -64 || sy < viewY - 48 || sx > SCREEN_W + 64 || sy > viewY + viewH + 48) continue;
+      if (soilEntry) {
+        drawBSpriteBlockFrame(ctx, soilEntry.sprite, soilEntry.moduleImages, 0, sx, sy, 0);
+      }
     }
-  }
 
-  // Render farm animals
-  for (const a of s.animals) {
-    const ax = a.col * tw + ox;
-    const ay = a.row * th + oy;
-    if (ax + tw < 0 || ay + th < 26 || ax > SCREEN_W || ay > SCREEN_H - 28) continue;
-    ctx.fillStyle = a.ready ? '#fff176' : a.fed ? '#f5efe6' : '#c9b7a2';
-    ctx.fillRect(ax + 10, ay + 4, 16, 10);
-    ctx.fillStyle = '#4a3520';
-    ctx.fillRect(ax + 12, ay + 14, 3, 3);
-    ctx.fillRect(ax + 21, ay + 14, 3, 3);
-    if (a.ready) {
-      drawText(ctx, '★', ax + 29, ay + 9, { size: 9, color: '#ffd84d', bold: true });
-    } else if (!a.fed) {
-      drawText(ctx, '!', ax + 29, ay + 9, { size: 9, color: '#ff6b6b', bold: true });
+    // Pass 2: Y-sorted painter's order for buildings, fences, trees, Farmer, crops & animals
+    const drawList = [];
+
+    // 2a. Original /10[3..4] farm structures, props, trees, bushes & Farmer (exclude cat 49/54 managed live)
+    for (const ent of sourceWorld?.farmEntities || []) {
+      if (ent.category === 49 || ent.category === 54) continue;
+      const sx = ent.x + ox;
+      const sy = ent.y + oy;
+      if (sx < -140 || sy < viewY - 140 || sx > SCREEN_W + 140 || sy > viewY + viewH + 140) continue;
+      drawList.push({
+        sortY: ent.y + (ent.layer >= 14 ? 40 : 0),
+        draw: () => {
+          const entry = getSpriteBlock(ent.block, ent.paletteIndex);
+          if (!entry) return;
+          if (ent.useAnim && entry.sprite.animations?.length > 0) {
+            drawBSpriteBlockAnim(ctx, entry.sprite, entry.moduleImages, 0, tick, sx, sy, 0);
+          } else {
+            drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, ent.frame, sx, sy, 0);
+          }
+        },
+      });
     }
-  }
 
-  // Active cursor box
-  const cx = s.cursorCol * tw + ox;
-  const cy = s.cursorRow * th + oy;
-  ctx.strokeStyle = '#fff55a';
-  ctx.lineWidth = 1.5;
-  ctx.strokeRect(cx + 1, cy + 1, tw - 2, th - 2);
-  ctx.lineWidth = 1;
+    // 2b. Live growing & ready crops from /5[crop.worldBlock] (e.java:1726-1742: F=0 sprout, F=1 growing, F=2 ready)
+    for (const plot of s.plots.values()) {
+      if (!plot.cropId || plot.stage === 'tilled') continue;
+      const wx = plot.worldX ?? (plot.col * tw + (tw >> 1));
+      const wy = plot.worldY ?? (plot.row * th + (th >> 1));
+      const sx = wx + ox;
+      const sy = wy + oy;
+      if (sx < -64 || sy < viewY - 64 || sx > SCREEN_W + 64 || sy > viewY + viewH + 64) continue;
+      const crop = s.catalog?.crops?.find(c => c.id === plot.cropId);
+      const cropBlock = crop?.worldBlock ?? 76;
+      const ratio = plot.growMs > 0 ? (plot.progressMs / plot.growMs) : 1;
+      const frameIdx = plot.stage === 'ready' ? 2 : (ratio >= 0.5 ? 1 : 0);
+      drawList.push({
+        sortY: wy + 1,
+        draw: () => {
+          const entry = getSpriteBlock(cropBlock, 0);
+          if (entry) {
+            drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, frameIdx, sx, sy, 0);
+          }
+          if (plot.stage === 'ready') {
+            drawText(ctx, '★', sx + 10, sy - 10, { size: 9, color: '#ffd84d', bold: true });
+          } else if (plot.watered) {
+            drawText(ctx, '💧', sx + 9, sy - 8, { size: 7, color: '#7dd3fc' });
+          }
+        },
+      });
+    }
+
+    // 2c. Live farm animals from /5[animal.worldBlock] with exact paletteIndex (a.java:13457-13508)
+    for (const a of s.animals) {
+      const wx = a.worldX ?? (a.col * tw + (tw >> 1));
+      const wy = a.worldY ?? (a.row * th + (th >> 1));
+      const sx = wx + ox;
+      const sy = wy + oy;
+      if (sx < -80 || sy < viewY - 80 || sx > SCREEN_W + 80 || sy > viewY + viewH + 80) continue;
+      const spec = s.catalog?.animals?.find(item => item.id === a.animalId);
+      const animalBlock = a.worldBlock ?? spec?.worldBlock ?? 8;
+      const animalPal = a.paletteIndex ?? spec?.paletteIndex ?? 0;
+      const idleFrame = a.idleFrame ?? spec?.idleFrame ?? 0;
+      drawList.push({
+        sortY: wy + 2,
+        draw: () => {
+          const entry = getSpriteBlock(animalBlock, animalPal);
+          if (entry) {
+            if (entry.sprite.animations?.length > 0) {
+              drawBSpriteBlockAnim(ctx, entry.sprite, entry.moduleImages, 0, tick + a.uid * 7, sx, sy, 0);
+            } else {
+              drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, idleFrame, sx, sy, 0);
+            }
+          }
+          if (a.ready) {
+            drawText(ctx, '★', sx + 10, sy - 14, { size: 9, color: '#ffd84d', bold: true });
+          } else if (!a.fed) {
+            drawText(ctx, '!', sx + 10, sy - 14, { size: 9, color: '#ff6b6b', bold: true });
+          }
+        },
+      });
+    }
+
+    drawList.sort((a, b) => a.sortY - b.sortY);
+    for (const item of drawList) item.draw();
+
+    // Active tile cursor outline (non-obstructive isometric diamond)
+    const cx = s.cursorCol * tw + ox + (tw >> 1);
+    const cy = s.cursorRow * th + oy + (th >> 1);
+    ctx.strokeStyle = '#fff55a';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - (th >> 1));
+    ctx.lineTo(cx + (tw >> 1), cy);
+    ctx.lineTo(cx, cy + (th >> 1));
+    ctx.lineTo(cx - (tw >> 1), cy);
+    ctx.closePath();
+    ctx.stroke();
+    ctx.lineWidth = 1;
+  });
 
   // Top HUD Bar (0..26)
   ctx.fillStyle = '#172414';
@@ -257,7 +348,17 @@ function renderPanelList(ctx, title, subtitle, rows, cursorIdx, footer) {
     ctx.fillRect(6, y, SCREEN_W - 12, 24);
     ctx.strokeStyle = idx === cursorIdx ? '#ffd84d' : '#334d2d';
     ctx.strokeRect(6.5, y + 0.5, SCREEN_W - 13, 23);
-    drawText(ctx, item.left, 12, y + 15, { size: 9, color: item.locked ? '#889483' : '#f2f7ec', maxWidth: 150 });
+    let textX = 12;
+    if (item.spriteBlock != null) {
+      const entry = getSpriteBlock(item.spriteBlock, item.paletteIndex || 0);
+      if (entry) {
+        withMIDPClip(ctx, 8, y + 2, 22, 20, () => {
+          drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, item.spriteFrame ?? 0, 19, y + 17, 0);
+        });
+        textX = 33;
+      }
+    }
+    drawText(ctx, item.left, textX, y + 15, { size: 9, color: item.locked ? '#889483' : '#f2f7ec', maxWidth: 162 - textX });
     drawText(ctx, item.right, SCREEN_W - 12, y + 15, { align: 'right', size: 9, color: item.rightColor || '#ffd84d', bold: true });
   }
 
@@ -276,6 +377,9 @@ function renderShop(ctx) {
     right: `${it.buyPrice} Xu`,
     locked: s.shopTab === 'crops' && s.level < it.unlockLevel,
     rightColor: s.coins >= it.buyPrice ? '#ffd84d' : '#ff7b70',
+    spriteBlock: it.worldBlock,
+    spriteFrame: s.shopTab === 'crops' ? 2 : (it.idleFrame ?? 0),
+    paletteIndex: it.paletteIndex ?? 0,
   }));
   const tabName = s.shopTab === 'crops' ? 'CHỢ HẠT GIỐNG (/9[2])' : 'CHỢ VẬT NUÔI (/9[0])';
   renderPanelList(ctx, tabName, `Xu: ${s.coins} · Cấp: ${s.level} · Tab: Q đổi mục`, rows, s.shopCursor, 'Chạm chọn · Q: Đổi Giống/Thú · E/Esc: Đóng');
@@ -312,11 +416,67 @@ function renderFrame(ctx, now) {
   else renderFarmWorld(ctx);
 }
 
-function onPointer(event) {
+let dragState = null;
+
+function clampCamera(s) {
+  const tm = sourceWorld?.tileMap;
+  const tw = tm?.tileWidth || 36;
+  const th = tm?.tileHeight || 18;
+  const mapW = (tm?.width || 58) * tw;
+  const mapH = (tm?.height || 58) * th;
+  const viewH = SCREEN_H - 54;
+  s.cameraX = Math.max(0, Math.min(mapW - SCREEN_W, Math.round(s.cameraX)));
+  // Real non-empty tile map starts at row 16 (y = 288)
+  s.cameraY = Math.max(288, Math.min(mapH - viewH, Math.round(s.cameraY)));
+}
+
+function onPointerDown(event) {
   if (!app?.session) return;
   const rect = canvasEl.getBoundingClientRect();
   const x = (event.clientX - rect.left) * (SCREEN_W / rect.width);
   const y = (event.clientY - rect.top) * (SCREEN_H / rect.height);
+  const s = app.session;
+  if (s.view === SOURCE_VIEW.WORLD_LAYER && y >= 26 && y < SCREEN_H - 28) {
+    dragState = {
+      pointerId: event.pointerId,
+      startX: x,
+      startY: y,
+      camX: s.cameraX,
+      camY: s.cameraY,
+      dragged: false,
+    };
+    try { canvasEl.setPointerCapture(event.pointerId); } catch { /* ignore */ }
+    event.preventDefault();
+    return;
+  }
+  handleTap(x, y, event);
+}
+
+function onPointerMove(event) {
+  if (!dragState || !app?.session || event.pointerId !== dragState.pointerId) return;
+  const rect = canvasEl.getBoundingClientRect();
+  const x = (event.clientX - rect.left) * (SCREEN_W / rect.width);
+  const y = (event.clientY - rect.top) * (SCREEN_H / rect.height);
+  const dx = x - dragState.startX;
+  const dy = y - dragState.startY;
+  if (Math.abs(dx) > 5 || Math.abs(dy) > 5) dragState.dragged = true;
+  if (dragState.dragged) {
+    app.session.cameraX = dragState.camX - dx;
+    app.session.cameraY = dragState.camY - dy;
+    clampCamera(app.session);
+  }
+}
+
+function onPointerUp(event) {
+  if (!dragState || event.pointerId !== dragState.pointerId) return;
+  const wasDragged = dragState.dragged;
+  const sx = dragState.startX;
+  const sy = dragState.startY;
+  dragState = null;
+  if (!wasDragged) handleTap(sx, sy, event);
+}
+
+function handleTap(x, y, event) {
   const s = app.session;
 
   if (s.view === SOURCE_VIEW.OPENING_SCRIPT) {
@@ -469,7 +629,7 @@ function onKeyDown(event) {
   const tm = sourceWorld?.tileMap;
   const maxR = (tm?.height || 58) - 1;
   const maxC = (tm?.width || 58) - 1;
-  if (code === KEY.UP) s.cursorRow = Math.max(0, s.cursorRow - 1);
+  if (code === KEY.UP) s.cursorRow = Math.max(16, s.cursorRow - 1);
   else if (code === KEY.DOWN) s.cursorRow = Math.min(maxR, s.cursorRow + 1);
   else if (code === KEY.LEFT) s.cursorCol = Math.max(0, s.cursorCol - 1);
   else if (code === KEY.RIGHT) s.cursorCol = Math.min(maxC, s.cursorCol + 1);
@@ -485,8 +645,9 @@ function onKeyDown(event) {
   // Keep camera centered around active cursor
   const tw = tm?.tileWidth || 36;
   const th = tm?.tileHeight || 18;
-  s.cameraX = Math.max(0, Math.min((tm?.width || 58) * tw - SCREEN_W, s.cursorCol * tw - SCREEN_W / 2 + tw / 2));
-  s.cameraY = Math.max(0, Math.min((tm?.height || 58) * th - (SCREEN_H - 54), s.cursorRow * th - (SCREEN_H - 54) / 2 + th / 2));
+  s.cameraX = s.cursorCol * tw - SCREEN_W / 2 + tw / 2;
+  s.cameraY = s.cursorRow * th - (SCREEN_H - 54) / 2 + th / 2;
+  clampCamera(s);
   event.preventDefault();
 }
 
@@ -509,7 +670,10 @@ if (typeof window !== 'undefined') {
       : createFarmSession(sourceWorld, textData);
     canvasEl.tabIndex = 0;
     canvasEl.addEventListener('keydown', onKeyDown);
-    canvasEl.addEventListener('pointerdown', onPointer);
+    canvasEl.addEventListener('pointerdown', onPointerDown);
+    canvasEl.addEventListener('pointermove', onPointerMove);
+    canvasEl.addEventListener('pointerup', onPointerUp);
+    canvasEl.addEventListener('pointercancel', onPointerUp);
     window.addEventListener('keydown', (event) => {
       if (event.code === 'KeyM') {
         app.audioEnabled = !app.audioEnabled;

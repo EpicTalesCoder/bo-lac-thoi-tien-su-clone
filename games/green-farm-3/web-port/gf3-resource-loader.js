@@ -213,6 +213,10 @@ export function decodeFarmCatalog(pack9, textData = {}) {
     yieldScore: Math.max(5, r[16] || 12),
     sellPrice: Math.max(12, Math.round((r[6] || 10) * 1.8) + Math.max(4, Math.round((r[16] || 12) * 0.5))),
     xp: Math.max(2, Math.round((r[16] || 10) / 3)),
+    // Port of a.java:13125-13134 & e.java:1625: col 9 is the /5 world BSprite block
+    worldBlock: r[9],
+    iconBlock: r[3],
+    iconFrame: r[4],
   }));
 
   const goods = t1.rows.map((r) => ({
@@ -232,6 +236,11 @@ export function decodeFarmCatalog(pack9, textData = {}) {
       prodSec: Math.max(12, Math.round((r[11] || 180) / 10)),
       sellPrice: Math.max(25, Math.round((r[6] || 200) * 0.18)),
       xp: Math.max(5, Math.round((r[6] || 200) / 40)),
+      // Port of a.java:13457-13508: col 31 = /5 BSprite block, col 32 = palette, col 33 = idle frame
+      worldBlock: r[31],
+      paletteIndex: Math.max(0, r[32] || 0),
+      idleFrame: Math.max(0, r[33] || 0),
+      iconFrame: Math.max(0, r[4] || 0),
     }));
 
   const quests = t25.rows.map((r, idx) => ({
@@ -248,6 +257,89 @@ export function decodeFarmCatalog(pack9, textData = {}) {
   return { crops, goods, animals, quests, levelXp };
 }
 
+/**
+ * Decode original starting farm world entities from /10 blocks 3 & 4 and join
+ * each entity to its exact /5 BSprite block, frame, and palette via /9 tables.
+ * Port of a.java:1881-1991 (u(int)) and a.java:13431-13564 (a(int, int)).
+ */
+export function decodeFarmWorldEntities(pack9, pack10) {
+  const t0 = decodeConfigTable(readPackBlock(pack9, 0));
+  const t2 = decodeConfigTable(readPackBlock(pack9, 2));
+  const t3 = decodeConfigTable(readPackBlock(pack9, 3));
+  const t4 = decodeConfigTable(readPackBlock(pack9, 4));
+  const t8 = decodeConfigTable(readPackBlock(pack9, 8));
+  const t9 = decodeConfigTable(readPackBlock(pack9, 9));
+  const t11 = decodeConfigTable(readPackBlock(pack9, 11));
+
+  const entities = [];
+  for (const pack10Block of [3, 4]) {
+    const rawList = decodeWorldEntities(readPackBlock(pack10, pack10Block));
+    for (const raw of rawList) {
+      if (raw.recordType !== 50) continue;
+      const { category, entityId, x, y, opaqueKey } = raw;
+      const base = { pack10Block, opaqueKey, category, entityId, x, y, layer: 12, block: -1, frame: 0, paletteIndex: 0, useAnim: false };
+
+      if (category === 50 && t3.rows[entityId]) {
+        // Buildings (Manor, Barn, Silo, Workshops) — a.java:13510-13517
+        const r = t3.rows[entityId];
+        base.block = r[25];
+        base.frame = Math.max(0, r[26] || 0);
+        base.layer = entityId === 1 ? 14 : 12;
+      } else if (category === 20 && t4.rows[entityId]) {
+        // Animated props, windmills, fences, trees — a.java:13519-13525
+        const r = t4.rows[entityId];
+        base.block = r[12];
+        base.paletteIndex = Math.max(0, r[13] || 0);
+        base.frame = Math.max(0, r[11] || 0);
+        base.layer = r[15] || 11;
+        base.useAnim = true;
+      } else if (category === 48 && t11.rows[entityId] && (entityId < 4 || entityId > 50)) {
+        // Decor / bushes / rocks — a.java:13538-13557
+        const r = t11.rows[entityId];
+        base.block = r[7];
+        base.frame = Math.max(0, r[8] || 0);
+        base.paletteIndex = Math.max(0, r[9] || 0);
+      } else if (category === 42) {
+        // Player Farmer (entityId === -1 -> /5 block 2) or neighbor character — a.java:1919-1931
+        base.block = entityId === -1 ? 2 : (t8.rows[entityId]?.[3] ?? 2);
+        base.useAnim = true;
+      } else if (category === 49) {
+        // Starting tilled soil plot (/5 block 6) + optional starting crop — a.java:1933-1944
+        base.block = 6;
+        base.frame = 0;
+        base.layer = 11;
+        if (entityId >= 0 && t2.rows[entityId]) {
+          base.cropBlock = t2.rows[entityId][9];
+          base.cropId = t2.rows[entityId][1];
+        }
+      } else if (category === 52 && t2.rows[entityId]) {
+        // Starting fruit trees — a.java:1945-1951 & e.java:1815 (g(3) -> frame 1)
+        const r = t2.rows[entityId];
+        base.block = r[9];
+        base.frame = 1;
+      } else if (category === 54 && t0.rows[entityId]) {
+        // Starting farm animals — a.java:1952-1960 & a.java:13457-13508
+        const r = t0.rows[entityId];
+        base.block = r[31];
+        base.paletteIndex = Math.max(0, r[32] || 0);
+        base.frame = Math.max(0, r[33] || 0);
+        base.animalId = r[1];
+        base.useAnim = true;
+      } else if (category === 51 && t9.rows[entityId]) {
+        // NPCs — a.java:13526-13530
+        const r = t9.rows[entityId];
+        base.block = r[1];
+        base.useAnim = true;
+      }
+
+      if (base.block >= 0 && base.block < 160) {
+        entities.push(base);
+      }
+    }
+  }
+  return entities;
+}
+
 export async function loadOriginalWorldResources({ baseUrl = new URL('assets/packs/', import.meta.url).href, fetcher = fetch, textData = {} } = {}) {
   const pack9 = await loadSplitPack(new URL('9/9', baseUrl).href, fetcher);
   const pack10 = await loadSplitPack(new URL('10/10', baseUrl).href, fetcher);
@@ -260,6 +352,7 @@ export async function loadOriginalWorldResources({ baseUrl = new URL('assets/pac
     readPackBlock(pack10, 1),
   );
   const catalog = decodeFarmCatalog(pack9, textData);
+  const farmEntities = decodeFarmWorldEntities(pack9, pack10);
   return {
     packs: { 9: pack9, 10: pack10 },
     config15,
@@ -268,6 +361,7 @@ export async function loadOriginalWorldResources({ baseUrl = new URL('assets/pac
     joinedEntities: joinCategory32Entities(openingEntities, config15),
     tileMap,
     catalog,
+    farmEntities,
     table9,
   };
 }
