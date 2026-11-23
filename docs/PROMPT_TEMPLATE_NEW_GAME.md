@@ -23,9 +23,14 @@ BẮT BUỘC làm đúng theo thứ tự sau (không bỏ bước, không tự b
    - Chặng 1 (Phân tích — chưa sửa web-port): Viết/cập nhật `games/<slug>/analysis/CLASS-RESPONSIBILITIES.md` (vai trò từng class, state machine, cấu trúc binary map/sprite/BSprite/text, công thức gốc kèm `Class.java:line`).
    - Chặng 2 (Giải mã & Vẽ 1:1): Viết decoder đọc trực tiếp map/sprite/palette/text gốc từ `assets/` + port hàm `paint()` vào `render-original.js` (đúng Anchor, 8 phép `drawRegionMIDP`, `setClip`, `imageSmoothingEnabled = false`, KHÔNG dùng `fillRect` thay sprite/map gốc).
    - Chặng 3 (Gameplay chuẩn mã gốc): Port vòng lặp `run()/tick()`, điều khiển (chuột + phím), chiến đấu/kinh tế/AI/màn chơi/lưu game vào `game.js` với comment dẫn chiếu `// Port of Class.java:line`.
-   - Chặng 4 (Kiểm thử & Build): Viết/chạy test `node --check`, `node --test`, build `python3 tools/build-portal.py`, kiểm tra chạy không lỗi Console trên localhost và báo cáo rõ phần nào đã giống gốc 1:1, phần nào còn thiếu.
+   - Chặng 4 (Cổng kiểm duyệt cứng & Build): Viết unit test kiểm tra decoder + chạy `python3 tools/verify-port-parity.py <slug>` (BẮT BUỘC ra `RESULT: PASS`, exit 0), chạy `python3 tools/build-portal.py`, kiểm tra trực quan trên localhost (không lỗi Console) rồi mới báo hoàn thành.
 
-Bắt đầu từ Bước 1 & 2, lập kế hoạch 4 chặng rồi triển khai ngay Chặng 1.
+QUY TẮC CHỐNG TỰ BỊA (TUYỆT ĐỐI TUÂN THỦ):
+- Mọi bảng map, chỉ số lính, sprite/BSprite/palette, text phải giải mã trực tiếp từ file gốc trong `.jar` — CẤM gõ tay hay tự bịa thông số.
+- Chỗ nào code decompile bị rối/mơ hồ: bắt buộc đọc thẳng `bytecode-evidence/<Class>.javap.txt` để đối chiếu. Nếu vẫn chưa chắc 100%, ghi rõ `CHƯA XÁC MINH` và hỏi lại tôi — TUYỆT ĐỐI KHÔNG tự đoán công thức thay thế.
+- Không được báo xong chừng nào `python3 tools/verify-port-parity.py <slug>` chưa PASS.
+
+Bắt đầu từ Bước 1 & 2, lập kế hoạch 4 chặng rồi tự chạy lần lượt từ Chặng 1 đến Chặng 4 cho tới khi PASS toàn bộ cổng kiểm duyệt.
 ```
 
 > **Mẹo dùng siêu ngắn trong workspace này**: Vì repo đã gắn sẵn rule [.agents/rules/j2me-port-fidelity.md](../.agents/rules/j2me-port-fidelity.md), bạn chỉ cần gõ ngắn gọn:
