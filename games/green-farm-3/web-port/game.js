@@ -10,6 +10,7 @@ import {
   createFarmSession, stepFarmSession, interactAtFarmTile, buyAnimal, sellGood,
   sellAllGoods, claimQuestReward, serializeFarmSession, restoreFarmSession,
   xpForNextLevel, sourceFrame, sourceText, sourceTileAt,
+  setFarmerWalkTarget, moveFarmerByVector, clampWorldCamera,
 } from './gf-core.js';
 
 const SAVE_KEY = 'gf3-farm-save-v3';
@@ -198,9 +199,11 @@ function renderFarmWorld(ctx) {
     // Pass 2: Y-sorted painter's order for buildings, fences, trees, Farmer, crops & animals
     const drawList = [];
 
-    // 2a. Original /10[3..4] farm structures, props, trees, bushes & Farmer (exclude cat 49/54 managed live)
+    // 2a. Original /10[3..4] farm structures, props, trees & bushes
+    // (exclude cat 49 plots, cat 54 animals, cat 52 fruit trees, and cat 42 player Farmer — all managed live!)
     for (const ent of sourceWorld?.farmEntities || []) {
-      if (ent.category === 49 || ent.category === 54) continue;
+      if (ent.category === 49 || ent.category === 54 || ent.category === 52) continue;
+      if (ent.category === 42 && ent.entityId === -1) continue;
       const sx = ent.x + ox;
       const sy = ent.y + oy;
       if (sx < -140 || sy < viewY - 140 || sx > SCREEN_W + 140 || sy > viewY + viewH + 140) continue;
@@ -214,6 +217,55 @@ function renderFarmWorld(ctx) {
           } else {
             drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, ent.frame, sx, sy, 0);
           }
+        },
+      });
+    }
+
+    // 2a-bis. Live harvestable Fruit Trees (cat 52 — e.java:1804-1818: frame 0 growing, frame 1 ripe fruit)
+    for (const tree of s.fruitTrees || []) {
+      const sx = tree.worldX + ox;
+      const sy = tree.worldY + oy;
+      if (sx < -100 || sy < viewY - 100 || sx > SCREEN_W + 100 || sy > viewY + viewH + 100) continue;
+      drawList.push({
+        sortY: tree.worldY,
+        draw: () => {
+          const entry = getSpriteBlock(tree.worldBlock, 0);
+          if (entry) {
+            drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, tree.ready ? 1 : 0, sx, sy, 0);
+          }
+          if (tree.ready) {
+            drawText(ctx, '★', sx + 10, sy - 22, { size: 9, color: '#ffd84d', bold: true });
+          }
+        },
+      });
+    }
+
+    // 2a-ter. Live controllable Player Farmer (/5 block 2 — e.java:1107-1176)
+    if (s.farmer) {
+      const fx = s.farmer.x + ox;
+      const fy = s.farmer.y + oy;
+      // Draw subtle destination diamond when walking to a tapped target
+      if (s.farmer.state === 'walk' && !s.farmer.directControl) {
+        const tx = s.farmer.targetX + ox;
+        const ty = s.farmer.targetY + oy;
+        ctx.strokeStyle = 'rgba(255, 245, 90, 0.85)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(tx, ty - 5);
+        ctx.lineTo(tx + 10, ty);
+        ctx.lineTo(tx, ty + 5);
+        ctx.lineTo(tx - 10, ty);
+        ctx.closePath();
+        ctx.stroke();
+      }
+      drawList.push({
+        sortY: s.farmer.y + 3,
+        draw: () => {
+          const entry = getSpriteBlock(2, 0);
+          if (!entry) return;
+          const flipFlag = s.farmer.hFlip ? 1 : 0;
+          const animTick = s.farmer.state === 'idle' ? Math.floor(tick * 0.4) : tick;
+          drawBSpriteBlockAnim(ctx, entry.sprite, entry.moduleImages, s.farmer.anim, animTick, fx, fy, flipFlag);
         },
       });
     }
@@ -279,6 +331,13 @@ function renderFarmWorld(ctx) {
 
     drawList.sort((a, b) => a.sortY - b.sortY);
     for (const item of drawList) item.draw();
+
+    // Floating feedback popups (+XP / +Xu / Harvest)
+    for (const p of s.popups || []) {
+      const px = p.x + ox;
+      const py = p.y + oy;
+      drawText(ctx, p.text, px, py, { align: 'center', size: 9, color: p.color || '#ffd84d', bold: true });
+    }
 
     // Active tile cursor outline (non-obstructive isometric diamond)
     const cx = s.cursorCol * tw + ox + (tw >> 1);
@@ -558,21 +617,96 @@ function handleTap(x, y, event) {
     return;
   }
 
-  // World tile tap -> select & interact (harvest / water / plant / plow / animal)
+  // World tap -> check if user tapped a fruit tree, animal, plot, or open ground; walk Farmer there & act!
+  const wx = x + s.cameraX;
+  const wy = (y - 26) + s.cameraY;
+
+  // 1. Check nearby Fruit Tree (cat 52)
+  const hitTree = (s.fruitTrees || []).find(t => Math.hypot(t.worldX - wx, (t.worldY - 12) - wy) <= 22);
+  if (hitTree && hitTree.ready) {
+    setFarmerWalkTarget(s, hitTree.worldX, hitTree.worldY + 10, { type: 'tree', uid: hitTree.uid });
+    event.preventDefault();
+    return;
+  }
+
+  // 2. Check nearby Farm Animal (cat 54)
+  const hitAnimal = (s.animals || []).find(a => {
+    const ax = a.worldX ?? (a.col * 36 + 18);
+    const ay = a.worldY ?? (a.row * 18 + 9);
+    return Math.hypot(ax - wx, ay - wy) <= 22;
+  });
+  if (hitAnimal) {
+    const ax = hitAnimal.worldX ?? (hitAnimal.col * 36 + 18);
+    const ay = hitAnimal.worldY ?? (hitAnimal.row * 18 + 9);
+    setFarmerWalkTarget(s, ax, ay + 8, { type: 'animal', uid: hitAnimal.uid });
+    event.preventDefault();
+    return;
+  }
+
+  // 3. Check nearby existing tilled/growing/ready Plot (by world distance first, then tile grid)
+  let hitPlot = null;
+  let bestDist = 22;
+  for (const plot of s.plots.values()) {
+    const px = plot.worldX ?? (plot.col * 36 + 18);
+    const py = plot.worldY ?? (plot.row * 18 + 9);
+    const d = Math.hypot(px - wx, py - wy);
+    if (d < bestDist) {
+      bestDist = d;
+      hitPlot = plot;
+    }
+  }
+  if (hitPlot) {
+    s.cursorRow = hitPlot.row;
+    s.cursorCol = hitPlot.col;
+    const px = hitPlot.worldX ?? (hitPlot.col * 36 + 18);
+    const py = hitPlot.worldY ?? (hitPlot.row * 18 + 9);
+    setFarmerWalkTarget(s, px, py + 6, { type: 'tile', row: hitPlot.row, col: hitPlot.col, worldX: px, worldY: py });
+    saveSession();
+    event.preventDefault();
+    return;
+  }
+
+  // 4. Open ground tap -> walk Farmer to that exact spot (press Enter/Space or double-tap to plow!)
   const hit = sourceTileAt(sourceWorld.tileMap, x, y - 26, s.cameraX, s.cameraY);
   if (hit) {
+    const sameTile = (s.cursorRow === hit.row && s.cursorCol === hit.column);
     s.cursorRow = hit.row;
     s.cursorCol = hit.column;
-    interactAtFarmTile(s, hit.row, hit.column);
-    saveSession();
+    if (sameTile) {
+      // Second tap on same grass tile -> walk there & plow new plot
+      setFarmerWalkTarget(s, wx, wy, { type: 'tile', row: hit.row, col: hit.column, worldX: wx, worldY: wy });
+    } else {
+      // First tap on open ground -> walk Farmer smoothly to that spot!
+      setFarmerWalkTarget(s, wx, wy, null);
+    }
   }
   event.preventDefault();
+}
+
+const heldKeys = new Set();
+
+function onKeyUp(event) {
+  heldKeys.delete(event.code);
+}
+
+function getHeldMoveVector() {
+  let vx = 0;
+  let vy = 0;
+  if (heldKeys.has('ArrowLeft') || heldKeys.has('KeyA')) vx -= 1;
+  if (heldKeys.has('ArrowRight') || heldKeys.has('KeyD')) vx += 1;
+  if (heldKeys.has('ArrowUp') || heldKeys.has('KeyW')) vy -= 1;
+  if (heldKeys.has('ArrowDown') || heldKeys.has('KeyS')) vy += 1;
+  return { vx, vy };
 }
 
 function onKeyDown(event) {
   if (!app?.session) return;
   const code = mapKeyCode(event.code, event.key);
   const s = app.session;
+  if (event.code === 'ArrowUp' || event.code === 'ArrowDown' || event.code === 'ArrowLeft' || event.code === 'ArrowRight'
+    || event.code === 'KeyW' || event.code === 'KeyA' || event.code === 'KeyS' || event.code === 'KeyD') {
+    heldKeys.add(event.code);
+  }
   if (s.view === SOURCE_VIEW.OPENING_SCRIPT) {
     const previous = app.session;
     app.session = advanceEvidenceView(s, code);
@@ -627,27 +761,39 @@ function onKeyDown(event) {
   }
 
   const tm = sourceWorld?.tileMap;
-  const maxR = (tm?.height || 58) - 1;
-  const maxC = (tm?.width || 58) - 1;
-  if (code === KEY.UP) s.cursorRow = Math.max(16, s.cursorRow - 1);
-  else if (code === KEY.DOWN) s.cursorRow = Math.min(maxR, s.cursorRow + 1);
-  else if (code === KEY.LEFT) s.cursorCol = Math.max(0, s.cursorCol - 1);
-  else if (code === KEY.RIGHT) s.cursorCol = Math.min(maxC, s.cursorCol + 1);
-  else if (code === KEY.FIRE || code === 5) {
-    interactAtFarmTile(s, s.cursorRow, s.cursorCol);
+  if (code === KEY.UP || code === KEY.DOWN || code === KEY.LEFT || code === KEY.RIGHT) {
+    const { vx, vy } = getHeldMoveVector();
+    moveFarmerByVector(s, vx, vy, 55, tm);
+    event.preventDefault();
+    return;
+  } else if (code === KEY.FIRE || code === 5) {
+    const fx = s.farmer ? s.farmer.x : (s.cursorCol * 36 + 18);
+    const fy = s.farmer ? s.farmer.y : (s.cursorRow * 18 + 9);
+    const nearTree = (s.fruitTrees || []).find(t => t.ready && Math.hypot(t.worldX - fx, t.worldY - fy) <= 34);
+    const nearAnimal = (s.animals || []).find(a => Math.hypot((a.worldX ?? a.col * 36 + 18) - fx, (a.worldY ?? a.row * 18 + 9) - fy) <= 32);
+    let nearPlot = null;
+    let bestD = 32;
+    for (const p of s.plots.values()) {
+      const d = Math.hypot((p.worldX ?? p.col * 36 + 18) - fx, (p.worldY ?? p.row * 18 + 9) - fy);
+      if (d < bestD) { bestD = d; nearPlot = p; }
+    }
+    if (nearTree) {
+      setFarmerWalkTarget(s, nearTree.worldX, nearTree.worldY + 8, { type: 'tree', uid: nearTree.uid });
+    } else if (nearAnimal) {
+      setFarmerWalkTarget(s, nearAnimal.worldX ?? fx, (nearAnimal.worldY ?? fy) + 6, { type: 'animal', uid: nearAnimal.uid });
+    } else if (nearPlot) {
+      setFarmerWalkTarget(s, nearPlot.worldX ?? fx, (nearPlot.worldY ?? fy) + 4, {
+        type: 'tile', row: nearPlot.row, col: nearPlot.col, worldX: nearPlot.worldX, worldY: nearPlot.worldY,
+      });
+    } else {
+      setFarmerWalkTarget(s, fx, fy, { type: 'tile', row: s.cursorRow, col: s.cursorCol, worldX: fx, worldY: fy });
+    }
     saveSession();
   } else if (code === KEY.SK_LEFT) {
     s.view = SOURCE_VIEW.SHOP;
   } else if (code === KEY.SK_RIGHT) {
     s.view = SOURCE_VIEW.BARN;
   } else return;
-
-  // Keep camera centered around active cursor
-  const tw = tm?.tileWidth || 36;
-  const th = tm?.tileHeight || 18;
-  s.cameraX = s.cursorCol * tw - SCREEN_W / 2 + tw / 2;
-  s.cameraY = s.cursorRow * th - (SCREEN_H - 54) / 2 + th / 2;
-  clampCamera(s);
   event.preventDefault();
 }
 
@@ -669,7 +815,9 @@ if (typeof window !== 'undefined') {
       ? restoreFarmSession(savedRaw, sourceWorld, textData)
       : createFarmSession(sourceWorld, textData);
     canvasEl.tabIndex = 0;
-    canvasEl.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', () => heldKeys.clear());
     canvasEl.addEventListener('pointerdown', onPointerDown);
     canvasEl.addEventListener('pointermove', onPointerMove);
     canvasEl.addEventListener('pointerup', onPointerUp);
@@ -685,9 +833,13 @@ if (typeof window !== 'undefined') {
       canvas: canvasEl,
       width: SCREEN_W,
       height: SCREEN_H,
-      tickMs: 120,
+      tickMs: 50,
       onStepSimulation() {
-        stepFarmSession(app.session, 120);
+        if (app.session?.view === SOURCE_VIEW.WORLD_LAYER) {
+          const { vx, vy } = getHeldMoveVector();
+          moveFarmerByVector(app.session, vx, vy, 50, sourceWorld?.tileMap);
+        }
+        stepFarmSession(app.session, 50, sourceWorld?.tileMap);
       },
       onFrameInterpolate() { return false; },
       onRenderFrame(ctx) { renderFrame(ctx, performance.now()); },

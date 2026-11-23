@@ -155,7 +155,7 @@ export function parseStructure(reader, flags) {
     modules.push(module);
     // Port of d.java:233-239: the optional selector is read only on image modules.
     if (type === 0 && (flags & 0x4)) modulePaletteIndices[index] = reader.u8(`module ${index} palette`);
-    else modulePaletteIndices[index] = 0;
+    else modulePaletteIndices[index] = null;
   }
 
   const fmoduleCount = reader.u16('FModule count');

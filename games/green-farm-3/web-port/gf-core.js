@@ -95,6 +95,164 @@ export function sourceText(textData, globalTextId) {
   return textData[`page_${page}`]?.[String(index)] ?? '';
 }
 
+// Port of a.java:16117-16131: exact Green Farm 3 isometric 18x9 diamond lattice around (1044, 108).
+export function worldToIso(wx, wy) {
+  const n = Math.trunc(((wx - 1044) << 8) / 18);
+  const n2 = Math.trunc(((wy - 108) << 8) / 9);
+  return { ix: (n + n2) >> 8, iy: (n2 - n) >> 8 };
+}
+
+export function isoToWorld(ix, iy) {
+  const n = ((ix - iy) << 8) >> 1;
+  const n2 = (iy << 8) + n;
+  return {
+    wx: ((n * 18) >> 8) + 1044,
+    wy: ((n2 * 9) >> 8) + 108,
+  };
+}
+
+// Port of e.java:1117-1130: directional Farmer walk animation & horizontal flip.
+export function pickFarmerWalkAnim(dx, dy) {
+  if (dx > 0) {
+    if (dy > 0) return { anim: 0, hFlip: true };   // Down-Right
+    return { anim: 1, hFlip: false };              // Up-Right
+  }
+  if (dy > 0) return { anim: 0, hFlip: false };    // Down-Left
+  return { anim: 1, hFlip: true };                 // Up-Left
+}
+
+export function addPopup(session, wx, wy, text, color = '#ffd84d') {
+  if (!session.popups) session.popups = [];
+  session.popups.push({ x: wx, y: wy, text, color, lifeMs: 1100, maxLifeMs: 1100 });
+}
+
+export function clampWorldCamera(session, tileMap) {
+  const tw = tileMap?.tileWidth || 36;
+  const th = tileMap?.tileHeight || 18;
+  const mapW = (tileMap?.width || 58) * tw;
+  const mapH = (tileMap?.height || 58) * th;
+  const viewH = SCREEN_H - 54;
+  session.cameraX = Math.max(0, Math.min(mapW - SCREEN_W, Math.round(session.cameraX)));
+  session.cameraY = Math.max(288, Math.min(mapH - viewH, Math.round(session.cameraY)));
+}
+
+export function setFarmerWalkTarget(session, wx, wy, pendingAction = null) {
+  const f = session.farmer;
+  if (!f) return;
+  const clampedX = Math.max(36, Math.min(2052, Math.round(wx)));
+  const clampedY = Math.max(306, Math.min(1026, Math.round(wy)));
+  f.targetX = clampedX;
+  f.targetY = clampedY;
+  f.pendingAction = pendingAction;
+  const dx = clampedX - f.x;
+  const dy = clampedY - f.y;
+  if (Math.hypot(dx, dy) <= 4) {
+    f.x = clampedX;
+    f.y = clampedY;
+    if (pendingAction) executePendingFarmerAction(session);
+    else {
+      f.state = 'idle';
+      f.anim = 2;
+    }
+    return;
+  }
+  const dir = pickFarmerWalkAnim(dx, dy);
+  f.anim = dir.anim;
+  f.hFlip = dir.hFlip;
+  f.state = 'walk';
+}
+
+export function moveFarmerByVector(session, vx, vy, dtMs, tileMap = null) {
+  const f = session.farmer;
+  if (!f) return false;
+  if (vx === 0 && vy === 0) {
+    if (f.state === 'walk' && f.directControl) {
+      f.directControl = false;
+      f.state = 'idle';
+      f.anim = 2;
+      f.targetX = f.x;
+      f.targetY = f.y;
+    }
+    return false;
+  }
+  const len = Math.hypot(vx, vy) || 1;
+  const step = (f.speed * dtMs) / 1000;
+  const dx = (vx / len) * step;
+  const dy = (vy / len) * step;
+  f.x = Math.max(36, Math.min(2052, f.x + dx));
+  f.y = Math.max(306, Math.min(1026, f.y + dy));
+  f.targetX = f.x;
+  f.targetY = f.y;
+  f.pendingAction = null;
+  f.directControl = true;
+  const dir = pickFarmerWalkAnim(vx, vy);
+  f.anim = dir.anim;
+  f.hFlip = dir.hFlip;
+  f.state = 'walk';
+  const tw = tileMap?.tileWidth || 36;
+  const th = tileMap?.tileHeight || 18;
+  session.cursorCol = Math.max(0, Math.min((tileMap?.width || 58) - 1, Math.floor(f.x / tw)));
+  session.cursorRow = Math.max(16, Math.min((tileMap?.height || 58) - 1, Math.floor(f.y / th)));
+  // Port of a.java:1725-1728: camera smoothly tracks Farmer
+  const viewH = SCREEN_H - 54;
+  session.cameraX = f.x - SCREEN_W / 2;
+  session.cameraY = f.y - viewH / 2;
+  clampWorldCamera(session, tileMap);
+  return true;
+}
+
+function executePendingFarmerAction(session) {
+  const f = session.farmer;
+  const act = f?.pendingAction;
+  if (!f || !act) return;
+  f.pendingAction = null;
+  let actionAnim = 3;
+  if (act.type === 'tile') {
+    const plotBefore = session.plots.get(`${act.row},${act.col}`);
+    if (!plotBefore || plotBefore.stage === 'tilled') actionAnim = 4;
+    else if (plotBefore.stage === 'growing') actionAnim = 6;
+    else actionAnim = 3;
+    const res = interactAtFarmTile(session, act.row, act.col, act.worldX, act.worldY);
+    if (res?.ok) {
+      addPopup(session, f.x, f.y - 24, res.popup || '✓', res.popupColor || '#9cff7b');
+    }
+  } else if (act.type === 'tree') {
+    actionAnim = 3;
+    const res = harvestFruitTree(session, act.uid);
+    if (res?.ok) {
+      addPopup(session, f.x, f.y - 24, `🍎 ${res.name}`, '#ffd84d');
+    }
+  } else if (act.type === 'animal') {
+    actionAnim = 3;
+    const res = collectOrFeedAnimal(session, act.uid);
+    if (res?.ok) {
+      addPopup(session, f.x, f.y - 24, res.action === 'collected' ? '🥚 +XP' : '🌿 Đã cho ăn', '#ffd84d');
+    }
+  }
+  f.state = 'action';
+  f.anim = actionAnim;
+  f.actionMs = 460;
+}
+
+export function harvestFruitTree(session, uid) {
+  const tree = session.fruitTrees?.find(t => t.uid === uid);
+  if (!tree || !tree.ready) return { ok: false };
+  const crop = session.catalog?.crops?.find(c => c.id === tree.cropId);
+  const name = crop?.name || 'Trái cây';
+  const sellPrice = crop?.sellPrice ?? 35;
+  const xp = crop?.xp ?? 5;
+  const existing = session.inventory.get(tree.cropId) || { id: tree.cropId, name, qty: 0, sellPrice };
+  existing.qty += 1;
+  session.inventory.set(tree.cropId, existing);
+  tree.ready = false;
+  tree.progressMs = 0;
+  awardFarmXp(session, xp);
+  advanceQuests(session, 'harvest', 1);
+  session.toast = `🍎 Thu hoạch ${name} (+${xp} XP)`;
+  session.toastMs = 2000;
+  return { ok: true, name };
+}
+
 // Port of a.java:18088-18129, a.java:1725-1728, a.java:1881-1991 & e.java:2732-3046:
 // create full playable farm state directly from decoded /9 & /10 starting farm world.
 export function createFarmSession(worldResources, textData = {}) {
@@ -109,7 +267,8 @@ export function createFarmSession(worldResources, textData = {}) {
   const farmEntities = worldResources?.farmEntities || [];
   const rawPlots = farmEntities.filter(e => e.category === 49);
   const rawAnimals = farmEntities.filter(e => e.category === 54);
-  const farmer = farmEntities.find(e => e.category === 42 && e.entityId === -1);
+  const rawTrees = farmEntities.filter(e => e.category === 52);
+  const farmerEnt = farmEntities.find(e => e.category === 42 && e.entityId === -1);
 
   const plots = new Map();
   let firstReadyPlot = null;
@@ -212,14 +371,43 @@ export function createFarmSession(worldResources, textData = {}) {
     trackKind: i % 2 === 0 ? 'harvest' : 'sell',
   }));
 
-  // Port of a.java:1725-1728: center camera directly on the Farmer (x=1089, y=428) / starting farm plots
-  const focusX = farmer ? farmer.x : (firstReadyPlot ? firstReadyPlot.worldX : 1044);
-  const focusY = farmer ? farmer.y : (firstReadyPlot ? firstReadyPlot.worldY : 450);
+  const fruitTrees = rawTrees.map((rt, idx) => {
+    const spec = catalog.crops.find(c => c.worldBlock === rt.block) || catalog.crops[12] || wheat;
+    return {
+      uid: idx + 1,
+      cropId: spec?.id || 3012,
+      name: spec?.name || 'Cây ăn quả',
+      worldX: rt.x,
+      worldY: rt.y,
+      worldBlock: rt.block,
+      ready: true,
+      progressMs: (spec?.growSec || 18) * 1000,
+      growMs: (spec?.growSec || 18) * 1000,
+    };
+  });
+
+  // Port of a.java:1725-1728 & e.java:2897-2910: live controllable Farmer (speed ak = 150 px/s)
+  const startFarmerX = farmerEnt ? farmerEnt.x : (firstReadyPlot ? firstReadyPlot.worldX + 24 : 1089);
+  const startFarmerY = farmerEnt ? farmerEnt.y : (firstReadyPlot ? firstReadyPlot.worldY + 6 : 428);
+  const farmerState = {
+    x: startFarmerX,
+    y: startFarmerY,
+    targetX: startFarmerX,
+    targetY: startFarmerY,
+    speed: 150,
+    state: 'idle', // 'idle' | 'walk' | 'action'
+    anim: 2,       // e.java:1113: idle = anim 2
+    hFlip: false,
+    actionMs: 0,
+    directControl: false,
+    pendingAction: null,
+  };
+
   const mapW = (tm?.width || 58) * tw;
   const mapH = (tm?.height || 58) * th;
   const viewH = SCREEN_H - 54;
-  const cameraX = Math.max(0, Math.min(mapW - SCREEN_W, Math.round(focusX - SCREEN_W / 2)));
-  const cameraY = Math.max(288, Math.min(mapH - viewH, Math.round(focusY - viewH / 2)));
+  const cameraX = Math.max(0, Math.min(mapW - SCREEN_W, Math.round(startFarmerX - SCREEN_W / 2)));
+  const cameraY = Math.max(288, Math.min(mapH - viewH, Math.round(startFarmerY - viewH / 2)));
 
   return {
     ...base,
@@ -240,12 +428,15 @@ export function createFarmSession(worldResources, textData = {}) {
     shopCursor: 0,
     questCursor: 0,
     barnCursor: 0,
+    farmer: farmerState,
+    fruitTrees,
+    popups: [],
     plots,
     animals: farmAnimals,
     nextAnimalUid,
     inventory: new Map(),
     quests,
-    toast: sourceText(textData, 4) || 'Bấm vào Lúa mì chín để thu hoạch!',
+    toast: sourceText(textData, 4) || 'Chạm đất hoặc dùng phím mũi tên/WASD để di chuyển nông dân!',
     toastMs: 3500,
     catalog,
   };
@@ -273,13 +464,68 @@ export function awardFarmXp(session, amount) {
   return leveled;
 }
 
-export function stepFarmSession(session, dtMs) {
+export function stepFarmSession(session, dtMs, tileMap = null) {
   if (!session || session.view === SOURCE_VIEW.OPENING_SCRIPT) return false;
   let changed = false;
   if (session.toastMs > 0) {
     session.toastMs = Math.max(0, session.toastMs - dtMs);
     if (session.toastMs === 0) session.toast = '';
   }
+
+  // Port of e.java:132-160 & e.java:3106-3122 (N()): Farmer autonomous walk to target & action completion
+  const f = session.farmer;
+  if (f) {
+    if (f.state === 'action') {
+      f.actionMs -= dtMs;
+      if (f.actionMs <= 0) {
+        f.actionMs = 0;
+        f.state = 'idle';
+        f.anim = 2;
+      }
+      changed = true;
+    } else if (f.state === 'walk' && !f.directControl) {
+      const dx = f.targetX - f.x;
+      const dy = f.targetY - f.y;
+      const dist = Math.hypot(dx, dy);
+      const step = (f.speed * dtMs) / 1000;
+      if (dist <= step || dist <= 2) {
+        f.x = f.targetX;
+        f.y = f.targetY;
+        if (f.pendingAction) {
+          executePendingFarmerAction(session);
+        } else {
+          f.state = 'idle';
+          f.anim = 2;
+        }
+      } else {
+        f.x += (dx / dist) * step;
+        f.y += (dy / dist) * step;
+        const dir = pickFarmerWalkAnim(dx, dy);
+        f.anim = dir.anim;
+        f.hFlip = dir.hFlip;
+      }
+      // Smoothly follow Farmer while walking
+      if (tileMap) {
+        const viewH = SCREEN_H - 54;
+        session.cameraX += (f.x - SCREEN_W / 2 - session.cameraX) * 0.25;
+        session.cameraY += (f.y - viewH / 2 - session.cameraY) * 0.25;
+        clampWorldCamera(session, tileMap);
+      }
+      changed = true;
+    }
+  }
+
+  // Step floating popups
+  if (session.popups?.length) {
+    for (let i = session.popups.length - 1; i >= 0; i -= 1) {
+      const p = session.popups[i];
+      p.lifeMs -= dtMs;
+      p.y -= (dtMs * 18) / 1000;
+      if (p.lifeMs <= 0) session.popups.splice(i, 1);
+    }
+    changed = true;
+  }
+
   for (const plot of session.plots.values()) {
     if (plot.stage === 'growing') {
       const rate = plot.watered ? 1.6 : 1.0;
@@ -287,6 +533,16 @@ export function stepFarmSession(session, dtMs) {
       if (plot.progressMs >= plot.growMs) {
         plot.progressMs = plot.growMs;
         plot.stage = 'ready';
+        changed = true;
+      }
+    }
+  }
+  for (const tree of session.fruitTrees || []) {
+    if (!tree.ready) {
+      tree.progressMs += dtMs;
+      if (tree.progressMs >= tree.growMs) {
+        tree.progressMs = tree.growMs;
+        tree.ready = true;
         changed = true;
       }
     }
@@ -318,7 +574,7 @@ function advanceQuests(session, kind, delta = 1) {
   }
 }
 
-export function plowPlot(session, row, col) {
+export function plowPlot(session, row, col, worldX = null, worldY = null) {
   const key = `${row},${col}`;
   if (session.plots.has(key)) return { ok: false, reason: 'occupied' };
   const plotCost = session.catalog?.crops?.find(c => c.id === 3000)?.buyPrice ?? 10;
@@ -328,11 +584,19 @@ export function plowPlot(session, row, col) {
     return { ok: false, reason: 'no_coins' };
   }
   session.coins -= plotCost;
+  let wx = worldX ?? (col * 36 + 18);
+  let wy = worldY ?? (row * 18 + 9);
+  if (worldX != null && worldY != null) {
+    const iso = worldToIso(worldX, worldY);
+    const snapped = isoToWorld(iso.ix, iso.iy);
+    wx = snapped.wx;
+    wy = snapped.wy;
+  }
   session.plots.set(key, {
     row,
     col,
-    worldX: col * 36 + 18,
-    worldY: row * 18 + 9,
+    worldX: wx,
+    worldY: wy,
     cropId: null,
     cropName: '',
     stage: 'tilled',
@@ -341,9 +605,9 @@ export function plowPlot(session, row, col) {
     growMs: 0,
   });
   awardFarmXp(session, 2);
-  session.toast = `Đã cày ô (${row},${col}) -${plotCost} Xu`;
+  session.toast = `Đã cày ô đất mới (-${plotCost} Xu)`;
   session.toastMs = 1800;
-  return { ok: true };
+  return { ok: true, popup: `-${plotCost} Xu`, popupColor: '#ffd84d' };
 }
 
 export function plantCropOnPlot(session, row, col, cropId = session.selectedCropId) {
@@ -512,12 +776,12 @@ export function claimQuestReward(session, questId) {
   return { ok: true };
 }
 
-export function interactAtFarmTile(session, row, col) {
+export function interactAtFarmTile(session, row, col, worldX = null, worldY = null) {
   const animal = session.animals.find(a => a.row === row && a.col === col);
   if (animal) return collectOrFeedAnimal(session, animal.uid);
 
   const plot = session.plots.get(`${row},${col}`);
-  if (!plot) return plowPlot(session, row, col);
+  if (!plot) return plowPlot(session, row, col, worldX, worldY);
   if (plot.stage === 'ready') return harvestPlot(session, row, col);
   if (plot.stage === 'growing') return waterPlot(session, row, col);
   if (plot.stage === 'tilled') return plantCropOnPlot(session, row, col, session.selectedCropId);

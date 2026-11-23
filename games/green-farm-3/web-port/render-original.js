@@ -298,7 +298,9 @@ export function drawBSpriteBlockFrame(ctx, sprite, moduleImages, frameIndex, x, 
 
 /**
  * Draw an animated frame from a decoded /5 BSprite block using its animations table.
- * Port of i.java:430-475 & d.java:1780-1795 (paintAFrame).
+ * Port of i.java:430-475 & d.java:1780-1795 (paintAFrame):
+ * animations[i] = { frameCount, firstAnimationFrame }
+ * animationFrames[k] = [frameIndex, duration, offsetX_s8, offsetY_s8, flags]
  */
 export function drawBSpriteBlockAnim(ctx, sprite, moduleImages, animIndex, tick, x, y, frameTransform = 0) {
   if (!sprite || !Array.isArray(sprite.animations) || sprite.animations.length === 0) {
@@ -306,20 +308,43 @@ export function drawBSpriteBlockAnim(ctx, sprite, moduleImages, animIndex, tick,
   }
   const aIdx = Math.max(0, Math.min(sprite.animations.length - 1, animIndex | 0));
   const anim = sprite.animations[aIdx];
-  if (!anim || !anim.aframeCount || !Array.isArray(sprite.animationFrames)) {
+  const count = anim?.frameCount ?? 0;
+  const first = anim?.firstAnimationFrame ?? 0;
+  if (!anim || count <= 0 || !Array.isArray(sprite.animationFrames)) {
     return drawBSpriteBlockFrame(ctx, sprite, moduleImages, 0, x, y, frameTransform);
   }
-  const step = Math.floor(tick / 6) % anim.aframeCount;
-  const aframe = sprite.animationFrames[anim.firstAframe + step];
-  if (!aframe) return drawBSpriteBlockFrame(ctx, sprite, moduleImages, 0, x, y, frameTransform);
-  const combinedTransform = ((frameTransform & 7) ^ (aframe.flags & 7)) & 7;
+  // Sum source aframe durations so animations play at authentic GLLib cadence
+  let totalDur = 0;
+  for (let i = 0; i < count; i += 1) {
+    const af = sprite.animationFrames[first + i];
+    totalDur += Math.max(1, af ? af[1] : 1);
+  }
+  let pos = Math.floor(tick) % Math.max(1, totalDur);
+  let chosen = sprite.animationFrames[first];
+  for (let i = 0; i < count; i += 1) {
+    const af = sprite.animationFrames[first + i];
+    const dur = Math.max(1, af ? af[1] : 1);
+    if (pos < dur) {
+      chosen = af;
+      break;
+    }
+    pos -= dur;
+  }
+  if (!chosen) return drawBSpriteBlockFrame(ctx, sprite, moduleImages, 0, x, y, frameTransform);
+  const frameIndex = chosen[0];
+  const offX = s8(chosen[2]);
+  const offY = s8(chosen[3]);
+  const aFlags = chosen[4] & 7;
+  const combinedTransform = ((frameTransform & 7) ^ aFlags) & 7;
+  const dx = (frameTransform & 1) ? -offX : offX;
+  const dy = (frameTransform & 2) ? -offY : offY;
   return drawBSpriteBlockFrame(
     ctx,
     sprite,
     moduleImages,
-    aframe.frameIndex,
-    x + (aframe.offsetX || 0),
-    y + (aframe.offsetY || 0),
+    frameIndex,
+    x + dx,
+    y + dy,
     combinedTransform,
   );
 }
