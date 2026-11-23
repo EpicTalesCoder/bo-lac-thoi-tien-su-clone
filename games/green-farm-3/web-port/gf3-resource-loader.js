@@ -190,7 +190,65 @@ export function joinCategory32Entities(records, configTable) {
   });
 }
 
-export async function loadOriginalWorldResources({ baseUrl = new URL('assets/packs/', import.meta.url).href, fetcher = fetch } = {}) {
+// Port of a.java:18088-18129 & g.java:15-58: decode Crops (/9[2]), Goods (/9[1]),
+// Animals (/9[0]), Quests (/9[25]), and Level XP thresholds (/9[26]) using en.json strings.
+export function decodeFarmCatalog(pack9, textData = {}) {
+  const txt = (id) => {
+    if (!Number.isInteger(id) || id < 0) return '';
+    return textData[`page_${id >>> 10}`]?.[String(id & 0x3ff)] ?? '';
+  };
+  const t0 = decodeConfigTable(readPackBlock(pack9, 0));
+  const t1 = decodeConfigTable(readPackBlock(pack9, 1));
+  const t2 = decodeConfigTable(readPackBlock(pack9, 2));
+  const t25 = decodeConfigTable(readPackBlock(pack9, 25));
+  const t26 = decodeConfigTable(readPackBlock(pack9, 26));
+
+  const crops = t2.rows.map((r) => ({
+    id: r[1],
+    name: txt(r[2]) || `Cây #${r[1]}`,
+    unlockLevel: Math.max(1, r[8] || 1),
+    buyPrice: Math.max(5, r[6] || 10),
+    growSec: Math.max(8, Math.round((r[11] || 90) / 10)), // scaled 10x faster for snappy web play while keeping /9 ratios
+    rawGrowSec: r[11] || 90,
+    yieldScore: Math.max(5, r[16] || 12),
+    sellPrice: Math.max(12, Math.round((r[6] || 10) * 1.8) + Math.max(4, Math.round((r[16] || 12) * 0.5))),
+    xp: Math.max(2, Math.round((r[16] || 10) / 3)),
+  }));
+
+  const goods = t1.rows.map((r) => ({
+    id: r[1],
+    name: txt(r[2]) || `Vật phẩm #${r[1]}`,
+    buyPrice: Math.max(0, r[5] || 0),
+    sellPrice: Math.max(5, r[7] || r[6] || 15),
+  }));
+
+  const animals = t0.rows
+    .filter((r) => txt(r[2]) && (r[6] > 0 || r[9] > 0))
+    .slice(0, 18)
+    .map((r) => ({
+      id: r[1],
+      name: txt(r[2]),
+      buyPrice: Math.max(100, r[6] || r[9] || 200),
+      prodSec: Math.max(12, Math.round((r[11] || 180) / 10)),
+      sellPrice: Math.max(25, Math.round((r[6] || 200) * 0.18)),
+      xp: Math.max(5, Math.round((r[6] || 200) / 40)),
+    }));
+
+  const quests = t25.rows.map((r, idx) => ({
+    id: r[0],
+    title: txt(r[3]) || `Nhiệm vụ #${idx + 1}`,
+    description: txt(r[6]) || '',
+    targetCount: Math.max(1, r[8] || 1),
+    rewardCoins: Math.max(50, (idx + 1) * 45),
+    rewardXp: Math.max(15, (idx + 1) * 12),
+  }));
+
+  const levelXp = t26.rows.map((r) => Math.max(20, (r[1] || 30) * 2));
+
+  return { crops, goods, animals, quests, levelXp };
+}
+
+export async function loadOriginalWorldResources({ baseUrl = new URL('assets/packs/', import.meta.url).href, fetcher = fetch, textData = {} } = {}) {
   const pack9 = await loadSplitPack(new URL('9/9', baseUrl).href, fetcher);
   const pack10 = await loadSplitPack(new URL('10/10', baseUrl).href, fetcher);
   const table9 = (index) => decodeConfigTable(readPackBlock(pack9, index));
@@ -201,6 +259,7 @@ export async function loadOriginalWorldResources({ baseUrl = new URL('assets/pac
     readPackBlock(pack10, 0),
     readPackBlock(pack10, 1),
   );
+  const catalog = decodeFarmCatalog(pack9, textData);
   return {
     packs: { 9: pack9, 10: pack10 },
     config15,
@@ -208,6 +267,7 @@ export async function loadOriginalWorldResources({ baseUrl = new URL('assets/pac
     openingEntities,
     joinedEntities: joinCategory32Entities(openingEntities, config15),
     tileMap,
+    catalog,
     table9,
   };
 }

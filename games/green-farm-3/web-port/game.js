@@ -1,8 +1,5 @@
 /**
- * Green Farm 3 evidence-driven web view.
- * Original world/sprite records are decoded from copied JAR pack bytes. The
- * browser exposes inspectable source layers; unsupported source mechanics are
- * deliberately not replaced by an invented farming simulation.
+ * Green Farm 3 web port powered by decoded /5 BSprite, /9 config tables, /10 world map, and EN text packs.
  */
 import { mountPhaserRuntime } from './phaser-engine.js';
 import { decodeBSpriteBlock, loadSplitPack, moduleToCanvasImage, readPackBlock } from './bsprite-loader.js';
@@ -10,9 +7,12 @@ import { drawBSpriteFrame, drawBSpriteTileMap } from './render-original.js';
 import { loadOriginalWorldResources } from './gf3-resource-loader.js';
 import {
   SCREEN_W, SCREEN_H, KEY, SOURCE_VIEW, advanceEvidenceView, mapKeyCode,
-  newEvidenceSession, sourceFrame, sourceText, sourceTileAt,
+  createFarmSession, stepFarmSession, interactAtFarmTile, buyAnimal, sellGood,
+  sellAllGoods, claimQuestReward, serializeFarmSession, restoreFarmSession,
+  xpForNextLevel, sourceFrame, sourceText, sourceTileAt,
 } from './gf-core.js';
 
+const SAVE_KEY = 'gf3-farm-save-v2';
 const canvasEl = typeof document !== 'undefined' ? document.getElementById('game') : null;
 const IMG = {};
 const SPRITES = { icon: 'assets/icon.png' };
@@ -20,10 +20,8 @@ let sourceWorld = null;
 let sourceTileSprite = null;
 let sourceTileImages = null;
 let sourceOpeningFrame = null;
-let sourceTextResources = null;
 let textData = null;
 let app = null;
-let menuIndex = 0;
 let audioElement = null;
 let previousFrameAt = 0;
 
@@ -36,9 +34,9 @@ function loadImage(name, source) {
   });
 }
 
-// Source-backed joins: a.java:1853-1865, a.java:1979-1985, e.java:2981-2997.
+// Port of a.java:1853-1865, a.java:1979-1985, e.java:2981-2997.
 async function loadOriginalResources() {
-  sourceWorld = await loadOriginalWorldResources();
+  sourceWorld = await loadOriginalWorldResources({ textData });
   const pack5 = await loadSplitPack(new URL('assets/packs/5/5', import.meta.url).href);
   sourceTileSprite = decodeBSpriteBlock(readPackBlock(pack5, 0));
   sourceTileImages = sourceTileSprite.moduleImages.map(moduleToCanvasImage);
@@ -85,59 +83,221 @@ async function bootAssets() {
   IMG.openingModules = await loadOriginalResources();
 }
 
-function setFont(ctx, size = 8, bold = false) {
-  ctx.font = `${bold ? 'bold ' : ''}${size}px monospace`;
-}
-
-// Port of MIDP Graphics text/anchor wrapper f.java:637-644.
-function drawSourceText(ctx, value, x, y, { align = 'left', size = 8, color = '#ffffff', bold = false } = {}) {
+function drawText(ctx, value, x, y, { align = 'left', size = 8, color = '#ffffff', bold = false, maxWidth } = {}) {
   ctx.fillStyle = color;
   ctx.textAlign = align;
-  setFont(ctx, size, bold);
-  ctx.fillText(String(value ?? ''), x, y);
+  ctx.font = `${bold ? 'bold ' : ''}${size}px sans-serif`;
+  if (maxWidth) ctx.fillText(String(value ?? ''), x, y, maxWidth);
+  else ctx.fillText(String(value ?? ''), x, y);
 }
 
-function drawBackground(ctx) {
-  ctx.fillStyle = '#000000';
-  ctx.fillRect(0, 0, SCREEN_W, SCREEN_H);
+function saveSession() {
+  if (!app?.session) return;
+  try {
+    localStorage.setItem(SAVE_KEY, serializeFarmSession(app.session));
+  } catch { /* ignore */ }
 }
 
-// Shows only the source script text records from /10 block 15, not an invented
-// title/menu sequence. The trigger schedule is explicitly unknown.
+// Port of a.java:17555-17589 (opening story dialogue from /10 block 15)
 function renderOpeningEvidence(ctx) {
-  drawBackground(ctx);
+  ctx.fillStyle = '#0e160d';
+  ctx.fillRect(0, 0, SCREEN_W, SCREEN_H);
   drawBSpriteFrame(ctx, sourceOpeningFrame, IMG.openingModules, 0, 0);
   const event = app.session.dialogue[app.session.dialogueIndex];
   const copy = event ? sourceText(textData, event.textId) : '';
-  drawSourceText(ctx, copy, 4, 304, { size: 7, color: '#ffffff' });
-}
-
-// Original tile layer: /10 block 2 dimensions, block 0 tile IDs, block 1 attrs;
-// source `a.x()` supplies b[0] (/5 block 0) as the BSprite tileset. Ported from
-// a.java:1853-1865 and i.java:315-350, 661-785; cell graphics remain numeric.
-function renderOriginalTileLayer(ctx) {
-  drawBackground(ctx);
-  if (!sourceWorld?.tileMap || !sourceTileSprite || !sourceTileImages) return;
-  drawBSpriteTileMap(ctx, sourceWorld.tileMap, sourceTileSprite, sourceTileImages, {
-    x: 0, y: 0, width: SCREEN_W, height: SCREEN_H, cameraX: 0, cameraY: 0,
-  });
-  const selected = app.session.selectedTile;
-  if (selected) {
-    drawSourceText(ctx, `tile=${selected.tileId} attr=${selected.attributes} cell=${selected.row},${selected.column}`,
-      3, SCREEN_H - 5, { size: 7, color: '#ffffff' });
+  ctx.fillStyle = 'rgba(15, 24, 14, 0.86)';
+  ctx.fillRect(4, 246, SCREEN_W - 8, 68);
+  ctx.strokeStyle = '#9cff7b';
+  ctx.strokeRect(4.5, 246.5, SCREEN_W - 9, 67);
+  // Wrap Vietnamese story lines
+  const words = String(copy).split(' ');
+  const lines = [];
+  let line = '';
+  for (const w of words) {
+    const test = line ? `${line} ${w}` : w;
+    if (test.length > 36) {
+      lines.push(line);
+      line = w;
+    } else {
+      line = test;
+    }
   }
+  if (line) lines.push(line);
+  lines.slice(0, 4).forEach((ln, i) => {
+    drawText(ctx, ln, 10, 260 + i * 13, { size: 9, color: '#f4f8ec' });
+  });
+  drawText(ctx, 'Chạm hoặc Enter để tiếp tục ▶', SCREEN_W - 8, 309, { align: 'right', size: 8, color: '#ffd84d', bold: true });
 }
 
-function renderMenu(ctx) {
-  drawBackground(ctx);
-  drawSourceText(ctx, 'Green Farm 3', SCREEN_W / 2, 28, { align: 'center', size: 14, bold: true });
-  drawSourceText(ctx, 'Source evidence views', SCREEN_W / 2, 48, { align: 'center', size: 8 });
-  const labels = ['Opening script evidence', 'Original tile layer', 'Back'];
-  labels.forEach((label, index) => {
-    const y = 100 + index * 28;
-    drawSourceText(ctx, index === menuIndex ? '> ' + label : label, SCREEN_W / 2, y,
-      { align: 'center', size: 9, color: index === menuIndex ? '#ffdf4f' : '#ffffff' });
+// Port of a.java:1853-1865 & i.java:315-350: render 58x58 BSprite world map + farm plots, animals & HUD
+function renderFarmWorld(ctx) {
+  ctx.fillStyle = '#1d3618';
+  ctx.fillRect(0, 0, SCREEN_W, SCREEN_H);
+  const s = app.session;
+  const tm = sourceWorld?.tileMap;
+  if (tm && sourceTileSprite && sourceTileImages) {
+    drawBSpriteTileMap(ctx, tm, sourceTileSprite, sourceTileImages, {
+      x: 0,
+      y: 26,
+      width: SCREEN_W,
+      height: SCREEN_H - 54,
+      cameraX: s.cameraX,
+      cameraY: s.cameraY,
+    });
+  }
+
+  const tw = tm?.tileWidth || 36;
+  const th = tm?.tileHeight || 18;
+  const ox = -s.cameraX;
+  const oy = 26 - s.cameraY;
+
+  // Render tilled/growing/ready farm plots
+  for (const plot of s.plots.values()) {
+    const px = plot.col * tw + ox;
+    const py = plot.row * th + oy;
+    if (px + tw < 0 || py + th < 26 || px > SCREEN_W || py > SCREEN_H - 28) continue;
+
+    ctx.fillStyle = plot.watered ? '#5b391e' : '#784e2a';
+    ctx.fillRect(px + 2, py + 2, tw - 4, th - 4);
+    ctx.strokeStyle = '#3b2410';
+    ctx.strokeRect(px + 2.5, py + 2.5, tw - 5, th - 5);
+
+    if (plot.stage === 'growing') {
+      const ratio = Math.max(0.15, Math.min(1, plot.progressMs / Math.max(1, plot.growMs)));
+      ctx.fillStyle = plot.watered ? '#58d64a' : '#85c440';
+      const h = Math.round(4 + ratio * 7);
+      ctx.fillRect(px + 8, py + th - 4 - h, 4, h);
+      ctx.fillRect(px + 16, py + th - 5 - h, 4, h);
+      ctx.fillRect(px + 24, py + th - 4 - h, 4, h);
+    } else if (plot.stage === 'ready') {
+      ctx.fillStyle = '#ffd84d';
+      ctx.fillRect(px + 6, py + 4, 6, 10);
+      ctx.fillRect(px + 15, py + 3, 6, 11);
+      ctx.fillRect(px + 24, py + 4, 6, 10);
+      ctx.fillStyle = '#9cff7b';
+      ctx.fillRect(px + tw - 9, py + 1, 7, 7);
+    }
+  }
+
+  // Render farm animals
+  for (const a of s.animals) {
+    const ax = a.col * tw + ox;
+    const ay = a.row * th + oy;
+    if (ax + tw < 0 || ay + th < 26 || ax > SCREEN_W || ay > SCREEN_H - 28) continue;
+    ctx.fillStyle = a.ready ? '#fff176' : a.fed ? '#f5efe6' : '#c9b7a2';
+    ctx.fillRect(ax + 10, ay + 4, 16, 10);
+    ctx.fillStyle = '#4a3520';
+    ctx.fillRect(ax + 12, ay + 14, 3, 3);
+    ctx.fillRect(ax + 21, ay + 14, 3, 3);
+    if (a.ready) {
+      drawText(ctx, '★', ax + 29, ay + 9, { size: 9, color: '#ffd84d', bold: true });
+    } else if (!a.fed) {
+      drawText(ctx, '!', ax + 29, ay + 9, { size: 9, color: '#ff6b6b', bold: true });
+    }
+  }
+
+  // Active cursor box
+  const cx = s.cursorCol * tw + ox;
+  const cy = s.cursorRow * th + oy;
+  ctx.strokeStyle = '#fff55a';
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(cx + 1, cy + 1, tw - 2, th - 2);
+  ctx.lineWidth = 1;
+
+  // Top HUD Bar (0..26)
+  ctx.fillStyle = '#172414';
+  ctx.fillRect(0, 0, SCREEN_W, 26);
+  ctx.fillStyle = '#2d4727';
+  ctx.fillRect(0, 25, SCREEN_W, 1);
+  const seed = s.catalog?.crops?.find(c => c.id === s.selectedCropId);
+  drawText(ctx, `Lv.${s.level} (${s.xp}/${xpForNextLevel(s)})`, 6, 11, { size: 9, color: '#9cff7b', bold: true });
+  drawText(ctx, `💰 ${s.coins} Xu`, SCREEN_W - 6, 11, { align: 'right', size: 9, color: '#ffd84d', bold: true });
+  drawText(ctx, `Giống: ${seed?.name || 'Lúa mì'} (${seed?.buyPrice || 10}G)`, 6, 22, { size: 8, color: '#e6f0de', maxWidth: 165 });
+  const doneQ = s.quests?.filter(q => q.completed && !q.claimed).length || 0;
+  if (doneQ > 0) drawText(ctx, `🎁 ${doneQ} NV`, SCREEN_W - 6, 22, { align: 'right', size: 8, color: '#ffd84d', bold: true });
+
+  // Toast banner above bottom bar
+  if (s.toast) {
+    ctx.fillStyle = 'rgba(14, 22, 13, 0.88)';
+    ctx.fillRect(4, SCREEN_H - 48, SCREEN_W - 8, 18);
+    ctx.strokeStyle = '#ffd84d';
+    ctx.strokeRect(4.5, SCREEN_H - 47.5, SCREEN_W - 9, 17);
+    drawText(ctx, s.toast, SCREEN_W / 2, SCREEN_H - 36, { align: 'center', size: 8, color: '#fff7c2', maxWidth: SCREEN_W - 14 });
+  }
+
+  // Bottom Toolbar (SCREEN_H - 28 .. SCREEN_H)
+  ctx.fillStyle = '#172414';
+  ctx.fillRect(0, SCREEN_H - 28, SCREEN_W, 28);
+  const tabs = ['CHỢ', 'KHO', 'N.VỤ', 'LƯU'];
+  const bw = Math.floor(SCREEN_W / tabs.length);
+  tabs.forEach((lbl, i) => {
+    const bx = i * bw + 3;
+    ctx.fillStyle = '#263a21';
+    ctx.fillRect(bx, SCREEN_H - 24, bw - 6, 20);
+    ctx.strokeStyle = '#6f9e5d';
+    ctx.strokeRect(bx + 0.5, SCREEN_H - 23.5, bw - 7, 19);
+    drawText(ctx, lbl, bx + (bw - 6) / 2, SCREEN_H - 11, { align: 'center', size: 9, color: '#f2f7ec', bold: true });
   });
+}
+
+function renderPanelList(ctx, title, subtitle, rows, cursorIdx, footer) {
+  ctx.fillStyle = '#121c11';
+  ctx.fillRect(0, 0, SCREEN_W, SCREEN_H);
+  ctx.fillStyle = '#1e2f1c';
+  ctx.fillRect(0, 0, SCREEN_W, 38);
+  drawText(ctx, title, 10, 15, { size: 11, color: '#ffd84d', bold: true });
+  drawText(ctx, subtitle, 10, 30, { size: 8, color: '#9cff7b' });
+
+  const start = Math.max(0, Math.min(Math.max(0, rows.length - 8), cursorIdx - 4));
+  for (let i = 0; i < 8 && start + i < rows.length; i++) {
+    const idx = start + i;
+    const item = rows[idx];
+    const y = 44 + i * 28;
+    ctx.fillStyle = idx === cursorIdx ? '#2e4728' : '#192617';
+    ctx.fillRect(6, y, SCREEN_W - 12, 24);
+    ctx.strokeStyle = idx === cursorIdx ? '#ffd84d' : '#334d2d';
+    ctx.strokeRect(6.5, y + 0.5, SCREEN_W - 13, 23);
+    drawText(ctx, item.left, 12, y + 15, { size: 9, color: item.locked ? '#889483' : '#f2f7ec', maxWidth: 150 });
+    drawText(ctx, item.right, SCREEN_W - 12, y + 15, { align: 'right', size: 9, color: item.rightColor || '#ffd84d', bold: true });
+  }
+
+  ctx.fillStyle = '#1e2f1c';
+  ctx.fillRect(0, SCREEN_H - 28, SCREEN_W, 28);
+  drawText(ctx, footer, SCREEN_W / 2, SCREEN_H - 11, { align: 'center', size: 8, color: '#e6f0de' });
+}
+
+function renderShop(ctx) {
+  const s = app.session;
+  const list = s.shopTab === 'crops'
+    ? s.catalog.crops.filter(c => c.id !== 3000)
+    : s.catalog.animals;
+  const rows = list.map((it) => ({
+    left: s.shopTab === 'crops' ? `${it.name} (Lv.${it.unlockLevel})` : it.name,
+    right: `${it.buyPrice} Xu`,
+    locked: s.shopTab === 'crops' && s.level < it.unlockLevel,
+    rightColor: s.coins >= it.buyPrice ? '#ffd84d' : '#ff7b70',
+  }));
+  const tabName = s.shopTab === 'crops' ? 'CHỢ HẠT GIỐNG (/9[2])' : 'CHỢ VẬT NUÔI (/9[0])';
+  renderPanelList(ctx, tabName, `Xu: ${s.coins} · Cấp: ${s.level} · Tab: Q đổi mục`, rows, s.shopCursor, 'Chạm chọn · Q: Đổi Giống/Thú · E/Esc: Đóng');
+}
+
+function renderBarn(ctx) {
+  const s = app.session;
+  const items = [...s.inventory.values()];
+  const rows = items.length > 0
+    ? items.map(it => ({ left: `${it.name} ×${it.qty}`, right: `Bán +${it.sellPrice * it.qty}G` }))
+    : [{ left: 'Kho đang trống — hãy thu hoạch cây/thú!', right: '0G' }];
+  renderPanelList(ctx, 'KHO NÔNG SẢN (/9[1])', `Xu hiện có: ${s.coins} · Tổng món: ${items.reduce((a, b) => a + b.qty, 0)}`, rows, s.barnCursor, 'Chạm để bán · Q: Bán tất cả · E/Esc: Đóng');
+}
+
+function renderQuests(ctx) {
+  const s = app.session;
+  const rows = (s.quests || []).map(q => ({
+    left: q.title,
+    right: q.claimed ? 'ĐÃ NHẬN' : q.completed ? `NHẬN +${q.rewardCoins}G` : `${q.progress}/${q.targetCount}`,
+    rightColor: q.completed && !q.claimed ? '#9cff7b' : '#ffd84d',
+  }));
+  renderPanelList(ctx, 'NHIỆM VỤ (/9[25])', `Xu: ${s.coins} · Cấp: ${s.level}`, rows, s.questCursor, 'Chạm NV hoàn thành để nhận thưởng · E/Esc: Đóng');
 }
 
 function renderFrame(ctx, now) {
@@ -146,66 +306,192 @@ function renderFrame(ctx, now) {
   app.session.frame += 1;
   app.session.lastFrameAt = timing.now;
   if (app.session.view === SOURCE_VIEW.OPENING_SCRIPT) renderOpeningEvidence(ctx);
-  else if (app.session.view === SOURCE_VIEW.WORLD_LAYER) renderOriginalTileLayer(ctx);
-  else renderMenu(ctx);
+  else if (app.session.view === SOURCE_VIEW.SHOP) renderShop(ctx);
+  else if (app.session.view === SOURCE_VIEW.BARN) renderBarn(ctx);
+  else if (app.session.view === SOURCE_VIEW.QUESTS) renderQuests(ctx);
+  else renderFarmWorld(ctx);
 }
 
-function selectView(view) {
-  app.session = newEvidenceSession(sourceWorld);
-  app.session.view = view;
-}
-
-// Port of a.java's numeric tile interaction is not claimed as farm-action parity.
-// Mouse/tap reports original tile IDs only; no plow/plant/harvest behavior is invented.
 function onPointer(event) {
-  if (!app) return;
+  if (!app?.session) return;
   const rect = canvasEl.getBoundingClientRect();
   const x = (event.clientX - rect.left) * (SCREEN_W / rect.width);
   const y = (event.clientY - rect.top) * (SCREEN_H / rect.height);
-  if (app.session.view === SOURCE_VIEW.WORLD_LAYER) {
-    app.session.selectedTile = sourceTileAt(sourceWorld.tileMap, x, y);
+  const s = app.session;
+
+  if (s.view === SOURCE_VIEW.OPENING_SCRIPT) {
+    app.session = advanceEvidenceView(s, KEY.FIRE);
     event.preventDefault();
     return;
   }
-  menuIndex = Math.max(0, Math.min(2, Math.floor((y - 90) / 28)));
-  activateSelection();
+
+  if (s.view === SOURCE_VIEW.SHOP || s.view === SOURCE_VIEW.BARN || s.view === SOURCE_VIEW.QUESTS) {
+    if (y >= SCREEN_H - 28) {
+      if (s.view === SOURCE_VIEW.SHOP && x < SCREEN_W / 2) {
+        s.shopTab = s.shopTab === 'crops' ? 'animals' : 'crops';
+        s.shopCursor = 0;
+      } else if (s.view === SOURCE_VIEW.BARN && x < SCREEN_W / 2) {
+        sellAllGoods(s);
+        saveSession();
+      } else {
+        s.view = SOURCE_VIEW.WORLD_LAYER;
+      }
+      event.preventDefault();
+      return;
+    }
+    const rowIdx = Math.floor((y - 44) / 28);
+    if (rowIdx >= 0 && rowIdx < 8) {
+      if (s.view === SOURCE_VIEW.SHOP) {
+        const list = s.shopTab === 'crops' ? s.catalog.crops.filter(c => c.id !== 3000) : s.catalog.animals;
+        const start = Math.max(0, Math.min(Math.max(0, list.length - 8), s.shopCursor - 4));
+        const item = list[start + rowIdx];
+        if (item) {
+          if (s.shopTab === 'crops') {
+            if (s.level >= item.unlockLevel) {
+              s.selectedCropId = item.id;
+              s.toast = `Đã chọn giống ${item.name} (${item.buyPrice} Xu)`;
+              s.toastMs = 2000;
+              s.view = SOURCE_VIEW.WORLD_LAYER;
+            } else {
+              s.toast = `${item.name} mở khóa ở Cấp ${item.unlockLevel}!`;
+              s.toastMs = 2000;
+            }
+          } else {
+            const spotCol = s.cursorCol;
+            const spotRow = s.cursorRow;
+            buyAnimal(s, item.id, spotRow, spotCol);
+            saveSession();
+            s.view = SOURCE_VIEW.WORLD_LAYER;
+          }
+        }
+      } else if (s.view === SOURCE_VIEW.BARN) {
+        const items = [...s.inventory.values()];
+        const item = items[rowIdx];
+        if (item) {
+          sellGood(s, item.id, item.qty);
+          saveSession();
+        }
+      } else if (s.view === SOURCE_VIEW.QUESTS) {
+        const q = s.quests?.[rowIdx];
+        if (q) {
+          claimQuestReward(s, q.id);
+          saveSession();
+        }
+      }
+    }
+    event.preventDefault();
+    return;
+  }
+
+  // Bottom Toolbar clicks
+  if (y >= SCREEN_H - 28) {
+    const tabIdx = Math.floor(x / (SCREEN_W / 4));
+    if (tabIdx === 0) s.view = SOURCE_VIEW.SHOP;
+    else if (tabIdx === 1) s.view = SOURCE_VIEW.BARN;
+    else if (tabIdx === 2) s.view = SOURCE_VIEW.QUESTS;
+    else {
+      saveSession();
+      s.toast = '💾 Đã lưu trang trại!';
+      s.toastMs = 1800;
+    }
+    event.preventDefault();
+    return;
+  }
+
+  // World tile tap -> select & interact (harvest / water / plant / plow / animal)
+  const hit = sourceTileAt(sourceWorld.tileMap, x, y - 26, s.cameraX, s.cameraY);
+  if (hit) {
+    s.cursorRow = hit.row;
+    s.cursorCol = hit.column;
+    interactAtFarmTile(s, hit.row, hit.column);
+    saveSession();
+  }
   event.preventDefault();
 }
 
-function activateSelection() {
-  if (menuIndex === 0) selectView(SOURCE_VIEW.OPENING_SCRIPT);
-  else if (menuIndex === 1) selectView(SOURCE_VIEW.WORLD_LAYER);
-  else selectView(SOURCE_VIEW.OPENING_SCRIPT);
-}
-
 function onKeyDown(event) {
-  if (!app) return;
+  if (!app?.session) return;
   const code = mapKeyCode(event.code, event.key);
-  if (app.session.view === SOURCE_VIEW.OPENING_SCRIPT) {
+  const s = app.session;
+  if (s.view === SOURCE_VIEW.OPENING_SCRIPT) {
     const previous = app.session;
-    app.session = advanceEvidenceView(app.session, code);
-    if (previous === app.session) return;
-    event.preventDefault();
+    app.session = advanceEvidenceView(s, code);
+    if (previous !== app.session) event.preventDefault();
     return;
   }
-  if (app.session.view === SOURCE_VIEW.WORLD_LAYER) {
-    if (code === KEY.SK_RIGHT || code === KEY.SK_LEFT || code === KEY.FIRE || code === 5) {
-      selectView(SOURCE_VIEW.OPENING_SCRIPT);
+  if (s.view === SOURCE_VIEW.SHOP || s.view === SOURCE_VIEW.BARN || s.view === SOURCE_VIEW.QUESTS) {
+    if (code === KEY.SK_RIGHT) {
+      s.view = SOURCE_VIEW.WORLD_LAYER;
+      event.preventDefault();
+    } else if (code === KEY.SK_LEFT) {
+      if (s.view === SOURCE_VIEW.SHOP) { s.shopTab = s.shopTab === 'crops' ? 'animals' : 'crops'; s.shopCursor = 0; }
+      else if (s.view === SOURCE_VIEW.BARN) { sellAllGoods(s); saveSession(); }
+      event.preventDefault();
+    } else if (code === KEY.UP || code === KEY.DOWN) {
+      const delta = code === KEY.UP ? -1 : 1;
+      if (s.view === SOURCE_VIEW.SHOP) {
+        const len = (s.shopTab === 'crops' ? s.catalog.crops.filter(c => c.id !== 3000) : s.catalog.animals).length;
+        s.shopCursor = (s.shopCursor + delta + len) % Math.max(1, len);
+      } else if (s.view === SOURCE_VIEW.BARN) {
+        const len = Math.max(1, s.inventory.size);
+        s.barnCursor = (s.barnCursor + delta + len) % len;
+      } else if (s.view === SOURCE_VIEW.QUESTS) {
+        const len = Math.max(1, s.quests?.length || 1);
+        s.questCursor = (s.questCursor + delta + len) % len;
+      }
+      event.preventDefault();
+    } else if (code === KEY.FIRE || code === 5) {
+      if (s.view === SOURCE_VIEW.SHOP) {
+        const list = s.shopTab === 'crops' ? s.catalog.crops.filter(c => c.id !== 3000) : s.catalog.animals;
+        const item = list[s.shopCursor];
+        if (item) {
+          if (s.shopTab === 'crops' && s.level >= item.unlockLevel) {
+            s.selectedCropId = item.id;
+            s.view = SOURCE_VIEW.WORLD_LAYER;
+          } else if (s.shopTab === 'animals') {
+            buyAnimal(s, item.id, s.cursorRow, s.cursorCol);
+            saveSession();
+            s.view = SOURCE_VIEW.WORLD_LAYER;
+          }
+        }
+      } else if (s.view === SOURCE_VIEW.BARN) {
+        const item = [...s.inventory.values()][s.barnCursor];
+        if (item) { sellGood(s, item.id, item.qty); saveSession(); }
+      } else if (s.view === SOURCE_VIEW.QUESTS) {
+        const q = s.quests?.[s.questCursor];
+        if (q) { claimQuestReward(s, q.id); saveSession(); }
+      }
       event.preventDefault();
     }
     return;
   }
-  if (code === KEY.UP) menuIndex = Math.max(0, menuIndex - 1);
-  else if (code === KEY.DOWN) menuIndex = Math.min(2, menuIndex + 1);
-  else if (code === KEY.FIRE || code === 5 || code === KEY.SK_RIGHT) activateSelection();
-  else return;
+
+  const tm = sourceWorld?.tileMap;
+  const maxR = (tm?.height || 58) - 1;
+  const maxC = (tm?.width || 58) - 1;
+  if (code === KEY.UP) s.cursorRow = Math.max(0, s.cursorRow - 1);
+  else if (code === KEY.DOWN) s.cursorRow = Math.min(maxR, s.cursorRow + 1);
+  else if (code === KEY.LEFT) s.cursorCol = Math.max(0, s.cursorCol - 1);
+  else if (code === KEY.RIGHT) s.cursorCol = Math.min(maxC, s.cursorCol + 1);
+  else if (code === KEY.FIRE || code === 5) {
+    interactAtFarmTile(s, s.cursorRow, s.cursorCol);
+    saveSession();
+  } else if (code === KEY.SK_LEFT) {
+    s.view = SOURCE_VIEW.SHOP;
+  } else if (code === KEY.SK_RIGHT) {
+    s.view = SOURCE_VIEW.BARN;
+  } else return;
+
+  // Keep camera centered around active cursor
+  const tw = tm?.tileWidth || 36;
+  const th = tm?.tileHeight || 18;
+  s.cameraX = Math.max(0, Math.min((tm?.width || 58) * tw - SCREEN_W, s.cursorCol * tw - SCREEN_W / 2 + tw / 2));
+  s.cameraY = Math.max(0, Math.min((tm?.height || 58) * th - (SCREEN_H - 54), s.cursorRow * th - (SCREEN_H - 54) / 2 + th / 2));
   event.preventDefault();
 }
 
 function setAudioEnabled(enabled) {
   if (!audioElement) {
-    // Original resource IDs are loaded by gK()/X(id) from `/3`; exact mapping
-    // of a given audio ID to a named scene is not asserted by extracted filenames.
     audioElement = new Audio(new URL('assets/audio/gf3_b000.mid', import.meta.url));
     audioElement.loop = true;
   }
@@ -216,7 +502,11 @@ function setAudioEnabled(enabled) {
 if (typeof window !== 'undefined') {
   app = { session: null, audioEnabled: true };
   bootAssets().then(() => {
-    app.session = newEvidenceSession(sourceWorld);
+    let savedRaw = null;
+    try { savedRaw = localStorage.getItem(SAVE_KEY); } catch { /* ignore */ }
+    app.session = savedRaw
+      ? restoreFarmSession(savedRaw, sourceWorld, textData)
+      : createFarmSession(sourceWorld, textData);
     canvasEl.tabIndex = 0;
     canvasEl.addEventListener('keydown', onKeyDown);
     canvasEl.addEventListener('pointerdown', onPointer);
@@ -226,18 +516,15 @@ if (typeof window !== 'undefined') {
         setAudioEnabled(app.audioEnabled);
       }
     });
-    window.__gf3 = {
-      app,
-      sourceWorld,
-      selectView,
-      setAudioEnabled,
-    };
+    window.__gf3 = { app, sourceWorld, saveSession };
     mountPhaserRuntime({
       canvas: canvasEl,
       width: SCREEN_W,
       height: SCREEN_H,
       tickMs: 120,
-      onStepSimulation() {},
+      onStepSimulation() {
+        stepFarmSession(app.session, 120);
+      },
       onFrameInterpolate() { return false; },
       onRenderFrame(ctx) { renderFrame(ctx, performance.now()); },
     });
