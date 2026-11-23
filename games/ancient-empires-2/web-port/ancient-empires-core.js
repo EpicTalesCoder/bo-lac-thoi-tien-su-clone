@@ -1,57 +1,71 @@
-import { idiv, s16 } from './format.js';
+import { idiv, s8, s16 } from './format.js';
 
-// Port of i.java:158 and c.java:465-486. This property-indexed movement-cost
-// table is taken from the original controller constant.
-export const MOVEMENT_COST_BY_PROPERTY = Object.freeze([83, 83, 83, 83, 83, 83, 83, 83, 175, 84, 84, 84, 175, 147, 159, 151, 155, 167, 171]);
+// Port of i.java:64-65 (static byte[] f = terrain defense, static byte[] g = terrain movement cost)
+export const TERRAIN_DEFENSE_BY_PROPERTY = Object.freeze([0, 5, 10, 10, 15, 0, 5, 15, 15, 15]);
+export const MOVEMENT_COST_BY_PROPERTY = Object.freeze([1, 1, 2, 2, 3, 3, 1, 1, 1, 1]);
 export const IMPASSABLE_COST = 1000;
 export const OUT_OF_BOUNDS_COST = 10000;
+export const FIRST_BUILDING_TILE = 37; // i.java:3606 (this.j = 37)
 
+// Port of i.java:3616-3621: decode building palette owner from tile ID (>= 37)
+export function buildingPaletteFromTile(rawTile) {
+  const tile = s8(rawTile);
+  if (tile >= FIRST_BUILDING_TILE) return idiv(tile - FIRST_BUILDING_TILE, 2);
+  return -1;
+}
+
+// Port of i.java:3606-3610: encode captured/repaired building tile ID for a palette (1..4)
+export function encodeBuildingTile(rawTile, palette) {
+  const tile = s8(rawTile);
+  const frame = tile >= FIRST_BUILDING_TILE ? (tile - FIRST_BUILDING_TILE) % 2 : 0;
+  return FIRST_BUILDING_TILE + palette * 2 + frame;
+}
+
+// Port of c.java:465-487: exact terrain movement cost with flying/aquatic/enemy-blocker rules
 export function movementCost({ x, y, unitType, terrainProperty, occupiedUnit, unit, teamForPlayer }) {
   if (x < 0 || y < 0) return OUT_OF_BOUNDS_COST;
-  if (occupiedUnit && teamForPlayer(occupiedUnit.playerId) !== teamForPlayer(unit.playerId)) return IMPASSABLE_COST;
-  if (unitType === 11) return terrainProperty === 4 ? IMPASSABLE_COST : MOVEMENT_COST_BY_PROPERTY[0];
-  if ((unit.movementMask & 1) !== 0) return MOVEMENT_COST_BY_PROPERTY[0];
-  if ((unit.movementMask & 2) !== 0 && terrainProperty === 5) return MOVEMENT_COST_BY_PROPERTY[0];
-  if (terrainProperty < 0 || terrainProperty >= MOVEMENT_COST_BY_PROPERTY.length) return OUT_OF_BOUNDS_COST;
+  const uType = unitType ?? unit?.type ?? 0;
+  const uMask = unit?.movementMask ?? 0;
+  if (occupiedUnit && occupiedUnit.action !== 3 && teamForPlayer(occupiedUnit.playerSelector) !== teamForPlayer(unit.playerSelector)) {
+    return IMPASSABLE_COST;
+  }
+  if (uType === 11) {
+    return terrainProperty === 4 ? IMPASSABLE_COST : MOVEMENT_COST_BY_PROPERTY[0];
+  }
+  if ((uMask & 1) !== 0) return 1; // c.java:477 flying ignores terrain
+  if ((uMask & 2) !== 0 && terrainProperty === 5) return 1; // c.java:480 aquatic in water
+  if (terrainProperty == null || terrainProperty < 0 || terrainProperty >= MOVEMENT_COST_BY_PROPERTY.length) {
+    return OUT_OF_BOUNDS_COST;
+  }
   return MOVEMENT_COST_BY_PROPERTY[terrainProperty];
 }
 
-// Port of c.java:443-486. Source stores the maximum remaining movement in a
-// signed-byte x/y grid. Incoming edge masks prevent immediate backtracking;
-// a complete range pass calls the source recursion once from each legal source
-// point and preserves its source traversal order.
+// Port of c.java:443-486: exact recursive remaining-movement flood fill
 export function calculateReachability({ unit, width, height, terrainAt, unitAt, teamForPlayer }) {
-  const range = Array.from({ length: width }, () => Array(height).fill(0));
-  const source = { x: unit.x, y: unit.y };
-  const maxRange = Math.max(0, Math.min(unit.movementRange, 127));
-  sourceRecursion(range, source.x, source.y, unit.type, maxRange, -1, unit, false, width, height, terrainAt, unitAt, teamForPlayer);
-  for (let x = 0; x < width; x++) {
-    for (let y = 0; y < height; y++) {
-      if (range[x][y] <= 0 || range[x][y] === 127) continue;
-      sourceRecursion(range, x, y, unit.type, range[x][y], -1, unit, false, width, height, terrainAt, unitAt, teamForPlayer);
-    }
-  }
+  const range = Array.from({ length: width }, () => Array(height).fill(-1));
+  const maxRange = Math.max(0, Math.min(unit.movementRange ?? unit.budget ?? 0, 127));
+  sourceRecursion(range, unit.x, unit.y, unit.type, maxRange, -1, unit, width, height, terrainAt, unitAt, teamForPlayer);
+
   const costs = new Map();
   const previous = new Map();
-  for (let x = 0; x < width; x++) for (let y = 0; y < height; y++) {
-    if (range[x][y] <= 0 || range[x][y] === 127) continue;
-    const key = `${x},${y}`;
-    const occupant = unitAt(x, y);
-    if (occupant && occupant.id !== unit.id && teamForPlayer(occupant.playerId) === teamForPlayer(unit.playerId)) continue;
-    costs.set(key, unit.movementRange - range[x][y]);
-    const parent = chooseSourceRouteParent(range, x, y, width, height);
-    if (parent) previous.set(key, `${parent.x},${parent.y}`);
+  for (let x = 0; x < width; x++) {
+    for (let y = 0; y < height; y++) {
+      if (range[x][y] < 0) continue;
+      if (x === unit.x && y === unit.y) continue;
+      const occupant = unitAt(x, y);
+      if (occupant && occupant.id !== unit.id && occupant.action !== 3) continue;
+      const key = `${x},${y}`;
+      costs.set(key, maxRange - range[x][y]);
+      const parent = chooseSourceRouteParent(range, x, y, width, height);
+      if (parent) previous.set(key, `${parent.x},${parent.y}`);
+    }
   }
-  costs.delete(`${unit.x},${unit.y}`);
-  return { costs, previous, cells: [...costs.keys()].map(key => key.split(',').map(Number)), range };
+  return { costs, previous, cells: [...costs.keys()].map(k => k.split(',').map(Number)), range };
 }
 
-// Direct source translation of c.a(byte[][],x,y,remaining,blockedDirection,...).
-function sourceRecursion(range, x, y, unitType, remaining, blockedDirection, unit, searchOnly, width, height, terrainAt, unitAt, teamForPlayer) {
-  if (x < 0 || y < 0 || x >= width || y >= height || remaining <= range[x][y]) return false;
+function sourceRecursion(range, x, y, unitType, remaining, blockedDirection, unit, width, height, terrainAt, unitAt, teamForPlayer) {
+  if (x < 0 || y < 0 || x >= width || y >= height || remaining <= range[x][y]) return;
   range[x][y] = s16(remaining) > 127 ? 127 : s16(remaining);
-  const occupant = unitAt(x, y);
-  if (searchOnly && !occupant) return true;
   const neighbors = [
     { x, y: y - 1, direction: 1, reverse: 2 },
     { x, y: y + 1, direction: 2, reverse: 1 },
@@ -60,37 +74,37 @@ function sourceRecursion(range, x, y, unitType, remaining, blockedDirection, uni
   ];
   for (const next of neighbors) {
     if (blockedDirection === next.direction) continue;
+    if (next.x < 0 || next.y < 0 || next.x >= width || next.y >= height) continue;
     const target = unitAt(next.x, next.y);
     const stepCost = movementCost({
       x: next.x,
       y: next.y,
       unitType,
-      terrainProperty: next.x < 0 || next.y < 0 || next.x >= width || next.y >= height ? null : terrainAt(next.x, next.y),
+      terrainProperty: terrainAt(next.x, next.y),
       occupiedUnit: target,
       unit,
       teamForPlayer,
     });
     const nextRemaining = remaining - stepCost;
     if (nextRemaining < 0) continue;
-    const found = sourceRecursion(range, next.x, next.y, unitType, nextRemaining, next.reverse, unit, searchOnly, width, height, terrainAt, unitAt, teamForPlayer);
-    if (found && searchOnly) return true;
+    sourceRecursion(range, next.x, next.y, unitType, nextRemaining, next.reverse, unit, width, height, terrainAt, unitAt, teamForPlayer);
   }
-  return false;
 }
 
 function chooseSourceRouteParent(range, targetX, targetY, width, height) {
-  // Port of c.java:401-437; ties resolve in north, south, west, east order.
+  // Port of c.java:401-437: ties resolve in north, south, west, east order
   const candidates = [
     { x: targetX, y: targetY - 1 }, { x: targetX, y: targetY + 1 },
     { x: targetX - 1, y: targetY }, { x: targetX + 1, y: targetY },
   ].filter(cell => cell.x >= 0 && cell.y >= 0 && cell.x < width && cell.y < height);
   let best = null;
-  for (const cell of candidates) if (range[cell.x][cell.y] > 0 && (!best || range[cell.x][cell.y] > range[best.x][best.y])) best = cell;
+  for (const cell of candidates) {
+    if (range[cell.x][cell.y] >= 0 && (!best || range[cell.x][cell.y] > range[best.x][best.y])) best = cell;
+  }
   return best;
 }
 
-// Port of c.java:350-399. For a confirmed route, source appends the horizontal
-// segment first, then the vertical segment, using Java integer division.
+// Port of c.java:350-399: straight x-then-y path ordering using Java integer division
 export function buildStraightPath(startX, startY, endX, endY) {
   const path = [[startX, startY]];
   const dx = endX - startX;
@@ -114,28 +128,229 @@ export function buildStraightPath(startX, startY, endX, endY) {
   return path;
 }
 
-// Port of c.java:166-177. Callbacks represent the exact delegated lookups;
-// opaque fields remain raw instead of being relabeled as familiar stats.
+// Port of c.java:76-89: build unit combat stats from units.bin record & level (0..9)
+export function computeUnitStats(record, level = 0) {
+  const lv = Math.max(0, Math.min(9, level | 0));
+  const bonus = lv * 2;
+  const movementMask = (record.movementMaskBits || []).reduce((m, bit) => m | (1 << bit), 0);
+  return {
+    movementRange: record.fields[0],
+    atkMin: record.fields[1] + bonus,
+    atkMax: record.fields[2] + bonus,
+    defense: record.fields[3] + bonus,
+    maxRange: record.fields[4],
+    minRange: record.fields[5],
+    cost: record.shortValue,
+    movementMask,
+  };
+}
+
+// Port of c.java:131-148: attack modifiers (status aura/poison, anti-air, wisp vs skeleton, aquatic in water, temple tile 34)
+export function attackModifierFor(attacker, defender, ax, ay, terrainProp, rawTile) {
+  let mod = 0;
+  if (((attacker.status || 0) & 1) !== 0) mod -= 10; // c.java:219 poisoned
+  if (((attacker.status || 0) & 2) !== 0) mod += 10; // c.java:223 wisp aura
+  if (defender) {
+    if (((attacker.movementMask || 0) & 64) !== 0 && ((defender.movementMask || 0) & 1) !== 0) mod += 15; // c.java:134
+    if (attacker.type === 4 && defender.type === 10) mod += 15; // c.java:137 wisp vs skeleton
+  }
+  if (((attacker.movementMask || 0) & 2) !== 0 && terrainProp === 5) mod += 10; // c.java:141 aquatic in water
+  if (rawTile === 34) mod += 25; // c.java:144 crystal/altar tile
+  return mod;
+}
+
+// Port of c.java:154-164: defense modifiers (terrain defense i.f[prop], poison, aquatic in water, tile 34)
+export function defenseModifierFor(defender, dx, dy, terrainProp, rawTile) {
+  let mod = TERRAIN_DEFENSE_BY_PROPERTY[terrainProp] ?? 0; // c.java:156 i.f[by]
+  if (((defender.status || 0) & 1) !== 0) mod -= 10; // c.java:221 poisoned
+  if (((defender.movementMask || 0) & 2) !== 0 && terrainProp === 5) mod += 15; // c.java:157
+  if (rawTile === 34) mod += 15; // c.java:160
+  return mod;
+}
+
+// Port of c.java:166-196: exact damage, XP gain, and level-up arithmetic
 export function resolveOriginalDamage({ attacker, defender, attackLookup, attackerModifier, defenderModifier }) {
   const attackValue = attackLookup(attacker.rawFieldD, attacker.rawFieldE) + attackerModifier;
   const defenseValue = defender.rawFieldF + defenderModifier;
   const raw = idiv((attackValue - defenseValue) * attacker.rawFieldG, 100);
   const damage = Math.max(0, Math.min(defender.rawFieldG, raw));
+  const defenderWeight = defender.rawD != null
+    ? (defender.rawD + defender.rawE + defender.rawF)
+    : (attacker.rawD + attacker.rawE + attacker.rawF);
   return {
     damage,
     defenderFieldG: defender.rawFieldG - damage,
-    attackerFieldA: attacker.rawFieldA + (attacker.rawD + attacker.rawE + attacker.rawF) * damage,
+    attackerFieldA: attacker.rawFieldA + defenderWeight * damage,
   };
 }
 
-// Port of i.java:3533-3589. Preserve the source property predicates and income;
-// caller must supply ownership from verified state, not the skipped map section.
-export function advancePlayerTurn({ playerIndex, playerCount, turnCount, playerModes, playerPositions, units, propertyOwnerAt, terrainPropertyAt, balances }) {
+// Port of c.java:198-200: counterattack predicate (adjacent melee unit still alive)
+export function canCounterattack(defender, attackerX, attackerY) {
+  const dist = Math.abs(defender.x - attackerX) + Math.abs(defender.y - attackerY);
+  return defender.action !== 4 && defender.hp > 0 && dist === 1 && (defender.minRange ?? 1) === 1;
+}
+
+// Port of c.java:166-200 & i.java:2358-2407: full combat strike + conditional counterstrike + level-up
+export function executeCombat({ attacker, defender, terrainAt, rawTileAt, rng = Math.random }) {
+  const roll = (min, max) => min + Math.floor(rng() * Math.max(1, max - min + 1));
+  const aProp = terrainAt(attacker.x, attacker.y) ?? 0;
+  const dProp = terrainAt(defender.x, defender.y) ?? 0;
+  const aTile = rawTileAt(attacker.x, attacker.y) ?? 0;
+  const dTile = rawTileAt(defender.x, defender.y) ?? 0;
+
+  const strike = resolveOriginalDamage({
+    attacker: {
+      rawFieldD: attacker.atkMin, rawFieldE: attacker.atkMax,
+      rawFieldG: attacker.hp, rawFieldA: attacker.xp || 0,
+      rawD: attacker.atkMin, rawE: attacker.atkMax, rawF: attacker.defense,
+    },
+    defender: {
+      rawFieldF: defender.defense, rawFieldG: defender.hp,
+      rawD: defender.atkMin, rawE: defender.atkMax, rawF: defender.defense,
+    },
+    attackLookup: roll,
+    attackerModifier: attackModifierFor(attacker, defender, attacker.x, attacker.y, aProp, aTile),
+    defenderModifier: defenseModifierFor(defender, defender.x, defender.y, dProp, dTile),
+  });
+
+  defender.hp = strike.defenderFieldG;
+  attacker.xp = strike.attackerFieldA;
+  // Dire Wolf (type 5) inflicts poison (status |= 1, c.java:202-208)
+  if (attacker.type === 5 && defender.hp > 0) defender.status = (defender.status || 0) | 1;
+
+  let attackerLeveled = applyLevelUp(attacker);
+  let counterDamage = 0;
+  let defenderLeveled = false;
+
+  if (defender.hp <= 0) {
+    defender.hp = 0;
+    defender.action = 3; // Tombstone (i.java:3545)
+    defender.tombTimer = defender.type === 9 ? 0 : 2;
+  } else if (canCounterattack(defender, attacker.x, attacker.y)) {
+    const counter = resolveOriginalDamage({
+      attacker: {
+        rawFieldD: defender.atkMin, rawFieldE: defender.atkMax,
+        rawFieldG: defender.hp, rawFieldA: defender.xp || 0,
+        rawD: defender.atkMin, rawE: defender.atkMax, rawF: defender.defense,
+      },
+      defender: {
+        rawFieldF: attacker.defense, rawFieldG: attacker.hp,
+        rawD: attacker.atkMin, rawE: attacker.atkMax, rawF: attacker.defense,
+      },
+      attackLookup: roll,
+      attackerModifier: attackModifierFor(defender, attacker, defender.x, defender.y, dProp, dTile),
+      defenderModifier: defenseModifierFor(attacker, attacker.x, attacker.y, aProp, aTile),
+    });
+    counterDamage = counter.damage;
+    attacker.hp = counter.defenderFieldG;
+    defender.xp = counter.attackerFieldA;
+    if (defender.type === 5 && attacker.hp > 0) attacker.status = (attacker.status || 0) | 1;
+    defenderLeveled = applyLevelUp(defender);
+    if (attacker.hp <= 0) {
+      attacker.hp = 0;
+      attacker.action = 3;
+      attacker.tombTimer = attacker.type === 9 ? 0 : 2;
+    }
+  }
+
+  return { damage: strike.damage, counterDamage, attackerLeveled, defenderLeveled };
+}
+
+// Port of c.java:180-196: experience threshold & +2/+2/+2 stat promotion up to level 9
+export function applyLevelUp(unit) {
+  let leveled = false;
+  while ((unit.level || 0) < 9) {
+    const weight = unit.atkMin + unit.atkMax + unit.defense;
+    const needed = idiv(weight * 100 * 2, 3);
+    if (needed <= 0 || (unit.xp || 0) < needed) break;
+    unit.xp -= needed;
+    unit.level = (unit.level || 0) + 1;
+    unit.atkMin += 2;
+    unit.atkMax += 2;
+    unit.defense += 2;
+    leveled = true;
+  }
+  return leveled;
+}
+
+// Port of c.java:248-278: Manhattan attack range check [minRange, maxRange]
+export function getAttackableTargets(unit, units, teamForPlayer) {
+  const minR = unit.minRange ?? 1;
+  const maxR = unit.maxRange ?? 1;
+  // Catapult (minRange > 1) cannot fire after moving in AE2 unless still at start position
+  if (minR > 1 && unit.movedThisTurn) return [];
+  return units.filter(other => {
+    if (other.id === unit.id || other.action === 3 || other.hp <= 0) return false;
+    if (teamForPlayer(other.playerSelector) === teamForPlayer(unit.playerSelector)) return false;
+    const dist = Math.abs(other.x - unit.x) + Math.abs(other.y - unit.y);
+    return dist >= minR && dist <= maxR;
+  });
+}
+
+// Port of i.java:3591-3600: capture & repair predicates
+export function getTileActionForUnit(unit, rawTile, terrainProp, myPalette) {
+  const tile = s8(rawTile);
+  const mask = unit.movementMask || 0;
+  const ownerPal = buildingPaletteFromTile(tile);
+  if ((mask & 8) !== 0 && terrainProp === 8 && tile < FIRST_BUILDING_TILE) return 'repair';
+  if ((mask & 8) !== 0 && terrainProp === 8 && tile >= FIRST_BUILDING_TILE && ownerPal !== myPalette) return 'capture';
+  if ((mask & 16) !== 0 && terrainProp === 9 && tile >= FIRST_BUILDING_TILE && ownerPal !== myPalette) return 'capture';
+  return null;
+}
+
+// Port of i.java:3533-3589 & i.java:2290-2301: turn advance, income (+30/+50), tombstones, Wisp aura, & +20 HP healing
+export function advancePlayerTurn({
+  playerIndex,
+  playerCount,
+  turnCount,
+  playerModes,
+  playerPositions,
+  units,
+  propertyOwnerAt,
+  terrainPropertyAt,
+  balances,
+}) {
   const nextTurn = s16(turnCount + 1);
   playerPositions[playerIndex] = playerPositions[playerIndex] ?? [0, 0];
   let nextPlayer = (playerIndex + 1) % playerCount;
   let skipped = 0;
-  while (playerModes[nextPlayer] === 2 && skipped < playerCount) { nextPlayer = (nextPlayer + 1) % playerCount; skipped++; }
+  while (playerModes[nextPlayer] === 2 && skipped < playerCount) {
+    nextPlayer = (nextPlayer + 1) % playerCount;
+    skipped++;
+  }
+
+  // Tombstone decay, status expiry, & reset unit action flags (i.java:3543-3558)
+  for (let i = units.length - 1; i >= 0; i--) {
+    const unit = units[i];
+    if (unit.action === 3 || unit.rawStatus === 3) {
+      if (unit.type !== 9 && typeof unit.tombTimer === 'number') {
+        unit.tombTimer -= 1;
+        if (unit.tombTimer <= 0) units.splice(i, 1);
+      }
+      continue;
+    }
+    unit.action = 0;
+    unit.rawStatus = 0;
+    unit.rawTurnCounter = 0;
+    unit.movedThisTurn = false;
+    if (unit.playerSelector === nextPlayer + 1) {
+      // Clear expired poison/aura at start of owner's turn
+      unit.status = (unit.status || 0) & ~3;
+    }
+  }
+
+  // Wisp (type 4) grants +10 attack aura (status |= 2) to adjacent allies (c.java:223)
+  for (const wisp of units) {
+    if (wisp.action === 3 || wisp.type !== 4 || wisp.playerSelector !== nextPlayer + 1) continue;
+    for (const ally of units) {
+      if (ally.action === 3 || ally.playerSelector !== wisp.playerSelector) continue;
+      if (Math.abs(ally.x - wisp.x) + Math.abs(ally.y - wisp.y) === 1) {
+        ally.status = (ally.status || 0) | 2;
+      }
+    }
+  }
+
+  // Income scan: owned village (prop 8) = +30, owned castle (prop 9) = +50 (i.java:3559-3572)
   let income = 0;
   for (let x = 0; x < propertyOwnerAt.width; x++) {
     for (let y = 0; y < propertyOwnerAt.height; y++) {
@@ -146,6 +361,72 @@ export function advancePlayerTurn({ playerIndex, playerCount, turnCount, playerM
     }
   }
   balances[nextPlayer] = (balances[nextPlayer] ?? 0) + income;
-  for (const unit of units) if (unit.rawStatus !== 3) { unit.rawStatus = 0; unit.rawTurnCounter = 0; }
-  return { playerIndex: nextPlayer, turnCount: nextTurn, income };
+
+  // Turn-start healing (+20 HP on Temple prop 7 or owned Village/Castle, i.java:2290-2301)
+  const healed = [];
+  for (const unit of units) {
+    if (unit.action === 3 || unit.playerSelector !== nextPlayer + 1 || unit.hp >= 100) continue;
+    const prop = terrainPropertyAt(unit.x, unit.y);
+    const onHealTile = prop === 7 || propertyOwnerAt(unit.x, unit.y, nextPlayer);
+    if (!onHealTile) continue;
+    const amt = Math.min(20, 100 - unit.hp);
+    unit.hp += amt;
+    healed.push({ unitId: unit.id, x: unit.x, y: unit.y, amount: amt });
+  }
+
+  return { playerIndex: nextPlayer, turnCount: nextTurn, income, healed };
+}
+
+// Port of i.java:3774-4260 (strategic AI action scoring: capture > combat > advance toward objectives)
+export function chooseAiUnitAction({ unit, units, map, terrainAt, unitAt, teamForPlayer, myPalette }) {
+  const reach = calculateReachability({
+    unit,
+    width: map.width,
+    height: map.height,
+    terrainAt,
+    unitAt,
+    teamForPlayer,
+  });
+  const candidatePositions = [[unit.x, unit.y], ...reach.cells];
+  let best = null;
+
+  const enemies = units.filter(u => u.action !== 3 && u.hp > 0 && teamForPlayer(u.playerSelector) !== teamForPlayer(unit.playerSelector));
+
+  for (const [cx, cy] of candidatePositions) {
+    const moved = cx !== unit.x || cy !== unit.y;
+    const rawTile = s8(map.tiles[cx][cy]);
+    const prop = terrainAt(cx, cy) ?? 0;
+    const defBonus = TERRAIN_DEFENSE_BY_PROPERTY[prop] ?? 0;
+
+    // 1. Capture / Repair highest priority (i.java:3783-3824)
+    const tileAct = getTileActionForUnit(unit, rawTile, prop, myPalette);
+    if (tileAct) {
+      const score = (prop === 9 ? 2600 : 1800) + defBonus;
+      if (!best || score > best.score) best = { kind: tileAct, x: cx, y: cy, score };
+    }
+
+    // 2. Attack any enemy reachable from (cx, cy)
+    const virtualUnit = { ...unit, x: cx, y: cy, movedThisTurn: moved };
+    const targets = getAttackableTargets(virtualUnit, units, teamForPlayer);
+    for (const target of targets) {
+      const estAtk = idiv(unit.atkMin + unit.atkMax, 2);
+      const estDef = target.defense + (TERRAIN_DEFENSE_BY_PROPERTY[terrainAt(target.x, target.y) ?? 0] ?? 0);
+      const estDmg = Math.max(0, Math.min(target.hp, idiv((estAtk - estDef) * unit.hp, 100)));
+      const killBonus = estDmg >= target.hp ? 900 : 0;
+      const kingBonus = target.type === 9 ? 400 : 0;
+      const score = 1000 + estDmg * 12 + killBonus + kingBonus + defBonus * 2;
+      if (!best || score > best.score) best = { kind: 'attack', x: cx, y: cy, targetId: target.id, score };
+    }
+
+    // 3. Otherwise advance toward nearest enemy or unowned village/castle
+    let minEnemyDist = 999;
+    for (const en of enemies) {
+      const d = Math.abs(en.x - cx) + Math.abs(en.y - cy);
+      if (d < minEnemyDist) minEnemyDist = d;
+    }
+    const moveScore = 400 - minEnemyDist * 18 + defBonus * 2 + (moved ? 10 : 0);
+    if (!best || moveScore > best.score) best = { kind: 'move', x: cx, y: cy, score: moveScore };
+  }
+
+  return best || { kind: 'wait', x: unit.x, y: unit.y, score: 0 };
 }
