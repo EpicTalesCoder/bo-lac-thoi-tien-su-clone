@@ -4,6 +4,8 @@ Hệ thống Monorepo hợp nhất **nền tảng dịch ngược REA** (`src/`,
 
 > **Tài liệu bắt buộc cho cộng tác viên & AI Agent**:
 > - Hướng dẫn Decompile & Port 1:1 giống mã nguồn gốc: [docs/J2ME_DECOMPILE_FIDELITY_GUIDE.md](docs/J2ME_DECOMPILE_FIDELITY_GUIDE.md)
+> - Bộ 4 Prompt mẫu copy-paste để AI port game mới giống gốc: [docs/PROMPT_TEMPLATE_NEW_GAME.md](docs/PROMPT_TEMPLATE_NEW_GAME.md)
+> - Script chuẩn bị bằng chứng tự động (1 lệnh): `python3 tools/prepare-j2me-evidence.py <slug>`
 > - Kiến trúc Monorepo & Lộ trình phát triển: [docs/PROJECT_DESIGN_AND_ROADMAP.md](docs/PROJECT_DESIGN_AND_ROADMAP.md)
 > - Quy tắc & Skill cho AI Agent: [AGENTS.md](AGENTS.md), [.agents/rules/j2me-port-fidelity.md](.agents/rules/j2me-port-fidelity.md), [.agents/skills/j2me-reverse-and-web-port/SKILL.md](.agents/skills/j2me-reverse-and-web-port/SKILL.md)
 
