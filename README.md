@@ -2,7 +2,10 @@
 
 Hệ thống Monorepo hợp nhất **nền tảng dịch ngược REA** (`src/`, `bridge/`, `AGENTS.md`, `docs/`) và các tựa game J2ME (`.jar` MIDP 2.0) chuyển đổi trực tiếp sang **HTML5 Canvas + ES Modules + Web Audio API + Multiplayer 4 người / Discord Activity**.
 
-> **Tài liệu kiến trúc & định hướng phát triển cho cộng tác viên / AI Agent**: xem [docs/PROJECT_DESIGN_AND_ROADMAP.md](docs/PROJECT_DESIGN_AND_ROADMAP.md) và [AGENTS.md](AGENTS.md).
+> **Tài liệu bắt buộc cho cộng tác viên & AI Agent**:
+> - Hướng dẫn Decompile & Port 1:1 giống mã nguồn gốc: [docs/J2ME_DECOMPILE_FIDELITY_GUIDE.md](docs/J2ME_DECOMPILE_FIDELITY_GUIDE.md)
+> - Kiến trúc Monorepo & Lộ trình phát triển: [docs/PROJECT_DESIGN_AND_ROADMAP.md](docs/PROJECT_DESIGN_AND_ROADMAP.md)
+> - Quy tắc & Skill cho AI Agent: [AGENTS.md](AGENTS.md), [.agents/rules/j2me-port-fidelity.md](.agents/rules/j2me-port-fidelity.md), [.agents/skills/j2me-reverse-and-web-port/SKILL.md](.agents/skills/j2me-reverse-and-web-port/SKILL.md)
 
 ---
 

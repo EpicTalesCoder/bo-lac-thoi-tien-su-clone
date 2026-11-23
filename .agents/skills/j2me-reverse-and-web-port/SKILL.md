@@ -84,4 +84,7 @@ This skill distills practical lessons learned from reverse-engineering and porti
    - `python3 tools/build-portal.py`
    - Verify no oversized files (>25MB / JDK downloads / emulator capture dumps) are staged.
 
-For detailed bug case studies and concrete code patterns, read [references/pitfalls-and-patterns.md](./references/pitfalls-and-patterns.md).
+For detailed bug case studies and concrete code patterns, read:
+- [references/decompile-to-source-parity.md](./references/decompile-to-source-parity.md) — exact Java MIDP 2.0 → JS translation helpers (`drawRegionMIDP`, signed byte/short, BSprite/Macrospace/HandyGames pack patterns, citation discipline).
+- [references/pitfalls-and-patterns.md](./references/pitfalls-and-patterns.md) — real bugs encountered in this monorepo and their verified fixes.
+- [docs/J2ME_DECOMPILE_FIDELITY_GUIDE.md](../../../docs/J2ME_DECOMPILE_FIDELITY_GUIDE.md) — full Vietnamese guide for humans & AI agents.
