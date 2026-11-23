@@ -57,5 +57,24 @@
       "Menu + GIỚI THIỆU + TRỢ GIÚP tiếng Việt · nhạc MP3 gốc + SFX",
       "2.884 sprite PNG + 55 audio decode từ GLLib BSprite"
     ]
+  },
+  {
+    "slug": "ancient-empires-2",
+    "title": "Ancient Empires II",
+    "originalTitle": "Ancient Empires II",
+    "vendor": "Macrospace",
+    "resolution": "240×320",
+    "genre": "Chiến thuật theo lượt",
+    "jarFile": "games/ancient-empires-2/original/ancient-empires-2.jar",
+    "playUrl": "./games/ancient-empires-2/web-port/index.html",
+    "directGameUrl": "./games/ancient-empires-2/web-port/index.html",
+    "coverImage": "./games/ancient-empires-2/web-port/assets/splash.png",
+    "status": "in-progress",
+    "features": [
+      "Phaser 3 · artwork, prologue, campaign story and Temple Raiders map from original JAR",
+      "First campaign map and unit placements decoded from original resources",
+      "Playable reconstruction slice: unit selection, movement highlights, movement and basic combat",
+      "Offline only · original score upload and level-download network calls disabled"
+    ]
   }
 ]
