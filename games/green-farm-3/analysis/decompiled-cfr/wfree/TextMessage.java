@@ -11,3 +11,4 @@ extends Message {
 
     public void setPayloadText(String var1);
 }
+

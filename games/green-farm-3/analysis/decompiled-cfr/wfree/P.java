@@ -17,3 +17,4 @@ public class P {
         return mIDlet.platformRequest(string);
     }
 }
+

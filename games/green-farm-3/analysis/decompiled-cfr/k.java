@@ -382,9 +382,9 @@ CommandListener {
 
     private static String[] a(byte[] byArray) {
         String[] stringArray = new String[k.a(byArray)];
-        for (int i = 0; i < stringArray.length; ++i) {
+        for (int i2 = 0; i2 < stringArray.length; ++i2) {
             int n = k.a(byArray);
-            stringArray[i] = new String(byArray, N, n);
+            stringArray[i2] = new String(byArray, N, n);
             N += n;
         }
         return stringArray;
@@ -523,15 +523,15 @@ CommandListener {
         object = ((String)object).toUpperCase();
         boolean bl = false;
         int n = aj;
-        char c = (char)ak;
-        if (n >= c && n == 320) {
+        char c2 = (char)ak;
+        if (n >= c2 && n == 320) {
             bl = true;
         }
         object = ((String)object).toCharArray();
         for (n = 0; n < ((Object)object).length; ++n) {
-            c = (char)object[n];
-            if (bl && c == '\n') continue;
-            string = string + c;
+            c2 = (char)object[n];
+            if (bl && c2 == '\n') continue;
+            string = string + c2;
         }
         return string;
     }
@@ -584,8 +584,8 @@ CommandListener {
     private static boolean c() {
         block10: {
             boolean bl = false;
-            for (int i = 0; i < a.length; ++i) {
-                if (!a[i].equals("SP")) continue;
+            for (int i2 = 0; i2 < a.length; ++i2) {
+                if (!a[i2].equals("SP")) continue;
                 bl = true;
             }
             if (!bl) {
@@ -635,17 +635,17 @@ CommandListener {
 
     private static int a() {
         int n = 0;
-        for (int i = 0; i < b.length; ++i) {
-            if (!b[i]) continue;
+        for (int i2 = 0; i2 < b.length; ++i2) {
+            if (!b[i2]) continue;
             ++n;
         }
         return n;
     }
 
     private static int b() {
-        for (int i = 0; i < b.length; ++i) {
-            if (!b[i]) continue;
-            return i;
+        for (int i2 = 0; i2 < b.length; ++i2) {
+            if (!b[i2]) continue;
+            return i2;
         }
         return -1;
     }
@@ -722,9 +722,9 @@ CommandListener {
                 }
                 case 3: {
                     f.c("/11");
-                    for (int i = 0; i < x; ++i) {
-                        if (i == t || i == v || i == u || i == w) continue;
-                        k.a[i] = k.a(i, 1);
+                    for (int i2 = 0; i2 < x; ++i2) {
+                        if (i2 == t || i2 == v || i2 == u || i2 == w) continue;
+                        k.a[i2] = k.a(i2, 1);
                     }
                     f.k();
                 }
@@ -1096,8 +1096,8 @@ lbl159:
 
     private static void a(Graphics graphics, int n, int n2, int n3, int n4, int n5) {
         int[] nArray = new int[n3 * n4];
-        for (int i = 0; i < nArray.length; ++i) {
-            nArray[i] = n5;
+        for (int i2 = 0; i2 < nArray.length; ++i2) {
+            nArray[i2] = n5;
         }
         graphics.drawRGB(nArray, 0, n3, 0, n2, n3, n4, true);
     }
@@ -1377,3 +1377,4 @@ lbl159:
         new Hashtable();
     }
 }
+

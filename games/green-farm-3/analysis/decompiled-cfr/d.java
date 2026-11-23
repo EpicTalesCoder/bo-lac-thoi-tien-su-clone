@@ -109,15 +109,15 @@ public final class d {
         this.g = null;
         this.k = null;
         if (this.a != null) {
-            for (int i = 0; i < this.a.length; ++i) {
-                this.a[i] = null;
+            for (int i2 = 0; i2 < this.a.length; ++i2) {
+                this.a[i2] = null;
             }
             this.a = null;
         }
         d d2 = this;
         if (d2.a != null) {
-            for (int i = 0; i < d2.a.length; ++i) {
-                d2.a[i] = null;
+            for (int i3 = 0; i3 < d2.a.length; ++i3) {
+                d2.a[i3] = null;
             }
             d2.a = null;
         }
@@ -200,8 +200,8 @@ public final class d {
     private void f(int n) {
         if (this.q == null) {
             this.q = new byte[n];
-            for (int i = 0; i < n; ++i) {
-                this.q[i] = 0;
+            for (int i2 = 0; i2 < n; ++i2) {
+                this.q[i2] = 0;
             }
         }
         if (this.k == null) {
@@ -385,25 +385,25 @@ public final class d {
                 this.j = new byte[n2];
             }
             this.h = new byte[n2];
-            for (int i = 0; i < n2; ++i) {
+            for (int i2 = 0; i2 < n2; ++i2) {
                 if ((this.f & 0x100000) != 0) {
-                    this.h[i] = (short)((byArray[n++] & 0xFF) + ((byArray[n++] & 0xFF) << 8));
+                    this.h[i2] = (short)((byArray[n++] & 0xFF) + ((byArray[n++] & 0xFF) << 8));
                 } else {
-                    this.g[i] = byArray[n++];
+                    this.g[i2] = byArray[n++];
                 }
                 if ((this.f & 0x400) != 0) {
                     if ((this.f & 0x400) != 0) {
-                        this.i[i] = (short)((byArray[n++] & 0xFF) + ((byArray[n++] & 0xFF) << 8));
-                        this.j[i] = (short)((byArray[n++] & 0xFF) + ((byArray[n++] & 0xFF) << 8));
+                        this.i[i2] = (short)((byArray[n++] & 0xFF) + ((byArray[n++] & 0xFF) << 8));
+                        this.j[i2] = (short)((byArray[n++] & 0xFF) + ((byArray[n++] & 0xFF) << 8));
                     } else {
-                        this.i[i] = byArray[n++];
-                        this.j[i] = byArray[n++];
+                        this.i[i2] = byArray[n++];
+                        this.j[i2] = byArray[n++];
                     }
                 } else {
-                    this.i[i] = byArray[n++];
-                    this.j[i] = byArray[n++];
+                    this.i[i2] = byArray[n++];
+                    this.j[i2] = byArray[n++];
                 }
-                this.h[i] = byArray[n++];
+                this.h[i2] = byArray[n++];
             }
         }
         return n;
@@ -425,8 +425,8 @@ public final class d {
                     short[] sArray = this.f;
                     n3 = n;
                     byte[] byArray2 = byArray;
-                    for (int i = 0; i < n2; ++i) {
-                        sArray[i] = (short)((byArray2[n3++] & 0xFF) + ((byArray2[n3++] & 0xFF) << 8));
+                    for (int i2 = 0; i2 < n2; ++i2) {
+                        sArray[i2] = (short)((byArray2[n3++] & 0xFF) + ((byArray2[n3++] & 0xFF) << 8));
                     }
                     n = n3;
                 }
@@ -474,12 +474,12 @@ public final class d {
             this.n = new byte[n2];
             this.o = new byte[n2];
             this.p = new byte[n2];
-            for (int i = 0; i < n2; ++i) {
-                this.l[i] = byArray[n++];
-                this.m[i] = byArray[n++];
-                this.n[i] = byArray[n++];
-                this.o[i] = byArray[n++];
-                this.p[i] = byArray[n++];
+            for (int i2 = 0; i2 < n2; ++i2) {
+                this.l[i2] = byArray[n++];
+                this.m[i2] = byArray[n++];
+                this.n[i2] = byArray[n++];
+                this.o[i2] = byArray[n++];
+                this.p[i2] = byArray[n++];
             }
         }
         return n;
@@ -490,9 +490,9 @@ public final class d {
         if ((n2 = (int)((byArray[n++] & 0xFF) + ((byArray[n++] & 0xFF) << 8))) > 0) {
             this.k = new byte[n2];
             this.k = new short[n2];
-            for (int i = 0; i < n2; ++i) {
-                this.k[i] = byArray[n++];
-                this.k[i] = (short)((byArray[n++] & 0xFF) + ((byArray[n++] & 0xFF) << 8));
+            for (int i2 = 0; i2 < n2; ++i2) {
+                this.k[i2] = byArray[n++];
+                this.k[i2] = (short)((byArray[n++] & 0xFF) + ((byArray[n++] & 0xFF) << 8));
             }
         }
         return n;
@@ -818,12 +818,12 @@ public final class d {
                 byte[] byArray2 = byArray;
                 n6 = n;
                 d2 = this;
-                for (int i = 0; i < d2.a; ++i) {
+                for (int i2 = 0; i2 < d2.a; ++i2) {
                     int n8;
                     int n9;
                     int n10;
-                    d2.a[n7][i] = new int[n3];
-                    int[] nArray = d2.a[n7][i];
+                    d2.a[n7][i2] = new int[n3];
+                    int[] nArray = d2.a[n7][i2];
                     if (n2 == 21781) {
                         for (n10 = 0; n10 < n3; ++n10) {
                             n9 = (short)((byArray2[n6++] & 0xFF) + ((byArray2[n6++] & 0xFF) << 8));
@@ -942,11 +942,11 @@ public final class d {
 
     final void c() {
         if (this.m >= 0) {
-            for (int i = 0; i < m[this.m]; ++i) {
-                if (a[this.m][i] != this) continue;
-                int n = a[this.m][i];
+            for (int i2 = 0; i2 < m[this.m]; ++i2) {
+                if (a[this.m][i2] != this) continue;
+                int n = a[this.m][i2];
                 int n2 = n >> 10;
-                d.a[this.m][i] = null;
+                d.a[this.m][i2] = null;
                 this.a[n2][n &= 0x3FF] = null;
             }
         }
@@ -1050,9 +1050,9 @@ public final class d {
             short[] sArray2 = sArray;
             sArray[0] = this.b[n2][0];
             sArray2[1] = this.b[n2][1];
-            for (int i = 0; i < n3; ++i) {
-                sArray2[(i << 1) + 2] = (short)object[n++];
-                sArray2[(i << 1) + 3] = (short)object[n++];
+            for (int i2 = 0; i2 < n3; ++i2) {
+                sArray2[(i2 << 1) + 2] = (short)object[n++];
+                sArray2[(i2 << 1) + 3] = (short)object[n++];
             }
             this.b[n2] = sArray2;
         }
@@ -1151,14 +1151,14 @@ public final class d {
         boolean bl5 = this.c;
         int n5 = this.g;
         int n6 = n5 & 0xFFF | (bl4 ? 4096 : 0) | (bl5 ? 8192 : 0);
-        for (int i = 0; i < n2; ++i) {
-            int n7 = string.charAt(i);
+        for (int i2 = 0; i2 < n2; ++i2) {
+            int n7 = string.charAt(i2);
             int n8 = this.q(this.p(n7));
             if (n7 == 32 || n7 == a) {
                 if (n7 == 32) {
                     s2 = (short)(s2 + (short)this.g());
                 }
-                s3 = (short)i;
+                s3 = (short)i2;
                 bl = bl4;
                 bl3 = true;
                 s4 = 0;
@@ -1174,7 +1174,7 @@ public final class d {
                     s3 = (short)(s3 + 1);
                 }
                 s3 = (short)(s3 - 1);
-                i = s3;
+                i2 = s3;
                 bl4 = bl;
                 int n9 = n3;
                 n3 = (short)(n3 + 1);
@@ -1192,9 +1192,9 @@ public final class d {
                 continue;
             }
             if (n7 == 92) {
-                char c = string.charAt(++i);
-                n8 = c;
-                if (c == '^') {
+                char c2 = string.charAt(++i2);
+                n8 = c2;
+                if (c2 == '^') {
                     bl4 = !bl4;
                     continue;
                 }
@@ -1210,11 +1210,11 @@ public final class d {
             if (n7 == 10) {
                 int n12 = n3;
                 n3 = (short)(n3 + 1);
-                d.m[n12] = (short)i;
+                d.m[n12] = (short)i2;
                 int n13 = n3;
                 n3 = (short)(n3 + 1);
                 d.m[n13] = s2;
-                s3 = (short)i;
+                s3 = (short)i2;
                 s2 = 0;
                 s4 = 0;
                 int n14 = n3;
@@ -1225,11 +1225,11 @@ public final class d {
             }
             if (n7 < 32) {
                 if (n7 == 1) {
-                    ++i;
+                    ++i2;
                     continue;
                 }
                 if (n7 != 2) continue;
-                ++i;
+                ++i2;
             }
             n8 += this.h();
             if (bl4) {
@@ -1240,7 +1240,7 @@ public final class d {
             n7 = !bl3 ? 1 : 0;
             if (n7 != 0) {
                 s2 = (short)(s2 - (short)n8);
-                s3 = (short)(i - 1);
+                s3 = (short)(i2 - 1);
             }
             bl3 = false;
             for (n8 = (int)s3; n8 >= 0 && (string.charAt(n8) == ' ' || string.charAt(n8) == '\n' || string.charAt(n8) == a); --n8) {
@@ -1268,7 +1268,7 @@ public final class d {
             n5 = n4;
             n6 = n4 & 0xFFF | (bl ? 4096 : 0) | (bl2 ? 8192 : 0);
             s2 = 0;
-            i = s3;
+            i2 = s3;
             bl4 = bl;
         }
         int n18 = n3;
@@ -1470,15 +1470,15 @@ public final class d {
             if (x >= 0 && n5 > x) {
                 n5 = x;
             }
-            for (int i = n6; i < n5; ++i) {
+            for (int i2 = n6; i2 < n5; ++i2) {
                 int n10;
                 int n11;
                 int n12;
-                int n13 = bl3 ? string2.charAt(i) : null[i];
+                int n13 = bl3 ? string2.charAt(i2) : null[i2];
                 if (n13 == 92) {
-                    char c = bl3 ? string2.charAt(i) : null[++i];
-                    n6 = c;
-                    if (c == '_') {
+                    char c2 = bl3 ? string2.charAt(i2) : null[++i2];
+                    n6 = c2;
+                    if (c2 == '_') {
                         ((d)object).c = !((d)object).c;
                         continue;
                     }
@@ -1509,9 +1509,9 @@ public final class d {
                         continue;
                     }
                     if (n13 == 1) {
-                        char c = bl3 ? string2.charAt(i) : null[++i];
-                        n6 = c;
-                        if (c < ((d)object).a) {
+                        char c3 = bl3 ? string2.charAt(i2) : null[++i2];
+                        n6 = c3;
+                        if (c3 < ((d)object).a) {
                             ((d)object).d(n6);
                         }
                         if (n6 != 255) continue;
@@ -1519,8 +1519,8 @@ public final class d {
                         continue;
                     }
                     if (n13 != 2) continue;
-                    ++i;
-                    n12 = bl3 ? (int)string2.charAt(i) : null[i];
+                    ++i2;
+                    n12 = bl3 ? (int)string2.charAt(i2) : null[i2];
                 }
                 n13 = n12;
                 ((d)object).a((Graphics)string, n13, n10, n3, 0);
@@ -1638,9 +1638,9 @@ public final class d {
             b = false;
         }
         int n4 = this.j(n2);
-        for (int i = 0; i < n4; ++i) {
-            int n5 = this.b(n2, i);
-            if ((this.c(n2, i) & 0x10) != 0) {
+        for (int i2 = 0; i2 < n4; ++i2) {
+            int n5 = this.b(n2, i2);
+            if ((this.c(n2, i2) & 0x10) != 0) {
                 this.a(n, n5, n3);
                 continue;
             }
@@ -1796,9 +1796,9 @@ public final class d {
     final void b(Graphics graphics, int n, int n2, int n3, int n4) {
         int n5 = this.j(n);
         if (n5 > 0) {
-            for (int i = 0; i < n5; ++i) {
+            for (int i2 = 0; i2 < n5; ++i2) {
                 int n6;
-                int n7 = i;
+                int n7 = i2;
                 Graphics graphics2 = graphics;
                 d d2 = this;
                 int n8 = d2.d(n, n7);
@@ -1825,7 +1825,7 @@ public final class d {
                     n9 = -n9 - n10;
                 }
                 if ((n4 & 2) != 0) {
-                    n7 = d.i[n7 & 7] | n7 & 0xFFFFFFF8;
+                    n7 = i[n7 & 7] | n7 & 0xFFFFFFF8;
                     n14 = -n14 - n11;
                 }
                 if ((n4 & 4) != 0) {
@@ -2273,3 +2273,4 @@ public final class d {
         x = -1;
     }
 }
+

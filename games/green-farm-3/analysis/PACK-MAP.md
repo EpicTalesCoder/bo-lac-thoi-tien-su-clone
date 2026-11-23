@@ -115,9 +115,11 @@ Total PNGs emitted & verified: **2884** (packs 2, 5, 7, 8, 11).
    level / text resources). Identify their loaders in `f.java` callers.
 2. Skipped blocks in pack 2 (b5) and pack 11 (b12, b13): unknown sub-format,
    possibly compressed (`19 e3 01 f1` head) or table data.
-3. Frames/anims are parsed for counts only — frames (FModule composition) and
-   animations are not yet exported (no atlas/JSON). Needed for a playable web
-   port.
+3. Full frame/animation composition metadata is exported to `analysis/frames/`
+   by `tools/decode_image.py --metadata-only` (schema and provenance notes in
+   `FRAMES-README.md`). This preserves module/FModule/frame and animation tables,
+   but does not name semantic assets or render atlases. World-data call sites still
+   need to be traced before assigning a frame to a character/crop/UI element.
 4. Per-module palette byte (`flag 0x4`) never observed in this jar; palette 0
    is always used. Second palettes (pack5#1 has nPalettes=2) are parsed but
    unused — expose via `--palette N` if needed.

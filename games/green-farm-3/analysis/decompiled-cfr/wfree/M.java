@@ -107,3 +107,4 @@ MultipartMessage {
     public void setSubject(String string) {
     }
 }
+

@@ -42,3 +42,4 @@ extends Message {
 
     public void setSubject(String var1);
 }
+

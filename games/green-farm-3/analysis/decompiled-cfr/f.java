@@ -137,11 +137,11 @@ implements Runnable {
         U = 320;
         a = new byte[d];
         b = new byte[d];
-        long l = System.currentTimeMillis();
+        long l2 = System.currentTimeMillis();
         if (a == null) {
-            a = new Random(l);
+            a = new Random(l2);
         } else {
-            a.setSeed(l);
+            a.setSeed(l2);
         }
         S = 0;
         new Thread(this).start();
@@ -166,10 +166,10 @@ implements Runnable {
     public void showNotify() {
         f f2 = this;
         if (a) {
-            long l;
-            a = l = System.currentTimeMillis();
-            c = l;
-            f2.b = l;
+            long l2;
+            a = l2 = System.currentTimeMillis();
+            c = l2;
+            f2.b = l2;
             a = false;
             f2.a();
             if (!b) {
@@ -199,9 +199,9 @@ implements Runnable {
                 f f2 = this;
                 if (!a) {
                     f2.repaint();
-                    long l = System.currentTimeMillis();
-                    f2.b = Math.min(f2.b, l);
-                    Thread.sleep(Math.max(1L, (long)a - (l - f2.b)));
+                    long l2 = System.currentTimeMillis();
+                    f2.b = Math.min(f2.b, l2);
+                    Thread.sleep(Math.max(1L, (long)a - (l2 - f2.b)));
                     f2.b = System.currentTimeMillis();
                     continue;
                 }
@@ -224,18 +224,18 @@ implements Runnable {
         }
         b = true;
         if (S != -1) {
-            for (int i = 0; i < d; ++i) {
-                f.a[i] = b[i];
-                if (b[i] == 0) continue;
-                if (b[i] < 0) {
-                    f.b[i] = 0;
+            for (int i2 = 0; i2 < d; ++i2) {
+                f.a[i2] = b[i2];
+                if (b[i2] == 0) continue;
+                if (b[i2] < 0) {
+                    f.b[i2] = 0;
                     continue;
                 }
-                if (b[i] >= 126) continue;
-                int n = i;
+                if (b[i2] >= 126) continue;
+                int n = i2;
                 b[n] = (byte)(b[n] + 1);
-                if (i < 18) continue;
-                int n2 = i;
+                if (i2 < 18) continue;
+                int n2 = i2;
                 b[n2] = -b[n2];
             }
             if (c > 0) {
@@ -334,9 +334,9 @@ implements Runnable {
 
     public static void j() {
         if (a != null && b != null) {
-            for (int i = 0; i < d; ++i) {
-                f.a[i] = 0;
-                f.b[i] = 0;
+            for (int i2 = 0; i2 < d; ++i2) {
+                f.a[i2] = 0;
+                f.b[i2] = 0;
             }
         }
     }
@@ -487,8 +487,8 @@ implements Runnable {
                     int n3 = (((InputStream)object).read() & 0xFF) + ((((InputStream)object).read() & 0xFF) << 8);
                     ((InputStream)object).available();
                     c = new int[n3];
-                    for (int i = 0; i < n3; ++i) {
-                        f.c[i] = n = (((InputStream)object).read() & 0xFF) + ((((InputStream)object).read() & 0xFF) << 8) + ((((InputStream)object).read() & 0xFF) << 16) + ((((InputStream)object).read() & 0xFF) << 24);
+                    for (int i2 = 0; i2 < n3; ++i2) {
+                        f.c[i2] = n = (((InputStream)object).read() & 0xFF) + ((((InputStream)object).read() & 0xFF) << 8) + ((((InputStream)object).read() & 0xFF) << 16) + ((((InputStream)object).read() & 0xFF) << 24);
                     }
                     k = c[0];
                 } else {
@@ -767,15 +767,15 @@ implements Runnable {
         return n;
     }
 
-    static int a(byte[] byArray, int n, long l) {
-        byArray[n++] = (byte)(l & 0xFFL);
-        byArray[n++] = (byte)(l >>> 8 & 0xFFL);
-        byArray[n++] = (byte)(l >>> 16 & 0xFFL);
-        byArray[n++] = (byte)(l >>> 24 & 0xFFL);
-        byArray[n++] = (byte)(l >>> 32 & 0xFFL);
-        byArray[n++] = (byte)(l >>> 40 & 0xFFL);
-        byArray[n++] = (byte)(l >>> 48 & 0xFFL);
-        byArray[n++] = (byte)(l >>> 56 & 0xFFL);
+    static int a(byte[] byArray, int n, long l2) {
+        byArray[n++] = (byte)(l2 & 0xFFL);
+        byArray[n++] = (byte)(l2 >>> 8 & 0xFFL);
+        byArray[n++] = (byte)(l2 >>> 16 & 0xFFL);
+        byArray[n++] = (byte)(l2 >>> 24 & 0xFFL);
+        byArray[n++] = (byte)(l2 >>> 32 & 0xFFL);
+        byArray[n++] = (byte)(l2 >>> 40 & 0xFFL);
+        byArray[n++] = (byte)(l2 >>> 48 & 0xFFL);
+        byArray[n++] = (byte)(l2 >>> 56 & 0xFFL);
         return n;
     }
 
@@ -929,9 +929,9 @@ implements Runnable {
 
     static String a(byte[] byArray) {
         StringBuffer stringBuffer = new StringBuffer(byArray.length << 1);
-        for (int i = 0; i < byArray.length; ++i) {
-            stringBuffer.append(a[byArray[i] >> 4 & 0xF]);
-            stringBuffer.append(a[byArray[i] & 0xF]);
+        for (int i2 = 0; i2 < byArray.length; ++i2) {
+            stringBuffer.append(a[byArray[i2] >> 4 & 0xF]);
+            stringBuffer.append(a[byArray[i2] & 0xF]);
         }
         return stringBuffer.toString();
     }
@@ -980,8 +980,8 @@ implements Runnable {
         }
         n = objectArray.length << 2;
         byte[] byArray2 = new byte[n];
-        for (int i = 0; i < n; ++i) {
-            byArray2[i] = (byte)(objectArray[i >>> 2] >>> ((i & 3) << 3));
+        for (int i2 = 0; i2 < n; ++i2) {
+            byArray2[i2] = (byte)(objectArray[i2 >>> 2] >>> ((i2 & 3) << 3));
         }
         return byArray2;
     }
@@ -1055,8 +1055,8 @@ implements Runnable {
                 f.e[n] = 1024;
             }
             f.b[n] = new int[e[n] + 1];
-            for (int i = 1; i < e[n] + 1; ++i) {
-                f.b[n][i] = f.c(inputStream);
+            for (int i2 = 1; i2 < e[n] + 1; ++i2) {
+                f.b[n][i2] = f.c(inputStream);
             }
             f.a[n] = new byte[b[n][e[n]]];
             f.b(inputStream, a[n], 0, a[n].length);
@@ -1098,8 +1098,8 @@ implements Runnable {
     }
 
     static void l() {
-        for (int i = 0; i < 32; ++i) {
-            f.n(i);
+        for (int i2 = 0; i2 < 32; ++i2) {
+            f.n(i2);
         }
     }
 
@@ -1116,9 +1116,9 @@ implements Runnable {
         }
     }
 
-    static String a(long l, int n, String string) {
-        if (l < 1000L) {
-            return "" + l;
+    static String a(long l2, int n, String string) {
+        if (l2 < 1000L) {
+            return "" + l2;
         }
         String string2 = "";
         switch (n) {
@@ -1147,33 +1147,33 @@ implements Runnable {
             case 4: 
             case 6: 
             case 10: {
-                if (l < 10000L) break;
+                if (l2 < 10000L) break;
                 string2 = string;
                 break;
             }
             case 11: 
             case 14: {
-                if (l < 10000L) break;
+                if (l2 < 10000L) break;
                 string2 = ".";
                 break;
             }
             default: {
-                return "" + l;
+                return "" + l2;
             }
         }
         String string3 = "";
-        long l2 = l % 1000L < 0L ? -(l % 1000L) : l % 1000L;
-        l /= 1000L;
-        while (l2 != 0L || l != 0L) {
-            string3 = l2 < 10L ? "00" + (l2 < 0L ? -l2 : l2) + string3 : (l2 < 100L ? "0" + (l2 < 0L ? -l2 : l2) + string3 : (l2 < 0L ? -l2 : l2) + string3);
-            l2 = l % 1000L;
-            if ((l /= 1000L) != 0L) {
+        long l3 = l2 % 1000L < 0L ? -(l2 % 1000L) : l2 % 1000L;
+        l2 /= 1000L;
+        while (l3 != 0L || l2 != 0L) {
+            string3 = l3 < 10L ? "00" + (l3 < 0L ? -l3 : l3) + string3 : (l3 < 100L ? "0" + (l3 < 0L ? -l3 : l3) + string3 : (l3 < 0L ? -l3 : l3) + string3);
+            l3 = l2 % 1000L;
+            if ((l2 /= 1000L) != 0L) {
                 string3 = string2 + string3;
                 continue;
             }
-            if (l2 == 0L) continue;
-            string3 = l2 + string2 + string3;
-            l2 = 0L;
+            if (l3 == 0L) continue;
+            string3 = l3 + string2 + string3;
+            l3 = 0L;
         }
         return string3;
     }
@@ -1783,7 +1783,7 @@ implements Runnable {
         int n13 = 0;
         int n14 = 0;
         int n15 = 0;
-        for (int i = 0; i < n8; ++i) {
+        for (int i2 = 0; i2 < n8; ++i2) {
             int n16 = n10;
             while (--n16 >= 0) {
                 nArray[n15] = n6;
@@ -1931,3 +1931,4 @@ implements Runnable {
         d = 0L;
     }
 }
+

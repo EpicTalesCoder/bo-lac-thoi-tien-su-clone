@@ -397,8 +397,8 @@ implements Runnable {
                                         block47: {
                                             if (!b) break block43;
                                             if (n3 == -1) {
-                                                for (int k = 0; k < l; ++k) {
-                                                    i.a(graphics, n, n2, k);
+                                                for (int i2 = 0; i2 < l; ++i2) {
+                                                    i.a(graphics, n, n2, i2);
                                                 }
                                                 return;
                                             }
@@ -616,8 +616,8 @@ implements Runnable {
             return;
         }
         if (n5 == -1) {
-            for (int k = 0; k < l; ++k) {
-                i.a(n, n2, n3, n4, k);
+            for (int i2 = 0; i2 < l; ++i2) {
+                i.a(n, n2, n3, n4, i2);
             }
             return;
         }
@@ -1122,12 +1122,12 @@ implements Runnable {
                 n34 = nArray2[2] - n16;
                 n35 = nArray2[3] - n19;
             }
-            for (int k = 0; k < 1; ++k) {
+            for (int i2 = 0; i2 < 1; ++i2) {
                 n16 = n4;
                 n19 = n5;
                 int n36 = n17;
                 int n37 = n18;
-                for (int i2 = 0; i2 < 1; ++i2) {
+                for (int i3 = 0; i3 < 1; ++i3) {
                     int n38 = n16;
                     int n39 = n19;
                     int n40 = n36;
@@ -1385,3 +1385,4 @@ implements Runnable {
         p = 100;
     }
 }
+

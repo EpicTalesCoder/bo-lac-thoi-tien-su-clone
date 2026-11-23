@@ -290,8 +290,8 @@ public final class l {
                 c = new Vector();
                 d = new Vector();
                 for (n = 0; n < d.length; ++n) {
-                    for (int i = 1; i <= j; ++i) {
-                        String string2 = l.d("IAP-ContentID-" + d[n] + "-" + i);
+                    for (int i2 = 1; i2 <= j; ++i2) {
+                        String string2 = l.d("IAP-ContentID-" + d[n] + "-" + i2);
                         if (string2 == null || string2.equals("")) continue;
                         b.addElement(string2);
                     }
@@ -300,11 +300,11 @@ public final class l {
                 for (n = 0; n < b.size(); ++n) {
                     String string3 = (String)b.elementAt(n);
                     boolean bl = false;
-                    for (int i = n + 1; i < b.size(); ++i) {
-                        if (!b.elementAt(i).equals(string3)) continue;
+                    for (int i3 = n + 1; i3 < b.size(); ++i3) {
+                        if (!b.elementAt(i3).equals(string3)) continue;
                         bl = true;
-                        b.removeElementAt(i);
-                        --i;
+                        b.removeElementAt(i3);
+                        --i3;
                     }
                     if (!bl) continue;
                     b.removeElementAt(n);
@@ -358,9 +358,9 @@ public final class l {
             String string = a[0][2];
             String string2 = a[0][3];
             bl = true;
-            for (int i = 1; i < a.length; ++i) {
-                String string3 = a[i][2];
-                String string4 = a[i][3];
+            for (int i2 = 1; i2 < a.length; ++i2) {
+                String string3 = a[i2][2];
+                String string4 = a[i2][3];
                 if (string.equals(string3) && string2.equals(string4)) continue;
                 bl = false;
                 break;
@@ -755,8 +755,8 @@ public final class l {
             new StringBuffer().append("PaySMS.detectCarrier: Carrier selection skipped, only one carrier: ").append(b[e]);
             for (n = 0; n < a.length; ++n) {
                 if (a[n][2].indexOf(d[f][0]) == -1) continue;
-                for (int i = 0; i < a[n].size(); ++i) {
-                    if (((String)a[n].elementAt(i)).indexOf(b[e]) == -1) continue;
+                for (int i2 = 0; i2 < a[n].size(); ++i2) {
+                    if (((String)a[n].elementAt(i2)).indexOf(b[e]) == -1) continue;
                     a.addElement(new Integer(n));
                 }
             }
@@ -805,9 +805,9 @@ public final class l {
                 l.b[n4] = b[n4].trim();
             }
             int[] nArray = new int[n2];
-            for (int i = 0; i < n2; ++i) {
-                nArray[i] = i;
-                new StringBuffer().append("PaySMS.detectCarrier: carrierNames[").append(i).append("]: ").append(b[i]);
+            for (int i3 = 0; i3 < n2; ++i3) {
+                nArray[i3] = i3;
+                new StringBuffer().append("PaySMS.detectCarrier: carrierNames[").append(i3).append("]: ").append(b[i3]);
             }
         }
         return false;
@@ -838,12 +838,12 @@ public final class l {
             return true;
         }
         n = c.length;
-        for (int i = 0; i < n - 1; ++i) {
-            for (int k = i + 1; k < n; ++k) {
-                if (c[i].compareTo(c[k]) <= 0) continue;
-                String string = c[i];
-                l.c[i] = c[k];
-                l.c[k] = string;
+        for (int i2 = 0; i2 < n - 1; ++i2) {
+            for (int i3 = i2 + 1; i3 < n; ++i3) {
+                if (c[i2].compareTo(c[i3]) <= 0) continue;
+                String string = c[i2];
+                l.c[i2] = c[i3];
+                l.c[i3] = string;
             }
         }
         return false;
@@ -883,11 +883,11 @@ public final class l {
 
     private static String[][] a(String string) {
         Vector<String[]> vector = new Vector<String[]>();
-        for (int i = 0; i < a.length; ++i) {
-            if (a[i][2].indexOf(string) == -1) continue;
-            for (int k = 0; k < a[i].size(); ++k) {
-                String string2 = (String)a[i].elementAt(k);
-                String string3 = a[i][0];
+        for (int i2 = 0; i2 < a.length; ++i2) {
+            if (a[i2][2].indexOf(string) == -1) continue;
+            for (int i3 = 0; i3 < a[i2].size(); ++i3) {
+                String string2 = (String)a[i2].elementAt(i3);
+                String string3 = a[i2][0];
                 if (string2 == null) continue;
                 int n = string2.indexOf(40);
                 if (n == -1) {
@@ -925,8 +925,8 @@ public final class l {
         }
         int n2 = -1;
         if (l.f() == 0) {
-            for (int i = 0; i < a.size(); ++i) {
-                int n3 = (Integer)a.elementAt(i);
+            for (int i2 = 0; i2 < a.size(); ++i2) {
+                int n3 = (Integer)a.elementAt(i2);
                 try {
                     if (Integer.parseInt(a[n3][14]) != n) continue;
                     n2 = n3;
@@ -935,9 +935,9 @@ public final class l {
                 catch (Exception exception) {}
             }
         } else {
-            for (int i = 0; i < b.length; ++i) {
-                if (!b[i][0].equals(z)) continue;
-                return b[i][9];
+            for (int i3 = 0; i3 < b.length; ++i3) {
+                if (!b[i3][0].equals(z)) continue;
+                return b[i3][9];
             }
         }
         new StringBuffer().append("PaySMS.getPrice: profileIndex: ").append(n2);
@@ -977,7 +977,7 @@ public final class l {
             n4 = 2;
         } else if (n2 > 2) {
             n4 = 5;
-            for (int i = 0; i < n2 - 3; ++i) {
+            for (int i2 = 0; i2 < n2 - 3; ++i2) {
                 n4 *= 10;
             }
         }
@@ -991,15 +991,15 @@ public final class l {
 
     private static String a(int n, int n2) {
         if (l.f() == 0) {
-            for (int i = 0; i < a.size(); ++i) {
-                int n3 = (Integer)a.elementAt(i);
+            for (int i2 = 0; i2 < a.size(); ++i2) {
+                int n3 = (Integer)a.elementAt(i2);
                 if (!a[n3][14].equals(String.valueOf(n2))) continue;
                 return a[n3][n];
             }
         } else {
-            for (int i = 0; i < b.length; ++i) {
-                if (!b[i][0].equals(z)) continue;
-                return b[i][n];
+            for (int i3 = 0; i3 < b.length; ++i3) {
+                if (!b[i3][0].equals(z)) continue;
+                return b[i3][n];
             }
         }
         return "";
@@ -1023,8 +1023,8 @@ public final class l {
         }
         int n2 = 0;
         boolean bl = false;
-        for (int i = 0; i < a.size(); ++i) {
-            int n3 = (Integer)a.elementAt(i);
+        for (int i2 = 0; i2 < a.size(); ++i2) {
+            int n3 = (Integer)a.elementAt(i2);
             try {
                 if (Integer.parseInt(a[n3][14]) != n) continue;
                 n2 = n3;
@@ -1158,17 +1158,17 @@ public final class l {
             block3: {
                 n2 = -1;
                 if (!string.equals("Cash")) break block3;
-                for (int i = 0; i < c.size(); ++i) {
-                    if ((Integer)c.elementAt(i) != n) continue;
-                    n2 = i;
+                for (int i2 = 0; i2 < c.size(); ++i2) {
+                    if ((Integer)c.elementAt(i2) != n) continue;
+                    n2 = i2;
                     break block2;
                 }
                 break block2;
             }
             if (!string.equals("Coin")) break block2;
-            for (int i = 0; i < d.size(); ++i) {
-                if ((Integer)d.elementAt(i) != n) continue;
-                n2 = i;
+            for (int i3 = 0; i3 < d.size(); ++i3) {
+                if ((Integer)d.elementAt(i3) != n) continue;
+                n2 = i3;
                 break;
             }
         }
@@ -1190,11 +1190,11 @@ public final class l {
         if (string == null || string.length() == 0) {
             return "";
         }
-        for (int i = 0; i < c.length; ++i) {
-            if (c[i] == null) continue;
-            new StringBuffer().append("PaySMS.retrieveTermsAndConditions: profilesTexts[").append(i).append("][TEXT_PROFILE_ID] = '").append(c[i][0]).append("'");
-            if (!l.b(c[i][0], string)) continue;
-            return c[i][1];
+        for (int i2 = 0; i2 < c.length; ++i2) {
+            if (c[i2] == null) continue;
+            new StringBuffer().append("PaySMS.retrieveTermsAndConditions: profilesTexts[").append(i2).append("][TEXT_PROFILE_ID] = '").append(c[i2][0]).append("'");
+            if (!l.b(c[i2][0], string)) continue;
+            return c[i2][1];
         }
         return "";
     }
@@ -1270,8 +1270,8 @@ public final class l {
             i = 8;
             return false;
         }
-        for (int i = 0; i < stringArray3.length; ++i) {
-            new StringBuffer().append("PaySMS.loadProfileConfiguration: profilesArgs[").append(i).append("]: ").append(stringArray3[i]);
+        for (int i2 = 0; i2 < stringArray3.length; ++i2) {
+            new StringBuffer().append("PaySMS.loadProfileConfiguration: profilesArgs[").append(i2).append("]: ").append(stringArray3[i2]);
         }
         String[] stringArray4 = stringArray2;
         int n2 = 0;
@@ -1447,15 +1447,15 @@ public final class l {
             return null;
         }
         Vector<Object> vector = new Vector<Object>();
-        for (int i = 0; i < a.length; ++i) {
-            stringArray = a[i][2];
+        for (int i2 = 0; i2 < a.length; ++i2) {
+            stringArray = a[i2][2];
             n2 = 0;
             for (n = 0; n2 == 0 && n < vector.size(); ++n) {
                 if (!l.b((String)stringArray, (String)vector.elementAt(n))) continue;
                 n2 = 1;
             }
             if (n2 != 0) continue;
-            stringArray = a[i][2];
+            stringArray = a[i2][2];
             vector.addElement(stringArray);
         }
         if (e != null && j && vector.size() > 1) {
@@ -1468,33 +1468,33 @@ public final class l {
         stringArray = new String[objectArray.length][2];
         n2 = 0;
         n = 0;
-        for (int i = 0; i < objectArray.length; ++i) {
-            String[] stringArray2 = objectArray[i];
+        for (int i3 = 0; i3 < objectArray.length; ++i3) {
+            String[] stringArray2 = objectArray[i3];
             int n3 = stringArray2.indexOf(40);
             if (n3 != -1) {
-                stringArray[i][0] = stringArray2.substring(0, n3);
+                stringArray[i3][0] = stringArray2.substring(0, n3);
                 int n4 = stringArray2.indexOf(58, ++n3);
                 l.e(a[8]);
                 if (n4 != -1) {
-                    stringArray[i][1] = stringArray2.substring(n3, n4);
-                    if (f != null && f.startsWith(stringArray[i][1], 1) && n2 <= n4 - n3) {
+                    stringArray[i3][1] = stringArray2.substring(n3, n4);
+                    if (f != null && f.startsWith(stringArray[i3][1], 1) && n2 <= n4 - n3) {
                         n2 = n4 - n3;
-                        d = i;
+                        d = i3;
                         new StringBuffer().append("currentAutoDetectedRegion ").append(d);
                         String[] stringArray3 = new String[2];
                         stringArray2 = stringArray3;
-                        stringArray3[0] = stringArray[i][0];
-                        stringArray2[1] = stringArray[i][1];
+                        stringArray3[0] = stringArray[i3][0];
+                        stringArray2[1] = stringArray[i3][1];
                         vector.addElement(stringArray2);
                         ++n;
                     }
                 }
             } else {
-                stringArray[i][0] = stringArray2;
-                stringArray[i][1] = "";
+                stringArray[i3][0] = stringArray2;
+                stringArray[i3][1] = "";
             }
-            new StringBuffer().append("PaySMS.getProfilesRegions:          regionsConfig[").append(i).append("][REGION_NAME]: ").append(stringArray[i][0]);
-            new StringBuffer().append("PaySMS.getProfilesRegions:          regionsConfig[").append(i).append("][REGION_CODE]: ").append(stringArray[i][1]);
+            new StringBuffer().append("PaySMS.getProfilesRegions:          regionsConfig[").append(i3).append("][REGION_NAME]: ").append(stringArray[i3][0]);
+            new StringBuffer().append("PaySMS.getProfilesRegions:          regionsConfig[").append(i3).append("][REGION_CODE]: ").append(stringArray[i3][1]);
         }
         if (n > 1) {
             d = -1;
@@ -1609,8 +1609,8 @@ public final class l {
 
     private static void b(Vector vector) {
         String string = "";
-        for (int i = 0; i < vector.size(); ++i) {
-            string = string + vector.elementAt(i) + ";";
+        for (int i2 = 0; i2 < vector.size(); ++i2) {
+            string = string + vector.elementAt(i2) + ";";
         }
         new StringBuffer().append("PaySMS.storeProfileID: ").append(string);
         l.a(a[3], String.valueOf(string));
@@ -1634,8 +1634,8 @@ public final class l {
             return false;
         }
         int n = string2.length();
-        for (int i = 0; i <= string.length() - n; ++i) {
-            if (!l.b(string.substring(i, i + n), string2)) continue;
+        for (int i2 = 0; i2 <= string.length() - n; ++i2) {
+            if (!l.b(string.substring(i2, i2 + n), string2)) continue;
             return true;
         }
         return false;
@@ -1643,15 +1643,15 @@ public final class l {
 
     private static String[] a(String[] stringArray) {
         Vector<String> vector = new Vector<String>();
-        for (int i = 0; i < stringArray.length; ++i) {
+        for (int i2 = 0; i2 < stringArray.length; ++i2) {
             boolean bl = false;
-            for (int k = 0; k < i; ++k) {
-                if (!stringArray[i].equals(stringArray[k])) continue;
+            for (int i3 = 0; i3 < i2; ++i3) {
+                if (!stringArray[i2].equals(stringArray[i3])) continue;
                 bl = true;
                 break;
             }
             if (bl) continue;
-            vector.addElement(stringArray[i]);
+            vector.addElement(stringArray[i2]);
         }
         Object[] objectArray = new String[vector.size()];
         vector.copyInto(objectArray);
@@ -1729,8 +1729,8 @@ public final class l {
             if (a == null) {
                 return 0;
             }
-            for (int i = 0; i < a.size(); ++i) {
-                int n2 = (Integer)a.elementAt(i);
+            for (int i2 = 0; i2 < a.size(); ++i2) {
+                int n2 = (Integer)a.elementAt(i2);
                 try {
                     if (Integer.parseInt(a[n2][14]) != n) continue;
                     long l2 = l.a(a[n2][9]);
@@ -1939,3 +1939,4 @@ public final class l {
         a = (char)46;
     }
 }
+

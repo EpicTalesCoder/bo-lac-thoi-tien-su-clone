@@ -34,6 +34,11 @@ d.java specifics mirrored here:
 Usage:
   python3 decode_image.py --pack analysis/recovered/5 --outdir web-port/assets/sprites/pack5
                          [--palette N] [--summary FILE] [--max-blocks N]
+  python3 decode_image.py --pack analysis/recovered/5 --metadata-only --summary analysis/pack5-frames.json
+
+Frame metadata preserves source module/FModule indices, signed offsets and flags,
+frame bounds/rect references, and raw animation-frame records. It does not assign
+semantic names to frames or claim a frame is a particular character or crop.
 """
 import argparse
 import json
@@ -70,6 +75,14 @@ class Reader:
             ((d[p + 2] & 0xFF) << 16) | ((d[p + 3] & 0xFF) << 24)
         self.pos += 4
         return v
+
+    def i8(self):
+        value = self.u8()
+        return value - 0x100 if value & 0x80 else value
+
+    def i16(self):
+        value = self.u16()
+        return value - 0x10000 if value & 0x8000 else value
 
     def skip(self, n):
         self.pos += n
@@ -220,47 +233,84 @@ def parse_sprite(data):
         modules.append(m)
     s["modules"] = modules
 
-    # ---- frames: FM table (d.java b(int, byte[])) ----
+    # ---- frames: FModule table (d.java b(int, byte[])) ----
     tnfm = raw.u16()
     s["tnfm"] = tnfm
+    frame_modules = []
     for _ in range(tnfm):
-        raw.u16() if flags & 0x100000 else raw.u8()          # FM index
+        module_index = raw.u16() if flags & 0x100000 else raw.u8()
         if flags & 0x400:
-            raw.u16(); raw.u16()                              # ox, oy
+            offset_x, offset_y = raw.i16(), raw.i16()
         else:
-            raw.u8(); raw.u8()
-        raw.u8()                                             # FM flags
+            offset_x, offset_y = raw.i8(), raw.i8()
+        frame_modules.append({
+            "module_index": module_index,
+            "offset_x": offset_x,
+            "offset_y": offset_y,
+            "flags": raw.u8(),
+        })
+    s["frame_modules"] = frame_modules
 
-    # ---- frames: rects + frame table + bound rects (d.java c(int, byte[])) ----
+    # ---- frames: rects + frame table + bounds (d.java c(int, byte[])) ----
+    frame_rects = []
     if flags & 0x8000:
         tnfr = raw.u16()
         s["tnfr"] = tnfr
-        raw.skip(tnfr * 8 if flags & 0x400 else tnfr * 4)
+        for _ in range(tnfr):
+            if flags & 0x400:
+                frame_rects.append([raw.i16(), raw.i16(), raw.u16(), raw.u16()])
+            else:
+                frame_rects.append([raw.i8(), raw.i8(), raw.u8(), raw.u8()])
+    s["frame_rects"] = frame_rects
+
     nf = raw.u16()
     s["nf"] = nf
-    if nf > 0:
-        for _ in range(nf):
-            s.setdefault("frame_nm", []).append(raw.u16() if flags & 0x800 else raw.u8())
-            raw.u16()                                        # first FM index
-            if flags & 0x8000:
-                raw.u8()                                     # rect count
-        if not flags & 0x1000:
-            for _ in range(nf):
-                if flags & 0x400:
-                    raw.skip(8)
-                else:
-                    raw.skip(4)
+    frames = []
+    next_rect = 0
+    for _ in range(nf):
+        module_count = raw.u16() if flags & 0x800 else raw.u8()
+        first_module = raw.u16()
+        rect_count = raw.u8() if flags & 0x8000 else 0
+        frames.append({
+            "first_frame_module": first_module,
+            "frame_module_count": module_count,
+            "first_frame_rect": next_rect if rect_count else None,
+            "frame_rect_count": rect_count,
+        })
+        next_rect += rect_count
+    s["frames"] = frames
+    if flags & 0x8000 and next_rect != len(frame_rects):
+        s["warnings"].append(
+            f"frame rect references total {next_rect}, table has {len(frame_rects)} entries")
 
-    # ---- anims (d.java d()/e()) ----
+    bounds = []
+    if nf > 0 and not flags & 0x1000:
+        for _ in range(nf):
+            if flags & 0x400:
+                bounds.append({
+                    "x": raw.i16(), "y": raw.i16(),
+                    "width": raw.u16(), "height": raw.u16(),
+                })
+            else:
+                bounds.append({
+                    "x": raw.i8(), "y": raw.i8(),
+                    "width": raw.u8(), "height": raw.u8(),
+                })
+    s["frame_bounds"] = bounds
+
+    # ---- animations (d.java d()/e()) ----
     tnaf = raw.u16()
     s["tnaf"] = tnaf
-    raw.skip(tnaf * 5)
+    s["animation_frames"] = [
+        [raw.u8(), raw.u8(), raw.u8(), raw.u8(), raw.u8()]
+        for _ in range(tnaf)
+    ]
     na = raw.u16()
     s["na"] = na
-    if na > 0:
-        for _ in range(na):
-            raw.u8()   # nAFrames
-            raw.u16()  # first AFrame index
+    s["animations"] = [
+        {"frame_count": raw.u8(), "first_animation_frame": raw.u16()}
+        for _ in range(na)
+    ]
 
     # ---- module image data (d.java a(int, byte[], int)) ----
     s["has_image_data"] = bool(flags & 0x1000000)
@@ -269,15 +319,10 @@ def parse_sprite(data):
         s["pixel_format"] = pixel_format
         if pixel_format not in PIXEL_FORMATS:
             raise ValueError(f"unsupported pixel format 0x{pixel_format:04X}")
-        # Empirically verified across packs 5/10/11: the image-data section is
-        #   [u8 nPalettes][u8 nc = colors per palette]
-        #   [nPalettes x nc x color]
-        # (block5#1 has nPalettes=2, nc=16 -> data format lands exactly on
-        #  0x1600 and the following interleaved sizes walk to the block end).
-        # The nc byte ALSO drives the I64RLE run table:
-        #   tableBits = bit_length(nc - 1), tableMask = (1 << bits) - 1
-        # (nc=49 -> bits=6, mask=63; exact-fit verified against module
-        #  payloads: consumed == len(payload) and pixels == w*h).
+        # Empirically verified across the game's split packs: image data stores
+        # [u8 palette count][u8 colors per palette][palette colors]. This
+        # representation is retained because it decodes all source blocks to
+        # exact payload and pixel counts; bytecode field aliases are ambiguous.
         n_pal = raw.u8()
         nc = raw.u8()
         bits = (nc - 1).bit_length() if nc > 1 else 0
@@ -360,23 +405,35 @@ def decode_module(sprite, mod_idx, palette_idx=0):
 
 def main():
     import argparse  # noqa: F811
-    try:
-        from PIL import Image
-    except ImportError:
-        print("ERROR: Pillow required (pip install pillow)", file=sys.stderr)
-        return 2
 
     ap = argparse.ArgumentParser(description="GLLib BSprite pack decoder")
     ap.add_argument("--pack", required=True, type=pathlib.Path)
-    ap.add_argument("--outdir", required=True, type=pathlib.Path)
+    ap.add_argument("--outdir", type=pathlib.Path)
     ap.add_argument("--palette", type=int, default=0)
     ap.add_argument("--max-blocks", type=int, default=None)
     ap.add_argument("--summary", type=pathlib.Path, default=None,
-                    help="write JSON summary for PACK-MAP generation")
+                    help="write JSON summary or full frame metadata")
+    ap.add_argument("--metadata-only", action="store_true",
+                    help="export frame/animation metadata without decoding PNGs")
+    ap.add_argument("--quiet", action="store_true",
+                    help="suppress per-block progress output")
     args = ap.parse_args()
+    if args.metadata_only and args.summary is None:
+        ap.error("--metadata-only requires --summary")
+    if not args.metadata_only and args.outdir is None:
+        ap.error("--outdir is required unless --metadata-only is used")
+
+    Image = None
+    if not args.metadata_only:
+        try:
+            from PIL import Image
+        except ImportError:
+            print("ERROR: Pillow required (pip install pillow)", file=sys.stderr)
+            return 2
 
     pk = Pack(args.pack)
-    args.outdir.mkdir(parents=True, exist_ok=True)
+    if args.outdir is not None:
+        args.outdir.mkdir(parents=True, exist_ok=True)
     pack_name = args.pack.name
 
     summary = {
@@ -390,6 +447,7 @@ def main():
         "pixel_formats": {},
         "data_formats": {},
         "pngs": [],
+        "frames_by_block": [],
         "errors": [],
         "rle_bits": set(),
         "recovered_bits": [],
@@ -401,53 +459,66 @@ def main():
         if len(blk) < 2 or ((blk[0] & 0xFF) | ((blk[1] & 0xFF) << 8)) != BSPRITE_MAGIC:
             summary["skipped_blocks"].append(
                 {"block": b, "len": len(blk), "head": blk[:8].hex()})
-            print(f"[{pack_name}] block {b:3d}: SKIPPED (magic={blk[:4].hex()})")
+            if not args.quiet:
+                print(f"[{pack_name}] block {b:3d}: SKIPPED (magic={blk[:4].hex()})")
             continue
         try:
             sp = parse_sprite(blk)
         except Exception as e:  # noqa: BLE001 — log and continue per-block
             summary["errors"].append({"block": b, "error": str(e)})
-            print(f"[{pack_name}] block {b:3d}: PARSE ERROR {e}")
+            if not args.quiet:
+                print(f"[{pack_name}] block {b:3d}: PARSE ERROR {e}")
             continue
         summary["sprite_blocks"] += 1
         summary["modules"] += sp["nm"]
         summary["frames"] += sp["nf"]
         summary["anims"] += sp["na"]
+        if args.metadata_only:
+            summary["frames_by_block"].append({"block": b, **{
+                key: sp[key] for key in (
+                    "flags", "modules", "frame_modules", "frame_rects", "frames",
+                    "frame_bounds", "animation_frames", "animations",
+                ) if key in sp
+            }})
         if sp.get("has_image_data"):
             pf = f"0x{sp['pixel_format']:04X}"
             df = "I64RLE" if sp["data_format"] == 25840 else "I16"
             summary["pixel_formats"][pf] = summary["pixel_formats"].get(pf, 0) + 1
             summary["data_formats"][df] = summary["data_formats"].get(df, 0) + 1
             summary["rle_bits"].update(sp.get("rle_bits", []))
-        for mi, m in enumerate(sp["modules"]):
-            if m["type"] != 0x00 or not sp.get("has_image_data"):
-                continue
-            try:
-                pixels, w, h, info = decode_module(sp, mi, args.palette)
-            except Exception as e:
-                summary["errors"].append(
-                    {"block": b, "module": mi, "error": str(e)})
-                print(f"[{pack_name}] block {b:3d} module {mi}: DECODE ERROR {e}")
-                continue
-            name = f"{pack_name}_b{b:03d}_m{mi:02d}.png"
-            img = Image.frombytes("RGBA", (w, h), argb_to_rgba(pixels))
-            img.save(args.outdir / name)
-            summary["pngs"].append({"file": name, "w": w, "h": h,
-                                    "block": b, "module": mi,
-                                    "consumed": info["consumed"],
-                                    "data_len": len(sp["payloads"][mi])})
-            if "recovered_bits" in info:
-                summary["recovered_bits"].append(
-                    {"block": b, "module": mi, "bits": info["recovered_bits"]})
-        print(f"[{pack_name}] block {b:3d}: OK nm={sp['nm']} nf={sp['nf']} "
-              f"na={sp['na']} fmt=0x{sp.get('pixel_format', 0):04X}/"
-              f"{sp.get('data_format', 0)}")
+        if not args.metadata_only:
+            for mi, m in enumerate(sp["modules"]):
+                if m["type"] != 0x00 or not sp.get("has_image_data"):
+                    continue
+                try:
+                    pixels, w, h, info = decode_module(sp, mi, args.palette)
+                except Exception as e:
+                    summary["errors"].append(
+                        {"block": b, "module": mi, "error": str(e)})
+                    if not args.quiet:
+                        print(f"[{pack_name}] block {b:3d} module {mi}: DECODE ERROR {e}")
+                    continue
+                name = f"{pack_name}_b{b:03d}_m{mi:02d}.png"
+                img = Image.frombytes("RGBA", (w, h), argb_to_rgba(pixels))
+                img.save(args.outdir / name)
+                summary["pngs"].append({"file": name, "w": w, "h": h,
+                                        "block": b, "module": mi,
+                                        "consumed": info["consumed"],
+                                        "data_len": len(sp["payloads"][mi])})
+                if "recovered_bits" in info:
+                    summary["recovered_bits"].append(
+                        {"block": b, "module": mi, "bits": info["recovered_bits"]})
+        if not args.quiet:
+            print(f"[{pack_name}] block {b:3d}: OK nm={sp['nm']} nf={sp['nf']} "
+                  f"na={sp['na']} fmt=0x{sp.get('pixel_format', 0):04X}/"
+                  f"{sp.get('data_format', 0)}")
 
     summary["rle_bits"] = sorted(summary["rle_bits"])
     ok = len(summary["pngs"])
-    print(f"[{pack_name}] DONE: {summary['sprite_blocks']} sprites, "
-          f"{ok} PNGs, {len(summary['skipped_blocks'])} skipped, "
-          f"{len(summary['errors'])} errors -> {args.outdir}")
+    if not args.quiet:
+        print(f"[{pack_name}] DONE: {summary['sprite_blocks']} sprites, "
+              f"{ok} PNGs, {len(summary['skipped_blocks'])} skipped, "
+              f"{len(summary['errors'])} errors -> {args.outdir}")
     if args.summary:
         args.summary.write_text(json.dumps(summary, indent=1))
     return 0

@@ -28,14 +28,20 @@ test('mapKeyCode: mũi tên/WASD -> MIDP, digit -> số, lạ -> null', () => {
 });
 
 /* ---------- luồng state ---------- */
-test('boot: khởi tạo ở SPLASH, phím bất kỳ -> MENU', () => {
+test('boot: source story IDs 0 and 1 display before menu navigation', () => {
+  const data = JSON.parse(readFileSync(path.join(PORT, 'assets', 'text', 'en.json'), 'utf8'));
   let g = core.newGame();
   assert.equal(g.state, core.STATES.SPLASH);
   g = core.handleKey(g, core.KEY.FIRE);
+  assert.equal(g.state, core.STATES.INTRO);
+  assert.equal(core.text(data, g.text), data.page_0['0']);
+  assert.equal(core.handleKey(g, core.KEY.DOWN).openingStoryIndex, 0);
+  g = core.handleKey(g, core.KEY.FIRE);
+  assert.equal(core.text(data, g.text), data.page_0['1']);
+  g = core.handleKey(g, core.KEY.FIRE);
   assert.equal(g.state, core.STATES.MENU);
   assert.equal(g.menuIndex, 0);
-  // trong menu thì FIRE chọn item, không quay về splash
-  assert.equal(core.handleKey(g, core.KEY.FIRE).state, core.STATES.FARM); // item đầu = CHƠI TIẾP
+  assert.equal(core.handleKey(g, core.KEY.FIRE).state, core.STATES.FARM);
 });
 
 test('menu: lên/xuống wrap quanh 5 mục, thứ tự đúng nhãn text', () => {
@@ -112,17 +118,18 @@ test('sprites khai báo trong game.js tồn tại trên đĩa', () => {
   const m = src.match(/const SPRITES = \{([\s\S]*?)\};/);
   assert.ok(m, 'SPRITES block');
   const paths = [...m[1].matchAll(/'([^']+)'/g)].map((x) => x[1]);
-  assert.ok(paths.length >= 3, 'ít nhất 3 sprite');
+  assert.equal(paths.length, 1, 'icon image; source-mapped scene is decoded from the original BSprite pack');
   for (const p of paths) {
     accessSync(path.join(PORT, p), constants.R_OK);
   }
+  assert.match(src, /decodeBSpriteBlock\(readPackBlock\(pack, 100\)\)/);
 });
 
 test('assets audio + sprite packs còn nguyên từ Phase A', () => {
   const audio = readdirSync(path.join(PORT, 'assets', 'audio'));
   assert.ok(audio.length === 55, `55 audio, thấy ${audio.length}`);
   const spritesDir = path.join(PORT, 'assets', 'sprites');
-  const packs = readdirSync(spritesDir);
+  const packs = readdirSync(spritesDir).filter((name) => name.startsWith('pack'));
   assert.deepEqual(packs.sort(), ['pack11', 'pack2', 'pack5', 'pack7', 'pack8']);
 });
 

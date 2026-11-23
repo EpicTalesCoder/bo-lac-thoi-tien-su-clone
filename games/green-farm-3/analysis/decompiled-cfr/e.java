@@ -117,8 +117,8 @@ final class e {
     }
 
     static void a() {
-        for (int k = 0; k < 5; ++k) {
-            int n = k;
+        for (int i2 = 0; i2 < 5; ++i2) {
+            int n = i2;
             e e2 = a[n];
             while (e2 != null) {
                 e e3 = e2.a;
@@ -176,16 +176,16 @@ final class e {
                         break;
                     }
                     case 50: {
-                        long l;
+                        long l2;
                         e e4 = e2;
                         if (e4.y == 18) break;
                         if ((e4.y == 12 || e4.y == 11) && a.N == 0 && e4.a(512)) {
-                            l = System.currentTimeMillis() / 1000L - e4.a;
-                            if (l < 86400L && a.d == e4) {
-                                a.a((int)l, 86400);
-                                e4.K = a.a((int)(86400L - l));
+                            l2 = System.currentTimeMillis() / 1000L - e4.a;
+                            if (l2 < 86400L && a.d == e4) {
+                                a.a((int)l2, 86400);
+                                e4.K = a.a((int)(86400L - l2));
                             }
-                            if (e4.a || l < 86400L) break;
+                            if (e4.a || l2 < 86400L) break;
                             e4.a = true;
                             e4.j(16);
                             int[] nArray = new int[]{e4.r, e4.s, 150, 10, 7, -31, -58, 0, 1};
@@ -195,7 +195,7 @@ final class e {
                             break;
                         }
                         if (e4.y == 15) {
-                            i i2 = e4.a;
+                            i i3 = e4.a;
                             if (a.c()) {
                                 if (e4.P >= 0) {
                                     e4.P -= f.V;
@@ -213,7 +213,7 @@ final class e {
                             } else if (e4.a != null) {
                                 e4.a = null;
                             }
-                            if (i2 == e4.a) break;
+                            if (i3 == e4.a) break;
                             e4.H();
                             break;
                         }
@@ -283,10 +283,10 @@ final class e {
                             int[] nArray = new int[]{e4.r, e4.s, 150, 10, 7, -31, -58, 0, 1};
                             e4.a(e.a(33, 0, nArray));
                         }
-                        long l2 = System.currentTimeMillis() / 1000L;
+                        long l3 = System.currentTimeMillis() / 1000L;
                         boolean bl = false;
-                        for (int i3 = 0; !bl && i3 < a.A; ++i3) {
-                            bl = a.a[i3] > 0L && l2 < a.a[i3] + (long)a.c[i3];
+                        for (int i4 = 0; !bl && i4 < a.A; ++i4) {
+                            bl = a.a[i4] > 0L && l3 < a.a[i4] + (long)a.c[i4];
                         }
                         if (bl) {
                             if (e4.a == null) {
@@ -314,16 +314,16 @@ final class e {
                         break;
                     }
                     case 52: {
-                        long l;
+                        long l2;
                         e e4 = e2;
                         if (e4.D == 2) {
-                            l = (System.currentTimeMillis() - e4.c) / 1000L;
-                            if (l >= (long)e4.L) {
+                            l2 = (System.currentTimeMillis() - e4.c) / 1000L;
+                            if (l2 >= (long)e4.L) {
                                 e4.g(3);
                             }
                             if (a.d != e4 || e4.L == 0) break;
-                            a.a((int)l, e4.L);
-                            e4.K = a.a((int)((long)e4.L - l));
+                            a.a((int)l2, e4.L);
+                            e4.K = a.a((int)((long)e4.L - l2));
                             break;
                         }
                         if (a.d != e4) break;
@@ -382,10 +382,10 @@ final class e {
     }
 
     static void b() {
-        for (int k = 0; k < 5; ++k) {
+        for (int i2 = 0; i2 < 5; ++i2) {
             int n;
             e e2;
-            int n2 = k;
+            int n2 = i2;
             e e3 = a[n2];
             while (e3 != null) {
                 e2 = e3;
@@ -624,8 +624,8 @@ final class e {
     }
 
     static void c() {
-        for (int k = 0; k < 5; ++k) {
-            int n = k;
+        for (int i2 = 0; i2 < 5; ++i2) {
+            int n = i2;
             while (a[n] != null) {
                 a[n].e();
             }
@@ -1484,22 +1484,22 @@ final class e {
             this.b.c(f.V);
         }
         if (this.D == 3) {
-            long l = (System.currentTimeMillis() - this.b) / 1000L;
-            if (l >= (long)(this.Q / 2) && a.K != 8 && a.K != 45) {
+            long l2 = (System.currentTimeMillis() - this.b) / 1000L;
+            if (l2 >= (long)(this.Q / 2) && a.K != 8 && a.K != 45) {
                 this.f(4);
             }
             if (a.d == this && this.Q != 0) {
-                a.a((int)l, this.Q);
-                this.K = a.a((int)((long)this.Q - l));
+                a.a((int)l2, this.Q);
+                this.K = a.a((int)((long)this.Q - l2));
             }
         } else if (this.D == 4) {
-            long l = (System.currentTimeMillis() - this.b) / 1000L;
-            if (l >= (long)this.Q && (a.K < 46 || a.K > 57) && a.K != 8 && a.K != 45) {
+            long l3 = (System.currentTimeMillis() - this.b) / 1000L;
+            if (l3 >= (long)this.Q && (a.K < 46 || a.K > 57) && a.K != 8 && a.K != 45) {
                 this.f(5);
             }
             if (a.d == this && this.Q != 0) {
-                a.a((int)l, this.Q);
-                this.K = a.a((int)((long)this.Q - l));
+                a.a((int)l3, this.Q);
+                this.K = a.a((int)((long)this.Q - l3));
             }
         } else if (a.d == this) {
             a.a(false, null);
@@ -2013,44 +2013,44 @@ final class e {
             }
         }
         if (this.a(32)) {
-            long l = System.currentTimeMillis();
-            long l2 = l / 1000L - this.e;
+            long l2 = System.currentTimeMillis();
+            long l3 = l2 / 1000L - this.e;
             if (this.c && this.f > 0L) {
-                long l3 = l - this.f;
+                long l4 = l2 - this.f;
                 if (a.R == -1) {
                     a.R = g.a((int)0).a[this.y][13];
                 }
-                this.e = (int)((long)(a.R * 60) + l3 / 1000L);
+                this.e = (int)((long)(a.R * 60) + l4 / 1000L);
             } else if (a.a == null) {
                 a.R = -1;
             }
             if (this.e > 0 && a.d == this) {
-                a.a((int)l2, this.e);
-                this.K = a.a((int)((long)this.e - l2));
+                a.a((int)l3, this.e);
+                this.K = a.a((int)((long)this.e - l3));
             }
-            if (l2 >= (long)this.e) {
+            if (l3 >= (long)this.e) {
                 this.L();
             }
         } else if (!this.a(4) && !this.a(16)) {
-            long l = System.currentTimeMillis();
+            long l5 = System.currentTimeMillis();
             if (a.K == 33) {
-                this.d = l;
+                this.d = l5;
             }
-            long l4 = (l - this.d) / 1000L;
+            long l6 = (l5 - this.d) / 1000L;
             if (!this.a(256) && (a.g(20) || a.f(a.f[20]))) {
-                if (l4 > (long)(this.b * 3 / 4) && this.d > 0L && !this.j) {
+                if (l6 > (long)(this.b * 3 / 4) && this.d > 0L && !this.j) {
                     this.j = true;
                     if (!this.i && f.c(0, 100) < 35) {
                         this.i(256);
                         this.i = true;
                     }
-                } else if (l4 > (long)(this.b >> 1) && this.d > 0L && !this.k) {
+                } else if (l6 > (long)(this.b >> 1) && this.d > 0L && !this.k) {
                     this.k = true;
                     if (!this.i && f.c(0, 100) < 35) {
                         this.i(256);
                         this.i = true;
                     }
-                } else if (l4 > (long)(this.b >> 2) && this.d > 0L && !this.l) {
+                } else if (l6 > (long)(this.b >> 2) && this.d > 0L && !this.l) {
                     this.l = true;
                     if (!this.i && f.c(0, 100) < 35) {
                         this.i(256);
@@ -2058,7 +2058,7 @@ final class e {
                     }
                 }
             }
-            if (l4 >= (long)this.b && this.d != 0L) {
+            if (l6 >= (long)this.b && this.d != 0L) {
                 if (a.K == 35) {
                     a.f = true;
                 }
@@ -2068,8 +2068,8 @@ final class e {
                 }
             }
             if (a.d == this && this.b != 0) {
-                a.a((int)l4, this.b);
-                this.K = a.a((int)((long)this.b - l4));
+                a.a((int)l6, this.b);
+                this.K = a.a((int)((long)this.b - l6));
             }
         }
         if (this.a(4) && (this.c == null || this.c.q == -1)) {
@@ -2443,7 +2443,7 @@ final class e {
             if (this.ac < 3) {
                 this.X = this.Z * this.ab * n / 100;
                 this.Y = (n2 << 2) * n2 / 10000 + n2 * -40 / 100;
-                for (int k = 1; k < this.ac; ++k) {
+                for (int i2 = 1; i2 < this.ac; ++i2) {
                     this.Y = this.Y * 40 / 100;
                 }
                 if (this.Y > 0) {
@@ -3050,8 +3050,8 @@ final class e {
         a = new int[4];
         a = new int[150][];
         as = 0;
-        for (int k = 0; k < 150; ++k) {
-            e.a[k] = new int[4];
+        for (int i2 = 0; i2 < 150; ++i2) {
+            e.a[i2] = new int[4];
         }
     }
 
@@ -3258,3 +3258,4 @@ final class e {
         ai = 0;
     }
 }
+

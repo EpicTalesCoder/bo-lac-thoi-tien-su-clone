@@ -12,3 +12,4 @@ public interface Message {
 
     public Date getTimestamp();
 }
+

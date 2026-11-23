@@ -28,3 +28,4 @@ extends Connection {
 
     public void setMessageListener(MessageListener var1);
 }
+

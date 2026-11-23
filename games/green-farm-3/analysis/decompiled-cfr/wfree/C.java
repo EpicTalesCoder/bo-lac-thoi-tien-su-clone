@@ -100,3 +100,4 @@ implements MessageConnection {
     public void setMessageListener(MessageListener messageListener) {
     }
 }
+

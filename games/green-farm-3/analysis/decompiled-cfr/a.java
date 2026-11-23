@@ -2331,12 +2331,12 @@ lbl40:
         int[] nArray = new int[3];
         int n = 0;
         for (int i2 = 0; i2 < string.length(); ++i2) {
-            char c = string.charAt(i2);
-            if (c >= '0' && c <= '9') {
-                nArray[n] = nArray[n] * 10 + (c - 48);
+            char c2 = string.charAt(i2);
+            if (c2 >= '0' && c2 <= '9') {
+                nArray[n] = nArray[n] * 10 + (c2 - 48);
                 continue;
             }
-            if (c != '.') continue;
+            if (c2 != '.') continue;
             ++n;
         }
         return 0 | nArray[0] << 8 | nArray[1] << 16 | nArray[2] << 24;
@@ -2653,7 +2653,7 @@ lbl40:
     private static boolean b(boolean bl) {
         int n;
         g g2;
-        long l;
+        long l2;
         int n2;
         int n3;
         int n4;
@@ -2710,7 +2710,7 @@ lbl40:
         bv = f.a(byArray, n7 += 8);
         bP = bs;
         bQ = bt;
-        a.l = k;
+        l = k;
         bR = bv;
         by = f.a(byArray, n7 += 4);
         bB = f.a(byArray, n7 += 2);
@@ -2775,7 +2775,7 @@ lbl40:
         ++n7;
         for (n5 = 0; n5 < cF; ++n5) {
             n4 = f.a(byArray, n7);
-            long l2 = f.a(byArray, ++n7);
+            long l3 = f.a(byArray, ++n7);
             n6 = f.a(byArray, n7 += 8);
             n3 = f.a(byArray, n7 += 4);
             int n8 = f.a(byArray, n7 += 4) != 0 ? 1 : 0;
@@ -2784,7 +2784,7 @@ lbl40:
             int n10 = n4;
             n2 = n8;
             n3 = n6;
-            l = l2;
+            l2 = l3;
             n4 = n9;
             n6 = n5;
             g2 = g.a(7);
@@ -2792,7 +2792,7 @@ lbl40:
             }
             if (n >= g2.a) continue;
             a.at[n6] = n4;
-            a.b[n6] = l;
+            a.b[n6] = l2;
             a.au[n6] = g2.a[n][2];
             a.av[n6] = n3;
             a.aw[n6] = g2.a[n][15];
@@ -2806,14 +2806,14 @@ lbl40:
         ++n7;
         for (n5 = 0; n5 < A; ++n5) {
             n4 = f.a(byArray, n7);
-            long l3 = f.a(byArray, ++n7);
+            long l4 = f.a(byArray, ++n7);
             n6 = f.a(byArray, n7 += 8);
             n3 = f.a(byArray, n7 += 4);
             n7 += 4;
             int n11 = n3;
             n2 = n4;
             n3 = n6;
-            l = l3;
+            l2 = l4;
             n4 = n11;
             n6 = n5;
             g g3 = g.a(22);
@@ -2822,7 +2822,7 @@ lbl40:
             }
             if (n >= g3.a) continue;
             a.az[n6] = n4;
-            a.a[n6] = l;
+            a.a[n6] = l2;
             a.aA[n6] = g3.a[n][2];
             a.c[n6] = n3;
             a.aB[n6] = g3.a[n][12];
@@ -5194,7 +5194,7 @@ lbl40:
     private static void bq() {
         if (dd <= dh && de <= di) {
             if (cK < A) {
-                long l;
+                long l2;
                 a.a(0, db, -dd);
                 a.a(0, dc, -de);
                 int n = cX;
@@ -5207,7 +5207,7 @@ lbl40:
                 a.az[n7] = n6;
                 a.aA[n7] = n5;
                 a.c[n7] = n4;
-                a.a[n7] = l = System.currentTimeMillis() / 1000L;
+                a.a[n7] = l2 = System.currentTimeMillis() / 1000L;
                 a.aB[n7] = n3;
                 a.aC[n7] = n2;
                 a.aD[n7] = n;
@@ -5340,7 +5340,7 @@ lbl40:
     private static void bw() {
         if (ct <= cx && cu <= cy) {
             if (cH < cF) {
-                long l;
+                long l2;
                 a.a(0, cr, -ct);
                 a.a(0, cs, -cu);
                 if (aB && aA) {
@@ -5359,7 +5359,7 @@ lbl40:
                 a.at[n6] = n5;
                 a.au[n6] = n4;
                 a.av[n6] = n3;
-                a.b[n6] = l = System.currentTimeMillis() / 1000L;
+                a.b[n6] = l2 = System.currentTimeMillis() / 1000L;
                 a.aw[n6] = n2;
                 a.ax[n6] = n;
                 a.g[n6] = bl;
@@ -5476,21 +5476,21 @@ lbl40:
     }
 
     private static void B(int n) {
-        char c = a.c;
+        char c2 = c;
         int n2 = cg;
         boolean bl = false;
         g g2 = g.a(7);
         for (int i2 = 0; i2 < g2.a; ++i2) {
             if (g2.a[i2][18] != n || a.e() < g2.a[i2][5]) continue;
             bl = true;
-            d = a.c;
+            d = c;
             cE = cg;
             cg = g2.a[i2][3];
-            a.c = (char)(g2.a[i2][4] - 1);
+            c = (char)(g2.a[i2][4] - 1);
             break;
         }
         if (!bl) {
-            a.c = c;
+            c = c2;
             cg = n2;
             return;
         }
@@ -12356,13 +12356,13 @@ lbl40:
             a = Manager.createPlayer((InputStream)a[n], (String)a[n]);
             a.start();
             aw = n;
-            long l = System.currentTimeMillis();
+            long l2 = System.currentTimeMillis();
             if (n < 14) {
-                d = l;
+                d = l2;
                 c = n;
                 return;
             }
-            e = l;
+            e = l2;
             c = n;
             if (K == -1) {
                 S = true;
@@ -12391,15 +12391,15 @@ lbl40:
             Y = true;
             return;
         }
-        long l = System.currentTimeMillis();
+        long l2 = System.currentTimeMillis();
         if (S) {
-            if (l - e > 6000L) {
+            if (l2 - e > 6000L) {
                 S = false;
             }
             return;
         }
         if (!S && !Y) {
-            long l2;
+            long l3;
             int n;
             int n2;
             Y = true;
@@ -12422,12 +12422,12 @@ lbl40:
             aA = n = r[az];
             n2 = 6000;
             if (c < 14L) {
-                l2 = l - d;
+                l3 = l2 - d;
                 n2 = 24000;
             } else {
-                l2 = l - e;
+                l3 = l2 - e;
             }
-            if (l2 > (long)n2) {
+            if (l3 > (long)n2) {
                 a.X(n);
             }
             az = az < 8 ? ++az : 0;
@@ -12437,18 +12437,18 @@ lbl40:
             return;
         }
         if (!S && Y) {
-            long l3 = l - d;
-            if (l3 > 25000L) {
+            long l4 = l2 - d;
+            if (l4 > 25000L) {
                 Y = false;
             }
-            if (l3 > 10000L && l3 < 20000L) {
+            if (l4 > 10000L && l4 < 20000L) {
                 int n = f.c(64, 67);
-                if (f.c(0, 100) < 80 && l - f > 5000L) {
+                if (f.c(0, 100) < 80 && l2 - f > 5000L) {
                     if (aB != -1 && aB == n && ++n > 66) {
                         n = 64;
                     }
                     a.X(n);
-                    f = l;
+                    f = l2;
                 }
                 a.b();
             }
@@ -13659,12 +13659,12 @@ lbl180:
     private static void gY() {
         int n;
         if (ac && a.f(1, 53)) {
-            long l = System.currentTimeMillis();
-            if (g < l) {
+            long l2 = System.currentTimeMillis();
+            if (g < l2) {
                 ac = false;
                 a.a(false, fk, '\u0000');
             }
-            n = (int)((g - l) / 5L % 255L);
+            n = (int)((g - l2) / 5L % 255L);
             n = 10 + f.d(f.Z - n) / 20;
             c = (short)(a[1][52][2] + 50 + n);
             d = (short)(c + 15);
@@ -13695,11 +13695,11 @@ lbl180:
         }
     }
 
-    private static void a(boolean bl, int n, char c) {
+    private static void a(boolean bl, int n, char c2) {
         int n2 = a.a();
         if (n2 != 17 && n2 != 18 && bl) {
             ad = true;
-            a = c;
+            a = c2;
             fk = n;
             return;
         }
@@ -13707,14 +13707,14 @@ lbl180:
             ac = bl;
         } else if (bl) {
             ad = true;
-            a = c;
+            a = c2;
             bl = false;
         }
         if (bl) {
             String string;
             String string2;
             fk = n;
-            e = c == '\u0001' ? ((string2 = f.b(152)) == null ? "" : string2) : (c == '\u0002' ? ((string = f.b(153)) == null ? "" : string) : "%Task%");
+            e = c2 == '\u0001' ? ((string2 = f.b(152)) == null ? "" : string2) : (c2 == '\u0002' ? ((string = f.b(153)) == null ? "" : string) : "%Task%");
             g = System.currentTimeMillis() + 5000L;
             a.a(1, 53, true);
             a.b(1, 53, true);
@@ -15583,7 +15583,7 @@ lbl180:
     }
 
     static boolean c() {
-        long l = System.currentTimeMillis() / 1000L;
+        long l2 = System.currentTimeMillis() / 1000L;
         g g2 = g.a(8);
         g g3 = g.a(18);
         g g4 = g.a(24);
@@ -15595,27 +15595,27 @@ lbl180:
             int n4;
             int n5;
             if (a[i2][3] > 0L) {
-                long l2 = l - a[i2][3];
+                long l3 = l2 - a[i2][3];
                 n5 = d[i2][1] / d[25];
-                while (l2 >= (long)z[n5]) {
+                while (l3 >= (long)z[n5]) {
                     long[] lArray = a[i2];
                     lArray[3] = lArray[3] + (long)z[n5];
                     if ((d[ew][2] & 0x10) != 16) {
                         a.j(i2, -g4.a[n5][8]);
                     }
                     a.d[a.ew][2] = 0;
-                    l2 = l - a[i2][3];
+                    l3 = l2 - a[i2][3];
                     n5 = d[i2][1] / d[25];
                 }
             }
             if (a[i2][4] > 0L) {
                 int n6;
-                long l3;
-                if (a[ew][4] + 86400L - l <= 0L) {
+                long l4;
+                if (a[ew][4] + 86400L - l2 <= 0L) {
                     a.a[a.ew][4] = 0L;
                     break;
                 }
-                while ((l3 = l - a[i2][4]) >= (long)z[n6 = d[i2][1] / d[25]]) {
+                while ((l4 = l2 - a[i2][4]) >= (long)z[n6 = d[i2][1] / d[25]]) {
                     long[] lArray = a[i2];
                     lArray[4] = lArray[4] + (long)z[n6];
                     if ((d[ew][2] & 1) != 1) {
@@ -15624,7 +15624,7 @@ lbl180:
                     a.d[a.ew][2] = 0;
                 }
             }
-            if (a[i2][2] > 0L && l - a[i2][2] >= 86400L) {
+            if (a[i2][2] > 0L && l2 - a[i2][2] >= 86400L) {
                 int n7 = i2;
                 g g5 = g.a(18);
                 a.a[n7][2] = 0L;
@@ -15712,7 +15712,7 @@ lbl180:
                     }
                 }
             }
-            if (a[i2][5] > 0L && l - a[i2][5] >= 86400L) {
+            if (a[i2][5] > 0L && l2 - a[i2][5] >= 86400L) {
                 if (g2.a[i2][10] <= d[i2][1] && f.c(0, 100) < g2.a[i2][9]) {
                     for (n4 = g3.a - 1; n4 > 0 && g3.a[n4][12] > d[i2][1]; --n4) {
                     }
@@ -15734,7 +15734,7 @@ lbl180:
                         a.a(cG[0] + n15, 1, 31);
                     }
                 }
-                a.a[i2][5] = l;
+                a.a[i2][5] = l2;
             }
             if (!(e[n = i2][0] != 0) && d[i2][3] == -1 && d[i2][4] == -1) continue;
             bl = true;
@@ -16817,12 +16817,12 @@ lbl180:
     }
 
     static int c() {
-        long l;
-        long l2 = a.c(k);
-        if (l2 != (l = a.c(a.l))) {
-            return (int)l;
+        long l2;
+        long l3 = a.c(k);
+        if (l3 != (l2 = a.c(l))) {
+            return (int)l2;
         }
-        return (int)l2;
+        return (int)l3;
     }
 
     static int d() {
@@ -17893,13 +17893,13 @@ lbl180:
         return (n ^= bW) >> bV | n << 32 - bV;
     }
 
-    private static long b(long l) {
-        return (l << bV | l >> 64 - bV) ^ (long)bW;
+    private static long b(long l2) {
+        return (l2 << bV | l2 >> 64 - bV) ^ (long)bW;
     }
 
-    private static long c(long l) {
-        long l2 = l ^ (long)bW;
-        return l2 >> bV | l2 << 64 - bV;
+    private static long c(long l2) {
+        long l3 = l2 ^ (long)bW;
+        return l3 >> bV | l3 << 64 - bV;
     }
 
     private static void s(boolean bl) {
@@ -19248,12 +19248,12 @@ lbl180:
     }
 
     private static int z() {
-        long l;
-        long l2 = a.c(n);
-        if (l2 != (l = a.c(m))) {
-            return (int)l;
+        long l2;
+        long l3 = a.c(n);
+        if (l3 != (l2 = a.c(m))) {
+            return (int)l2;
         }
-        return (int)l2;
+        return (int)l3;
     }
 
     private static void av(int n) {
@@ -19346,8 +19346,8 @@ lbl180:
         if (b[1] == null) {
             return;
         }
-        char c = a.c;
-        as[c] = as[c] + n;
+        char c2 = c;
+        as[c2] = as[c2] + n;
         int n3 = b[1][8];
         dZ = ar[fn];
         int n4 = ar[fn] - ea >= 4 ? 4 : ar[fn] % 4;
@@ -19361,17 +19361,17 @@ lbl180:
         a.R(1);
     }
 
-    private static void a(char c) {
-        a.c = c;
-        if (c == '\u0000') {
+    private static void a(char c2) {
+        c = c2;
+        if (c2 == '\u0000') {
             a.a(22, 165, true);
             a.a(22, 166, false);
             a.a(22, 167, false);
-        } else if (c == '\u0001') {
+        } else if (c2 == '\u0001') {
             a.a(22, 165, false);
             a.a(22, 166, true);
             a.a(22, 167, false);
-        } else if (c == '\u0002') {
+        } else if (c2 == '\u0002') {
             a.a(22, 165, false);
             a.a(22, 166, false);
             a.a(22, 167, true);
@@ -20043,10 +20043,10 @@ lbl180:
                 n3 = 14 + n * 15;
                 a.a[22][n3] = string = string4;
             }
-            long l = System.currentTimeMillis() / 1000L;
+            long l2 = System.currentTimeMillis() / 1000L;
             int n5 = n + E;
             int n6 = b[0][8];
-            if (l > b[n5] + (long)av[n5]) {
+            if (l2 > b[n5] + (long)av[n5]) {
                 int n7 = 19 + n5 * 15;
                 if (!(a.f(22, n7) && a.g(22, n7) || h[n5] == 4)) {
                     a.X(32);
@@ -20060,15 +20060,15 @@ lbl180:
                 if (aN == 171) {
                     f = true;
                 }
-            } else if (l > b[n5] && l < b[n5] + (long)av[n5]) {
+            } else if (l2 > b[n5] && l2 < b[n5] + (long)av[n5]) {
                 a.b(false, n);
                 a.c(true, n);
                 a.d(true, n);
-                int n8 = av[n5] - (int)(l - b[n5]);
+                int n8 = av[n5] - (int)(l2 - b[n5]);
                 a.ay[n5] = a.a(n8);
                 a.d[n5] = a.d(n8);
                 a.h[n5] = 3;
-            } else if (l < b[n5]) {
+            } else if (l2 < b[n5]) {
                 a.b(false, n);
                 a.c(false, n);
                 a.d(true, n);
@@ -20076,7 +20076,7 @@ lbl180:
                 a.d[n5] = string == null ? "" : string;
                 a.ay[n5] = aw[n5];
                 a.h[n5] = 2;
-                a.b[n5] = l;
+                a.b[n5] = l2;
             }
             a.b[0][8] = n6;
         }
@@ -20236,9 +20236,9 @@ lbl180:
     }
 
     private static void az(int n) {
-        long l = System.currentTimeMillis() / 1000L;
+        long l2 = System.currentTimeMillis() / 1000L;
         a.av[n] = 0;
-        a.b[n] = l;
+        a.b[n] = l2;
     }
 
     /*
@@ -20326,9 +20326,9 @@ lbl180:
 
     static boolean f() {
         boolean bl = false;
-        long l = System.currentTimeMillis() / 1000L;
+        long l2 = System.currentTimeMillis() / 1000L;
         for (int i2 = 0; i2 < b.length; ++i2) {
-            if (b[i2] <= 0L || l < b[i2] + (long)av[i2]) continue;
+            if (b[i2] <= 0L || l2 < b[i2] + (long)av[i2]) continue;
             bl = true;
             break;
         }
@@ -20564,7 +20564,7 @@ lbl180:
         }
         for (n = 0; n < n2; ++n) {
             int n3;
-            long l;
+            long l2;
             if (cL + n + E < cK && n < 5) {
                 if (!aH && n + cL < cG) {
                     String string;
@@ -20583,7 +20583,7 @@ lbl180:
                 int n5 = 14 + n * 15;
                 a.a[22][n5] = string = string2;
             }
-            if ((l = System.currentTimeMillis() / 1000L) > a[n3 = n + E] + (long)c[n3]) {
+            if ((l2 = System.currentTimeMillis() / 1000L) > a[n3 = n + E] + (long)c[n3]) {
                 int n6 = 19 + n3 * 15;
                 if (!(a.f(22, n6) && a.g(22, n6) || i[n3] != 3)) {
                     a.X(36);
@@ -20598,17 +20598,17 @@ lbl180:
                 f = true;
                 continue;
             }
-            if (l > a[n3] && l < a[n3] + (long)c[n3]) {
+            if (l2 > a[n3] && l2 < a[n3] + (long)c[n3]) {
                 a.e(false, n);
                 a.f(true, n);
                 a.g(true, n);
-                int n7 = c[n3] - (int)(l - a[n3]);
+                int n7 = c[n3] - (int)(l2 - a[n3]);
                 a.aE[n3] = a.a(n7);
                 a.e[n3] = a.d(n7);
                 a.i[n3] = 3;
                 continue;
             }
-            if (l >= a[n3]) continue;
+            if (l2 >= a[n3]) continue;
             a.e(false, n);
             a.f(false, n);
             a.g(true, n);
@@ -20616,7 +20616,7 @@ lbl180:
             a.e[n3] = string == null ? "" : string;
             a.aE[n3] = aB[n3];
             a.i[n3] = 2;
-            a.a[n3] = l;
+            a.a[n3] = l2;
         }
         if (A - E < 4 && A < cG && !aH) {
             String string;
@@ -20768,9 +20768,9 @@ lbl180:
     }
 
     private static void aC(int n) {
-        long l = System.currentTimeMillis() / 1000L;
+        long l2 = System.currentTimeMillis() / 1000L;
         a.c[n] = 0;
-        a.a[n] = l;
+        a.a[n] = l2;
     }
 
     private static void e(boolean bl, int n) {
@@ -21001,8 +21001,8 @@ lbl180:
     static boolean g() {
         boolean bl = false;
         for (int i2 = 0; i2 < cG; ++i2) {
-            long l = System.currentTimeMillis() / 1000L;
-            if (a[i2] <= 0L || l <= a[i2] + (long)c[i2]) continue;
+            long l2 = System.currentTimeMillis() / 1000L;
+            if (a[i2] <= 0L || l2 <= a[i2] + (long)c[i2]) continue;
             bl = true;
             break;
         }
@@ -21656,8 +21656,8 @@ lbl180:
             } else if (h == 2) {
                 a.a[13][7 + a.O][6] = 8;
                 aK = true;
-                long l = System.currentTimeMillis() / 1000L;
-                if (p + q - l < 0L) {
+                long l2 = System.currentTimeMillis() / 1000L;
+                if (p + q - l2 < 0L) {
                     h = (short)3;
                     short s = a[13][7 + O][2];
                     short s2 = a[13][7 + O][3];
@@ -22283,19 +22283,19 @@ lbl180:
             }
             switch (h) {
                 case 2: {
-                    long l = System.currentTimeMillis() / 1000L;
-                    long l2 = 0L;
+                    long l2 = System.currentTimeMillis() / 1000L;
+                    long l3 = 0L;
                     if (dx > 0) {
                         int n4 = 0;
                         for (n2 = 0; n2 < f.length; ++n2) {
                             if (aR[n2] != 1) continue;
                             ++n4;
                         }
-                        l2 = p + q - (long)n4 * q / (long)dx - l;
+                        l3 = p + q - (long)n4 * q / (long)dx - l2;
                     }
-                    if (l2 > 0L) {
-                        i = a.d((int)l2);
-                        dv = a.a((int)l2);
+                    if (l3 > 0L) {
+                        i = a.d((int)l3);
+                        dv = a.a((int)l3);
                         break;
                     }
                     i = "00:00:00";
@@ -27413,9 +27413,9 @@ lbl180:
 
     private static void ii() {
         String string;
-        long l = System.currentTimeMillis() / 1000L;
-        long l2 = a[ew][4] + 86400L - l;
-        if (l2 <= 0L) {
+        long l2 = System.currentTimeMillis() / 1000L;
+        long l3 = a[ew][4] + 86400L - l2;
+        if (l3 <= 0L) {
             a.a[17][3][6] = 1;
             a.a(17, 4, false);
             a.d(17, 3, 1);
@@ -27423,32 +27423,32 @@ lbl180:
         } else {
             String string2;
             a.a[17][3][6] = 4;
-            a.a[17][4] = string2 = a.c((int)(l2 < 0L ? 0L : (l2 > Integer.MAX_VALUE ? Integer.MAX_VALUE : l2)));
+            a.a[17][4] = string2 = a.c((int)(l3 < 0L ? 0L : (l3 > Integer.MAX_VALUE ? Integer.MAX_VALUE : l3)));
             a.a(17, 4, true);
             a.d(17, 3, 0);
         }
-        l2 = a[ew][0] + 86400L - l;
+        l3 = a[ew][0] + 86400L - l2;
         if (d[ew][5] > 0) {
             a.a(17, 7, false);
             a.a(17, 6, true);
         } else {
             String string3;
             a.a(17, 6, false);
-            a.a[17][7] = string3 = a.c((int)(l2 < 0L ? 0L : (l2 > Integer.MAX_VALUE ? Integer.MAX_VALUE : l2)));
+            a.a[17][7] = string3 = a.c((int)(l3 < 0L ? 0L : (l3 > Integer.MAX_VALUE ? Integer.MAX_VALUE : l3)));
             a.a(17, 7, true);
-            if (l2 <= 0L) {
+            if (l3 <= 0L) {
                 a.d[a.ew][5] = 5;
             }
         }
-        l2 = a[ew][1] + 86400L - l;
-        if (l2 <= 0L) {
+        l3 = a[ew][1] + 86400L - l2;
+        if (l3 <= 0L) {
             a.a[17][8][6] = 0;
             a.a(17, 9, false);
             a.d(17, 8, 1);
             return;
         }
         a.a[17][8][6] = 3;
-        a.a[17][9] = string = a.c((int)(l2 < 0L ? 0L : (l2 > Integer.MAX_VALUE ? Integer.MAX_VALUE : l2)));
+        a.a[17][9] = string = a.c((int)(l3 < 0L ? 0L : (l3 > Integer.MAX_VALUE ? Integer.MAX_VALUE : l3)));
         a.a(17, 9, true);
         a.d(17, 8, 0);
     }
@@ -28238,12 +28238,12 @@ lbl180:
                 String string2 = a;
                 n4 = 0;
                 for (n3 = 0; n3 < string2.length(); ++n3) {
-                    char c = string2.charAt(n3);
-                    if (!Character.isDigit(c)) {
+                    char c2 = string2.charAt(n3);
+                    if (!Character.isDigit(c2)) {
                         if (n4 != 0) break;
                         continue;
                     }
-                    n4 = n4 * 10 + Character.digit(c, 10);
+                    n4 = n4 * 10 + Character.digit(c2, 10);
                 }
                 int n5 = n4;
                 string = f.a(string, "%d", f.a(n5, L, " "));
@@ -28585,11 +28585,11 @@ lbl180:
                         for (int i2 = 0; i2 < f.a("Cash"); ++i2) {
                             a.h[i2] = f.a(i2, "Cash");
                             String string = a.g(i2);
-                            long l = f.a(200L, i2, "Cash");
+                            long l2 = f.a(200L, i2, "Cash");
                             if (string != null && !string.trim().equals("")) {
                                 a.bH[i2] = i2;
                                 a.g[i2] = string;
-                                a.d[i2] = l;
+                                a.d[i2] = l2;
                             } else {
                                 a.g[i2] = null;
                                 a.bH[i2] = -1;
@@ -29254,11 +29254,11 @@ lbl180:
                 a.a(24, 8, true);
                 g g2 = g.a(33);
                 if (g2 == null) break;
-                long l = g2.a[0][1] * 1000;
-                if (l == 0L) {
-                    l = 86400000L;
+                long l2 = g2.a[0][1] * 1000;
+                if (l2 == 0L) {
+                    l2 = 86400000L;
                 }
-                t = System.currentTimeMillis() + l;
+                t = System.currentTimeMillis() + l2;
                 break;
             }
             case 1: {
@@ -30802,12 +30802,12 @@ lbl180:
         k = null;
         l = null;
         fD = 0;
-        long l = f.a * (long)f.W;
+        long l2 = f.a * (long)f.W;
         if (f.a == null) {
-            f.a = new Random(l);
+            f.a = new Random(l2);
             return;
         }
-        f.a.setSeed(l);
+        f.a.setSeed(l2);
     }
 
     /*
@@ -31621,3 +31621,4 @@ lbl177:
         q = new String[]{"NokiaC5"};
     }
 }
+

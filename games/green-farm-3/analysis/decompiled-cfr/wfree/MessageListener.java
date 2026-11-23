@@ -8,3 +8,4 @@ import wfree.MessageConnection;
 public interface MessageListener {
     public void notifyIncomingMessage(MessageConnection var1);
 }
+
