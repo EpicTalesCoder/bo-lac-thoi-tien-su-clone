@@ -65,8 +65,20 @@ function tintCanvas(src, color, alpha) {
 /* Bảng frame chính xác giải mã từ file dữ liệu cu2 của JAR gốc
  * (aO[row] = dx,dy,w,h,ofsX,ofsY,imgIdx). Lính = u3(0,0,40x39) quay PHẢI.
  * Muzzle flash = u0 rows 43-48 (vàng loại A / xanh loại B). Nổ lớn = u6 33-42. */
+const CHARACTER_PARTS = {
+  // Decoded ca row 0 (Soldier) and row 110 (Mutant): each ca triple is [dx, dy, cu2 frame].
+  soldier: [
+    { image: 1, sx: 26, sy: 0, w: 28, h: 15, dx: -12, dy: 0 },
+    { image: 2, sx: 41, sy: 28, w: 42, h: 15, dx: -12, dy: -12 },
+    { image: 2, sx: 40, sy: 75, w: 44, h: 16, dx: -15, dy: -8 },
+  ],
+  mutant: [
+    { image: 1, sx: 26, sy: 0, w: 28, h: 15, dx: -12, dy: 0 },
+    { image: 3, sx: 113, sy: 21, w: 10, h: 19, dx: -19, dy: -12 },
+    { image: 3, sx: 42, sy: 55, w: 39, h: 16, dx: -15, dy: -9 },
+  ],
+};
 const FR = {
-  soldier: [3, 0, 0, 40, 39],
   flashYellow: [[0, 0, 21, 27], [21, 0, 23, 30], [44, 0, 24, 29]],
   flashBlue: [[0, 30, 21, 27], [21, 30, 23, 30], [44, 30, 24, 29]],
   boomBig: [[68, 0, 24, 36], [22, 0, 22, 42], [63, 36, 19, 38], [44, 0, 24, 36], [0, 0, 22, 42], [44, 36, 19, 38], [0, 42, 38, 34], [82, 36, 32, 31], [92, 0, 24, 25], [82, 67, 28, 32]],
@@ -74,11 +86,12 @@ const FR = {
   flagRed: [[0, 0, 15, 14], [0, 14, 15, 14], [0, 28, 15, 14]],
   flagGreen: [[15, 0, 15, 14], [15, 14, 15, 14], [15, 28, 15, 14]],
   base: [7, 0, 0, 24, 23],
-  guns: { saw: [5, 0, 0, 37, 14], mg: [5, 37, 17, 37, 8], shot: [5, 0, 0, 37, 14], rock: [5, 37, 0, 42, 17], plas: [5, 0, 14, 37, 16], beam: [5, 0, 14, 37, 16] },
+  // u5 source crops by decoded cu2 frame: AK (77), rifle (78), plasma (79), launcher (80).
+  guns: { saw: null, mg: [5, 37, 17, 37, 8], shot: [5, 0, 0, 37, 14], rock: [5, 0, 14, 37, 16], plas: [5, 37, 0, 42, 17], beam: [5, 37, 0, 42, 17] },
   rocketBall: [6, 68, 0, 24, 36],
 };
 
-const KIT = { soldier: null, flash: [], boomBig: [], boomSmall: [], flagRed: [], flagGreen: [], base: null, weapons: [], rocketBall: null, bars: {}, icons: {} };
+const KIT = { soldier: null, characters: {}, flash: [], boomBig: [], boomSmall: [], flagRed: [], flagGreen: [], base: null, weapons: [], rocketBall: null, bars: {}, icons: {} };
 
 function cropImg(imgIdx, x, y, w, h) {
   const src = IMG[`u${imgIdx}`];
@@ -91,12 +104,31 @@ function cropImg(imgIdx, x, y, w, h) {
 
 function buildKit() {
   if (!IMG.u3) return;
-  const body = cropImg(...FR.soldier);
-  KIT.soldier = {
-    green: body,
-    red: tintCanvas(body, '#ff3b2d', 0.38),
-    yellow: tintCanvas(body, '#ffd84d', 0.32),
-  };
+  for (const [character, parts] of Object.entries(CHARACTER_PARTS)) {
+    const bounds = parts.reduce((acc, part) => ({
+      minX: Math.min(acc.minX, part.dx),
+      minY: Math.min(acc.minY, part.dy - part.h),
+      maxX: Math.max(acc.maxX, part.dx + part.w),
+      maxY: Math.max(acc.maxY, part.dy),
+    }), { minX: 0, minY: 0, maxX: 0, maxY: 0 });
+    const canvas = document.createElement('canvas');
+    canvas.width = bounds.maxX - bounds.minX;
+    canvas.height = bounds.maxY - bounds.minY;
+    const ctx = canvas.getContext('2d');
+    for (const part of parts) {
+      const source = IMG[`u${part.image}`];
+      if (source && part.sx + part.w <= source.width && part.sy + part.h <= source.height) ctx.drawImage(source, part.sx, part.sy, part.w, part.h,
+        part.dx - bounds.minX, part.dy - part.h - bounds.minY, part.w, part.h);
+    }
+    KIT.characters[character] = {
+      offsetX: bounds.minX,
+      offsetY: bounds.minY,
+      green: canvas,
+      red: tintCanvas(canvas, '#ff3b2d', 0.38),
+      yellow: tintCanvas(canvas, '#ffd84d', 0.32),
+    };
+  }
+  KIT.soldier = KIT.characters.soldier;
   KIT.flash = FR.flashYellow.map(([x, y, w, h]) => cropImg(0, x, y, w, h));
   KIT.flashBlue = FR.flashBlue.map(([x, y, w, h]) => cropImg(0, x, y, w, h));
   KIT.boomBig = FR.boomBig.map(([x, y, w, h]) => cropImg(6, x, y, w, h)).filter(Boolean);
@@ -111,6 +143,8 @@ function buildKit() {
     const g = FR.guns[k];
     KIT.weapons.push(g ? cropImg(...g) : null);
   }
+  // Chainsaw has no standalone icon in u5: use its composite Soldier arm pose.
+  KIT.weapons[0] = cropImg(2, 41, 28, 42, 15);
   // thanh máu HUD từ u8
   if (IMG.u8) {
     KIT.bars.frame = trimCanvas(IMG.u8, 0, 15, 72, 11);
@@ -189,10 +223,10 @@ function sfxPlay(name) {
 
 /* ---------- app state ---------- */
 const app = {
-  screen: 'boot', menuIdx: 0, modeIdx: 0, lang: 'vi', save: { best: {} },
+  screen: 'boot', menuIdx: 0, modeIdx: 0, characterIdx: 0, character: 'soldier', lang: 'vi', save: { best: {} },
   match: null, paused: false, lastTick: 0, result: null, splashT: 0, helpFrom: 'menu',
   input: { mx: null, my: null, fire: false, keys: {} },
-  mouseSeen: false,
+  cursorCanvas: null, mouseSeen: false,
 };
 
 function T() { return LANG[app.lang]; }
@@ -203,7 +237,8 @@ function fmt(text, vars) {
 }
 
 function startMatch() {
-  app.match = createMatch(MODES[app.modeIdx].id, (Date.now() & 0x7fffffff));
+  app.character = app.characterIdx === 1 ? 'mutant' : 'soldier';
+  app.match = createMatch(MODES[app.modeIdx].id, (Date.now() & 0x7fffffff), app.character);
   app.screen = 'game';
   app.paused = false;
   app.result = null;
@@ -230,17 +265,24 @@ function bindInput() {
     audioInit();
     const k = e.key;
     if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' '].includes(k)) e.preventDefault();
+    if (k === ' ' && app.screen === 'game') app.input.fire = true;
     handleKey(k);
   });
-  window.addEventListener('keyup', (e) => setMove(e.key, false));
+  window.addEventListener('keyup', (e) => {
+    setMove(e.key, false);
+    if (e.key === ' ') app.input.fire = false;
+  });
+  const clearHeldInput = () => {
+    app.input.keys = {};
+    app.input.fire = false;
+  };
+  window.addEventListener('blur', clearHeldInput);
+  document.addEventListener('visibilitychange', () => { if (document.hidden) clearHeldInput(); });
   cv.addEventListener('mousemove', (e) => {
     const r = cv.getBoundingClientRect();
     const wx = (e.clientX - r.left) * (240 / r.width);
     const wy = (e.clientY - r.top) * (320 / r.height);
-    const m = app.match;
-    if (m && app.screen === 'game') {
-      app.input.mx = wx + m.cam.x; app.input.my = wy + m.cam.y;
-    } else { app.input.mx = wx; app.input.my = wy; }
+    app.cursorCanvas = { x: wx, y: wy };
     app.mouseSeen = true;
     app.cursorScreen = { x: wx, y: wy };
   });
@@ -272,8 +314,14 @@ function handleKey(k) {
   if (S === 'mode') {
     if (k === 'ArrowUp' || k === 'w') app.modeIdx = (app.modeIdx + MODES.length - 1) % MODES.length;
     if (k === 'ArrowDown' || k === 's') app.modeIdx = (app.modeIdx + 1) % MODES.length;
-    if (k === 'Enter' || k === ' ') startMatch();
+    if (k === 'Enter' || k === ' ') { app.characterIdx = 0; app.screen = 'character'; }
     if (k === 'q' || k === 'Q' || k === 'Escape') app.screen = 'menu';
+    return;
+  }
+  if (S === 'character') {
+    if (k === 'ArrowUp' || k === 'w' || k === 'ArrowDown' || k === 's') app.characterIdx = (app.characterIdx + 1) % 2;
+    if (k === 'Enter' || k === ' ') startMatch();
+    if (k === 'q' || k === 'Q' || k === 'Escape') app.screen = 'mode';
     return;
   }
   if (S === 'help' || S === 'about') { app.screen = app.helpFrom; return; }
@@ -316,8 +364,15 @@ function clickScreen() {
   if (S === 'mode') {
     const y0 = 78, lh = 20;
     for (let i = 0; i < MODES.length; i++) {
-      if (cy >= y0 + i * lh - 6 && cy < y0 + (i + 1) * lh - 6) { app.modeIdx = i; startMatch(); return; }
+      if (cy >= y0 + i * lh - 6 && cy < y0 + (i + 1) * lh - 6) { app.modeIdx = i; app.screen = 'character'; return; }
     }
+    if (cy > 270 || (cy > 240 && cy < 270)) app.screen = 'menu';
+    return;
+  }
+  if (S === 'character') {
+    if (cy >= 112 && cy < 158) { app.characterIdx = 0; startMatch(); return; }
+    if (cy >= 160 && cy < 206) { app.characterIdx = 1; startMatch(); return; }
+    if (cy > 270) app.screen = 'mode';
     return;
   }
   if (S === 'help' || S === 'about') { handleKey('Enter'); return; }
@@ -327,10 +382,13 @@ function clickScreen() {
 /* ---------- camera ---------- */
 function updateCam(m) {
   const p = m.player;
-  let cx = p.x - 120, cy = p.y - 160;
+  if (!m.cam) m.cam = { x: Math.max(0, Math.min(WORLD_W - 240, p.x - 120)), y: Math.max(0, Math.min(WORLD_H - 320, p.y - 160)) };
+  // Let the player travel inside a visible dead zone before the camera follows.
+  const screenX = p.x - m.cam.x, screenY = p.y - m.cam.y;
+  let cx = screenX < 80 ? p.x - 80 : (screenX > 160 ? p.x - 160 : m.cam.x);
+  let cy = screenY < 112 ? p.y - 112 : (screenY > 208 ? p.y - 208 : m.cam.y);
   cx = Math.max(0, Math.min(WORLD_W - 240, cx));
   cy = Math.max(0, Math.min(WORLD_H - 320, cy));
-  if (!m.cam) m.cam = { x: cx, y: cy };
   m.cam.x += (cx - m.cam.x) * 0.25;
   m.cam.y += (cy - m.cam.y) * 0.25;
 }
@@ -377,27 +435,32 @@ function drawWorldTileWalls(g, m, cam) {
   }
 }
 
-function soldierColor(team) { return team === 1 ? '#ff5544' : '#66cc55'; }
+function soldierColor(team) { return team === 0 ? '#66cc55' : '#ff5544'; }
 
 function drawSoldier(g, m, s, ix, iy, cam) {
   if (s.dead) return;
   const moving = Math.abs(s.x - s.px) + Math.abs(s.y - s.py) > 0.4;
   const bob = moving && Math.floor(m.time / 120) % 2 === 0 ? 1 : 0;
-  const flip = Math.cos(s.dir) < 0;
-  const teamKey = s.team === 1 ? 'red' : (s.team > 1 ? (s.id % 2 ? 'yellow' : 'red') : 'green');
-  const spr = (KIT.soldier && KIT.soldier[teamKey]) || KIT.soldier;
+  const teamKey = s === m.player ? 'green' : (m.mode.teams ? (s.team === m.player.team ? 'green' : 'red') : 'red');
+  const characterKit = KIT.characters[s.character] || KIT.characters.soldier || KIT.soldier;
+  const spr = (characterKit && characterKit[teamKey]) || characterKit;
   if (!spr) return;
   const dw = spr.width, dh = spr.height;
+  const offsetX = characterKit?.offsetX || 0;
+  const offsetY = characterKit?.offsetY || 0;
   g.save();
-  g.translate(ix, iy + bob);
-  if (flip) g.scale(-1, 1);
-  // chân trúng vị trí entity: vẽ thân lệch lên
-  g.drawImage(spr, -dw / 2, -dh / 2 - 6);
+  g.translate(ix, iy + bob - 6);
+  if (Math.cos(s.dir) < 0) g.scale(-1, 1);
+  g.drawImage(spr, offsetX, offsetY, dw, dh);
   g.restore();
   if (s.hitT > 0) {
     g.globalAlpha = Math.min(0.6, s.hitT / 300);
     g.fillStyle = '#fff';
-    g.fillRect(ix - dw / 2, iy - dh / 2 - 6, dw, dh);
+    g.save();
+    g.translate(ix, iy + bob - 6);
+    if (Math.cos(s.dir) < 0) g.scale(-1, 1);
+    g.fillRect(-dw / 2 + offsetX, offsetY, dw, dh);
+    g.restore();
     g.globalAlpha = 1;
   }
   // vòng người chơi
@@ -406,13 +469,18 @@ function drawSoldier(g, m, s, ix, iy, cam) {
     g.beginPath(); g.arc(ix, iy, 13, 0, Math.PI * 2); g.stroke();
     g.globalAlpha = 1;
   }
-  // muzzle flash 3 frame trỏ theo hướng bắn
+  // súng trên tay
+  const w = WEAPONS[s.weapon];
+  const icon = KIT.weapons[s.weapon];
+  const hx = ix + Math.cos(s.dir) * 12, hy = iy - 10 + Math.sin(s.dir) * 12;
+  const muzzleX = ix + Math.cos(s.dir) * (w.muzzleOffset || 28);
+  const muzzleY = iy - 10 + Math.sin(s.dir) * (w.muzzleOffset || 28);
+  // muzzle flash 3 frame trỏ theo hướng bắn, tại đầu nòng
   if (s.fireT > 40 && KIT.flash.length) {
     const fi = Math.floor(s.fireT / 90) % KIT.flash.length;
     const fl = KIT.flash[fi];
-    const gx = ix + Math.cos(s.dir) * 14, gy = iy - 12 + Math.sin(s.dir) * 14;
     g.save();
-    g.translate(gx, gy);
+    g.translate(muzzleX, muzzleY);
     g.rotate(s.dir);
     const fs = 0.6;
     g.globalAlpha = Math.min(1, s.fireT / 200);
@@ -420,21 +488,18 @@ function drawSoldier(g, m, s, ix, iy, cam) {
     g.restore();
     g.globalAlpha = 1;
   }
-  // súng trên tay
-  const w = WEAPONS[s.weapon];
-  const icon = KIT.weapons[s.weapon];
-  const hx = ix + Math.cos(s.dir) * 12, hy = iy - 10 + Math.sin(s.dir) * 12;
   if (icon) {
     g.save();
     g.translate(hx, hy);
-    g.rotate(s.dir + (flip ? Math.PI : 0));
-    g.drawImage(icon, -icon.width / 4, -icon.height / 2);
+    g.rotate(s.dir);
+    g.drawImage(icon, -icon.width / 4, -icon.height / 2, icon.width / 2, icon.height);
     g.restore();
   } else {
     g.strokeStyle = w.color; g.lineWidth = 2;
     g.beginPath(); g.moveTo(ix + Math.cos(s.dir) * 6, iy + Math.sin(s.dir) * 6); g.lineTo(hx, hy); g.stroke();
     g.lineWidth = 1;
   }
+  // Muzzle flash follows the barrel rather than appearing beside the hands.
   // cầm cờ
   if (s.carrying >= 0 && m.flags) {
     const f = m.flags[s.carrying];
@@ -536,9 +601,13 @@ function drawWorld(g, m, cam, lerpT) {
     g.fillRect(p.x - cam.x, p.y - cam.y, p.size, p.size);
   }
   g.globalAlpha = 1;
-  // con trỏ ngắm
-  if (IMG.curs && app.mouseSeen && typeof app.input.mx === 'number') {
-    g.drawImage(IMG.curs, app.input.mx - cam.x - 16, app.input.my - cam.y - 13);
+  // Con trỏ giữ vị trí màn hình; tọa độ ngắm world cập nhật theo camera.
+  if (app.cursorCanvas) {
+    app.input.mx = app.cursorCanvas.x + cam.x;
+    app.input.my = app.cursorCanvas.y + cam.y;
+  }
+  if (IMG.curs && app.mouseSeen && app.cursorCanvas) {
+    g.drawImage(IMG.curs, app.cursorCanvas.x - 16, app.cursorCanvas.y - 13);
   }
 }
 
@@ -578,7 +647,7 @@ function drawHud(g, m) {
   const sec = Math.floor(m.time / 1000);
   g.fillStyle = '#9cff7b'; g.font = '8px monospace';
   g.fillText(`${T2.kills} ${p.kills} · ${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`, 236, 25);
-  // radar góc phải dưới
+  // Radar phía trên phải đặt dưới dải HUD để không đè điểm số.
   drawRadar(g, m);
   // announce
   g.textAlign = 'center';
@@ -608,7 +677,7 @@ function drawHud(g, m) {
 }
 
 function drawRadar(g, m) {
-  const R = 26, cx = 240 - R - 6, cy = 320 - R - 6;
+  const R = 26, cx = 240 - R - 6, cy = 36 + R + 6;
   g.save();
   g.beginPath(); g.arc(cx, cy, R, 0, Math.PI * 2);
   g.fillStyle = 'rgba(10,16,10,0.65)'; g.fill();
@@ -624,7 +693,8 @@ function drawRadar(g, m) {
   }
   for (const s of m.soldiers) {
     if (s.dead) continue;
-    g.fillStyle = s === m.player ? '#fff' : soldierColor(s.team);
+    const hostile = s !== m.player && s.team !== m.player.team;
+    g.fillStyle = s === m.player ? '#fff' : (hostile ? '#ff5544' : '#66cc55');
     g.fillRect(cx - R + s.x * sx - 1, cy - R + s.y * sy - 1, 2.5, 2.5);
   }
   g.restore();
@@ -703,6 +773,22 @@ function renderFrame(g) {
     wrapText(g, T2.modeDesc[app.modeIdx], 120, 200, 216, 12);
     g.fillStyle = '#9cff7b'; g.font = '9px monospace';
     g.fillText(T2.start, 120, 285);
+    g.fillStyle = '#777'; g.font = '7px monospace';
+    g.fillText(T2.back, 120, 308);
+    return;
+  }
+  if (S === 'character') {
+    drawBg(g, 'li2');
+    g.fillStyle = '#ffd84d'; g.font = 'bold 12px monospace'; g.textAlign = 'center';
+    g.fillText(T2.chooseCharacter, 120, 60);
+    const previewKey = app.characterIdx === 0 ? 'soldier' : 'mutant';
+    const preview = KIT.characters[previewKey]?.green;
+    if (preview) g.drawImage(preview, 90, 78, 60, 58);
+    drawMenuList(g, T2.characters, app.characterIdx, 156, 34);
+    g.fillStyle = '#9cff7b'; g.font = 'bold 8px monospace';
+    g.fillText(T2.confirmCharacter, 120, 242);
+    g.fillStyle = '#aaa'; g.font = '8px monospace';
+    g.fillText(T2.nextCharacter, 120, 260);
     g.fillStyle = '#777'; g.font = '7px monospace';
     g.fillText(T2.back, 120, 308);
     return;
@@ -808,7 +894,7 @@ async function boot() {
         if (m.over && !app.resultPending) { app.resultPending = true; setTimeout(() => { if (app.screen === 'game') finishMatch(); }, 1400); }
       }
     },
-    onFrameInterpolate() { return false; },
+    onFrameInterpolate() { return app.screen === 'game' && !app.paused; },
     onRenderFrame(ctx) { renderFrame(ctx); },
   });
 }

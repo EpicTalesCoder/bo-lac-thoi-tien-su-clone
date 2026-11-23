@@ -7,6 +7,10 @@ export const LANG = {
     pressAny: 'NHẤN PHÍM BẤT KỲ',
     menu: ['CHƠI NGAY', 'NGÔN NGỮ: TIẾNG VIỆT', 'HƯỚNG DẪN', 'GIỚI THIỆU'],
     chooseMode: 'CHỌN CHẾ ĐỘ ĐẤU',
+    chooseCharacter: 'CHỌN NHÂN VẬT',
+    characters: ['CHIẾN BINH (SOLDIER)', 'ĐỘT BIẾN (MUTANT)'],
+    nextCharacter: 'ENTER: CHỌN NHÂN VẬT',
+    confirmCharacter: 'ENTER: BẮT ĐẦU · Q: QUAY LẠI',
     modes: ['TỬ CHIẾN (DM)', 'ĐỒNG ĐỘI 4v4', 'SINH TỒN', 'CƯỚP CỜ', 'ANH HÙNG CUỐI'],
     modeDesc: [
       'Ai đạt 10 điểm hạ trước thì thắng.',
@@ -33,7 +37,7 @@ export const LANG = {
     best: 'Kỷ lục',
     again: 'ENTER: chơi lại · Q: menu',
     help: [
-      'DI CHUYỂN: ↑↓←→ hoặc WASD',
+      'DI CHUYỂN trong sân: ↑↓←→ hoặc WASD',
       'NGẮM: chuột · BẮN: click hoặc SPACE',
       'ĐỔI SÚNG: phím 1-6',
       'P: tạm dừng · M: bật/tắt âm thanh',
@@ -58,6 +62,10 @@ export const LANG = {
     pressAny: 'PRESS ANY KEY',
     menu: ['PLAY', 'LANGUAGE: ENGLISH', 'HOW TO PLAY', 'ABOUT'],
     chooseMode: 'CHOOSE GAME MODE',
+    chooseCharacter: 'CHOOSE CHARACTER',
+    characters: ['SOLDIER', 'MUTANT'],
+    nextCharacter: 'ENTER: CHOOSE CHARACTER',
+    confirmCharacter: 'ENTER: START · Q: BACK',
     modes: ['DEATHMATCH', 'TEAM 4v4', 'SURVIVAL', 'CAPTURE THE FLAG', 'LAST HERO'],
     modeDesc: [
       'First to 10 frags wins.',
@@ -84,7 +92,7 @@ export const LANG = {
     best: 'Best',
     again: 'ENTER: play again · Q: menu',
     help: [
-      'MOVE: arrows or WASD',
+      'MOVE in arena: arrows or WASD',
       'AIM: mouse · FIRE: click or SPACE',
       'SWITCH WEAPON: keys 1-6',
       'P: pause · M: mute',

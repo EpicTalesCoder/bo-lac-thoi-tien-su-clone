@@ -12,12 +12,12 @@ export const TICK_MS = 120;
 
 /** 6 loại súng — phím 1-6. */
 export const WEAPONS = [
-  { id: 'saw', slot: 1, dmg: 34, rate: 400, kind: 'melee', range: 22, ammoMax: Infinity, name: { vi: 'Cưa điện', en: 'Chainsaw' }, color: '#ff6644' },
-  { id: 'mg', slot: 2, dmg: 9, rate: 220, kind: 'bullet', speed: 5, spread: 0.10, ammoMax: 200, name: { vi: 'Súng máy', en: 'Machine gun' }, color: '#ffd84d' },
-  { id: 'shot', slot: 3, dmg: 8, rate: 700, kind: 'bullet', speed: 4.4, spread: 0.34, pellets: 5, ammoMax: 60, name: { vi: 'Shotgun', en: 'Shotgun' }, color: '#ff9d4d' },
-  { id: 'rock', slot: 4, dmg: 55, rate: 1100, kind: 'rocket', speed: 3.4, aoe: 26, ammoMax: 20, name: { vi: 'Bazooka', en: 'Rocket' }, color: '#ff5544' },
-  { id: 'plas', slot: 5, dmg: 16, rate: 380, kind: 'bullet', speed: 5.6, spread: 0.03, ammoMax: 90, name: { vi: 'Plasma', en: 'Plasma' }, color: '#55ccff' },
-  { id: 'beam', slot: 6, dmg: 13, rate: 150, kind: 'beam', range: 170, ammoMax: 120, name: { vi: 'Beam', en: 'Beam' }, color: '#88ffcc' },
+  { id: 'saw', slot: 1, dmg: 34, rate: 400, kind: 'melee', range: 22, muzzleOffset: 28, ammoMax: Infinity, name: { vi: 'Cưa điện', en: 'Chainsaw' }, color: '#ff6644' },
+  { id: 'mg', slot: 2, dmg: 9, rate: 220, kind: 'bullet', speed: 5, spread: 0.10, muzzleOffset: 22, ammoMax: 200, name: { vi: 'Súng máy', en: 'Machine gun' }, color: '#ffd84d' },
+  { id: 'shot', slot: 3, dmg: 8, rate: 700, kind: 'bullet', speed: 4.4, spread: 0.34, pellets: 5, muzzleOffset: 22, ammoMax: 60, name: { vi: 'Shotgun', en: 'Shotgun' }, color: '#ff9d4d' },
+  { id: 'rock', slot: 4, dmg: 55, rate: 1100, kind: 'rocket', speed: 3.4, aoe: 26, muzzleOffset: 22, ammoMax: 20, name: { vi: 'Bazooka', en: 'Rocket' }, color: '#ff5544' },
+  { id: 'plas', slot: 5, dmg: 16, rate: 380, kind: 'bullet', speed: 5.6, spread: 0.03, muzzleOffset: 22, ammoMax: 90, name: { vi: 'Plasma', en: 'Plasma' }, color: '#55ccff' },
+  { id: 'beam', slot: 6, dmg: 13, rate: 150, kind: 'beam', range: 170, muzzleOffset: 22, ammoMax: 120, name: { vi: 'Beam', en: 'Beam' }, color: '#88ffcc' },
 ];
 
 export const MODES = [
@@ -167,7 +167,7 @@ let soldierSeq = 1;
 
 export function makeSoldier(x, y, team, bot) {
   return {
-    id: soldierSeq++, x, y, px: x, py: y, dir: 0, team, bot,
+    id: soldierSeq++, x, y, px: x, py: y, dir: 0, team, bot, character: 'soldier',
     hp: 100, armor: 0, weapon: 1, cool: 0, fireT: 0, hitT: 0, dead: false, respawnT: 0,
     ammo: WEAPONS.map((w) => (w.id === 'saw' ? Infinity : Math.floor(w.ammoMax * 0.6))),
     kills: 0, deaths: 0, captures: 0,
@@ -177,7 +177,7 @@ export function makeSoldier(x, y, team, bot) {
 }
 
 /** Tạo trận theo chế độ. playerTeam: 0 xanh (hoặc id riêng ở DM). */
-export function createMatch(modeId, seed = 20261121) {
+export function createMatch(modeId, seed = 20261121, playerCharacter = 'soldier') {
   const mode = MODES.find((m) => m.id === modeId) || MODES[0];
   const grid = genArena(seed);
   const rng = mulberry32(seed ^ 0x5f3759df);
@@ -187,6 +187,7 @@ export function createMatch(modeId, seed = 20261121) {
   const pSpawn = spawns[0];
   const playerTeam = mode.teams ? 0 : (mode.id === 'surv' ? 0 : -1); // dm/last: mỗi người 1 team riêng (id dương thay sau)
   const player = makeSoldier(pSpawn[0], pSpawn[1], mode.teams ? 0 : 0, false);
+  player.character = playerCharacter === 'mutant' ? 'mutant' : 'soldier';
   soldiers.push(player);
   const nBots = mode.waves ? 0 : mode.bots;
   for (let i = 0; i < nBots; i++) {
@@ -326,18 +327,21 @@ export function fireWeapon(match, s) {
     sfx(match, 'saw', s.x, s.y);
     return;
   }
+  const muzzleOffset = w.muzzleOffset || 28;
+  const muzzleX = s.x + Math.cos(s.dir) * muzzleOffset;
+  const muzzleY = s.y + Math.sin(s.dir) * muzzleOffset;
   if (w.kind === 'beam') {
-    // tia tức thời: dựng ray dài range, trúng mục tiêu đầu tiên
-    const ex = s.x + Math.cos(s.dir) * w.range, ey = s.y + Math.sin(s.dir) * w.range;
+    // Tia bắt đầu từ đầu nòng, không từ tâm người chơi.
+    const ex = muzzleX + Math.cos(s.dir) * w.range, ey = muzzleY + Math.sin(s.dir) * w.range;
     let hit = null, hd = w.range;
     for (const o of aliveEnemiesOf(match, s)) {
-      const t = projPointOnRay(s.x, s.y, s.dir, o.x, o.y);
+      const t = projPointOnRay(muzzleX, muzzleY, s.dir, o.x, o.y);
       if (t !== null && t >= 0 && t < hd && t < w.range) {
-        const hx = s.x + Math.cos(s.dir) * t, hy = s.y + Math.sin(s.dir) * t;
+        const hx = muzzleX + Math.cos(s.dir) * t, hy = muzzleY + Math.sin(s.dir) * t;
         if (Math.hypot(o.x - hx, o.y - hy) < 7 && !isWallAt(match.grid, hx, hy)) { hit = o; hd = t; }
       }
     }
-    match.bullets.push({ beam: true, x0: s.x, y0: s.y, x1: hit ? s.x + Math.cos(s.dir) * hd : ex, y1: hit ? s.y + Math.sin(s.dir) * hd : ey, color: w.color, life: 90, owner: s.id });
+    match.bullets.push({ beam: true, x0: muzzleX, y0: muzzleY, x1: hit ? muzzleX + Math.cos(s.dir) * hd : ex, y1: hit ? muzzleY + Math.sin(s.dir) * hd : ey, color: w.color, life: 90, owner: s.id });
     if (hit) { applyDamage(match, s, hit, Math.round(w.dmg * dmgScale)); sfx(match, 'hit', hit.x, hit.y); }
     sfx(match, 'beam', s.x, s.y);
     return;
@@ -347,7 +351,7 @@ export function fireWeapon(match, s) {
     const spread = (match.rng() - 0.5) * 2 * (w.spread || 0);
     const a = s.dir + spread;
     match.bullets.push({
-      x: s.x + Math.cos(a) * 6, y: s.y + Math.sin(a) * 6,
+      x: muzzleX, y: muzzleY,
       dx: Math.cos(a) * w.speed, dy: Math.sin(a) * w.speed,
       owner: s.id, team: s.team, dmg: Math.max(1, Math.round(w.dmg * dmgScale)), kind: w.kind, aoe: w.aoe || 0,
       color: w.color, life: 260, trail: w.id === 'rock',
@@ -552,7 +556,7 @@ export function stepMatch(match, input, dt = TICK_MS) {
     let dy = (input.keys.down ? 1 : 0) - (input.keys.up ? 1 : 0);
     if (dx || dy) {
       const m = Math.hypot(dx, dy);
-      const speed = 1.1;
+      const speed = 2.4;
       const [nx, ny] = moveWithCollision(grid, s.x, s.y, (dx / m) * speed, (dy / m) * speed);
       s.x = nx; s.y = ny;
     }

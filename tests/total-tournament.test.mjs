@@ -94,8 +94,37 @@ test('stepMatch: tick chạy, người chơi di chuyển hợp lệ (không xuy�
   assert.equal(match.paused, false);
   // vị trí mới vẫn không trong tường
   assert.ok(!core.isWallAt(match.grid, p.x, p.y), 'sau di chuyển phải không trong tường');
-  assert.ok(Math.hypot(p.x - sx, p.y - sy) > 0 || true);
+  assert.ok(p.x > sx, `right input should move east: ${sx} -> ${p.x}`);
+  assert.equal(p.y, sy, 'right input should not change y');
   assert.ok(match.time > 0);
+});
+
+test('stepMatch: no movement input keeps player in place', () => {
+  const match = core.createMatch('dm', 11);
+  const p = match.player;
+  const start = [p.x, p.y];
+  for (let i = 0; i < 10; i++) core.stepMatch(match, { keys: {}, fire: false });
+  assert.deepEqual([p.x, p.y], start);
+});
+
+test('createMatch: stores selected Soldier or Mutant for player only', () => {
+  for (const character of ['soldier', 'mutant']) {
+    const match = core.createMatch('team', 7, character);
+    assert.equal(match.player.character, character);
+    assert.ok(match.soldiers.filter((s) => s.bot).every((s) => s.character === 'soldier'));
+  }
+  assert.equal(core.createMatch('dm', 7, 'unknown').player.character, 'soldier');
+});
+
+test('bắn súng: đạn bắt đầu từ đầu nòng theo hướng ngắm', () => {
+  const match = core.createMatch('dm', 13);
+  const p = match.player;
+  p.weapon = 1;
+  p.dir = 0;
+  core.fireWeapon(match, p);
+  assert.equal(match.bullets.length, 1);
+  assert.equal(match.bullets[0].x, p.x + core.WEAPONS[p.weapon].muzzleOffset);
+  assert.equal(match.bullets[0].y, p.y);
 });
 
 test('bắn súng: đạn sinh ra, tiêu hao đạn, cooldown hoạt động', () => {
@@ -207,7 +236,7 @@ test('i18n: VI/EN đủ key, localStorage không crash trong Node', async () => 
     path.join(PORT, 'storage-i18n.js')
   );
   for (const lang of ['vi', 'en']) {
-    for (const key of ['menu', 'modes', 'help', 'about', 'pressAny', 'win', 'lose', 'best']) {
+    for (const key of ['menu', 'modes', 'characters', 'chooseCharacter', 'help', 'about', 'pressAny', 'win', 'lose', 'best']) {
       assert.ok(LANG[lang][key], `${lang}.${key}`);
     }
     assert.equal(LANG[lang].menu.length, 4);
