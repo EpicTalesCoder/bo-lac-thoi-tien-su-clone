@@ -282,8 +282,10 @@ export function drawBSpriteBlockFrame(ctx, sprite, moduleImages, frameIndex, x, 
     } else if (module.type === 0xfe) {
       const color = module.colorOrParameter >>> 0;
       const alpha = color >>> 24;
-      if (alpha === 0xff || alpha === 0) {
-        ctx.fillStyle = `#${(color & 0xffffff).toString(16).padStart(6, '0')}`;
+      const rgb = color & 0xffffff;
+      // Skip pure-white 0xFE clipping/mask rectangles used by GLLib /7 UI frames (a.java:9909)
+      if ((alpha === 0xff || alpha === 0) && rgb !== 0xffffff) {
+        ctx.fillStyle = `#${rgb.toString(16).padStart(6, '0')}`;
         ctx.fillRect(
           Math.round(x + resolved.offsetX),
           Math.round(y + resolved.offsetY),
@@ -347,4 +349,37 @@ export function drawBSpriteBlockAnim(ctx, sprite, moduleImages, animIndex, tick,
     y + dy,
     combinedTransform,
   );
+}
+
+/**
+ * Render an original Green Farm 3 UI screen decoded from pack /6 using /7 & /5 BSprite blocks.
+ * Port of a.java:9553-9621 (a.M(int n)) and a.java:9881-9958 (case 205 BSprite widget).
+ */
+export function drawOriginalUIScreen(ctx, widgets, getSpriteEntry, { filterWidget = null, maxX = 260, maxY = 340 } = {}) {
+  if (!Array.isArray(widgets)) return 0;
+  let drawn = 0;
+  for (const w of widgets) {
+    if (!w.visible) continue;
+    if (filterWidget && !filterWidget(w)) continue;
+    if (w.x > maxX || w.y > maxY || w.x < -120 || w.y < -80) continue;
+    if (w.type === 201) {
+      ctx.strokeStyle = `rgb(${w.r},${w.g},${w.b})`;
+      ctx.strokeRect(w.x + 0.5, w.y + 0.5, w.w, w.h);
+      drawn += 1;
+    } else if (w.type === 202 && w.alpha > 0) {
+      ctx.fillStyle = w.alpha >= 255
+        ? `rgb(${w.r},${w.g},${w.b})`
+        : `rgba(${w.r},${w.g},${w.b},${(w.alpha / 255).toFixed(3)})`;
+      ctx.fillRect(w.x, w.y, w.w, w.h);
+      drawn += 1;
+    } else if (w.type === 205) {
+      if (w.spriteId < 0 || w.frameIndex >= 255) continue;
+      const pal = w.usePalette ? w.paletteIndex : 0;
+      const entry = getSpriteEntry(w.spriteId, pal);
+      if (!entry) continue;
+      drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, w.frameIndex, w.x, w.y, w.transform & 7);
+      drawn += 1;
+    }
+  }
+  return drawn;
 }

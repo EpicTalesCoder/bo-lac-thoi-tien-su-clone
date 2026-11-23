@@ -434,10 +434,71 @@ export function decodeFarmWorldEntities(pack9, pack10) {
   return entities;
 }
 
+/**
+ * Decode an original Green Farm 3 UI screen layout block from pack /6.
+ * Port of a.java:9271-9551 (widget types 201..209 and 8-byte common header).
+ */
+export function decodeUIScreen(bytes) {
+  const SIZES = { 201: 9, 202: 10, 203: 14, 204: 19, 205: 23, 206: 12, 207: 13, 208: 1, 209: 7 };
+  const i16 = (off) => {
+    const v = bytes[off] | (bytes[off + 1] << 8);
+    return v > 0x7fff ? v - 0x10000 : v;
+  };
+  const widgets = [];
+  let o = 0;
+  let index = 0;
+  while (o < bytes.length) {
+    const type = bytes[o] & 0xff;
+    const payloadSize = SIZES[type];
+    if (payloadSize === undefined) break;
+    const id = i16(o + 1);
+    const x = i16(o + 3);
+    const y = i16(o + 5);
+    const headerFlag = bytes[o + 7] & 0xff;
+    const w = { index, type, id, x, y, headerFlag };
+    const p = o + 8;
+    if (type === 201) {
+      w.w = i16(p); w.h = i16(p + 2);
+      w.r = bytes[p + 4]; w.g = bytes[p + 5]; w.b = bytes[p + 6];
+      w.visible = bytes[p + 7] === 1;
+    } else if (type === 202) {
+      w.w = i16(p); w.h = i16(p + 2);
+      w.alpha = bytes[p + 4]; w.r = bytes[p + 5]; w.g = bytes[p + 6]; w.b = bytes[p + 7];
+      w.visible = bytes[p + 8] === 1;
+    } else if (type === 204) {
+      w.w = i16(p); w.h = i16(p + 2);
+      w.alignH = bytes[p + 6]; w.alignV = bytes[p + 7];
+      w.textId = i16(p + 10);
+      w.visible = bytes[p + 16] === 1;
+    } else if (type === 205) {
+      // Port of a.java:9440-9464 & a.java:9881-9908:
+      // sArray[5]=spriteId(u8), [6]=frame(u8), [7]=transform(u8), [8]=palette(u8), [9]=usePalette(u8), [10]=visible(u8)
+      w.spriteId = bytes[p] & 0xff;
+      w.frameIndex = bytes[p + 1] & 0xff;
+      w.transform = bytes[p + 2] & 0xff;
+      w.paletteIndex = bytes[p + 3] & 0xff;
+      w.usePalette = bytes[p + 4] === 1;
+      w.visible = bytes[p + 5] === 1;
+      w.animIndex = i16(p + 16);
+    }
+    widgets.push(w);
+    o += 8 + payloadSize;
+    index += 1;
+  }
+  return widgets;
+}
+
 export async function loadOriginalWorldResources({ baseUrl = new URL('assets/packs/', import.meta.url).href, fetcher = fetch, textData = {} } = {}) {
   const pack9 = await loadSplitPack(new URL('9/9', baseUrl).href, fetcher);
   const pack10 = await loadSplitPack(new URL('10/10', baseUrl).href, fetcher);
+  let pack6 = null;
+  try {
+    pack6 = await loadSplitPack(new URL('6/6', baseUrl).href, fetcher);
+  } catch {
+    pack6 = null;
+  }
   const table9 = (index) => decodeConfigTable(readPackBlock(pack9, index));
+  const uiScreen = (index) => (pack6 ? decodeUIScreen(readPackBlock(pack6, index)) : []);
   const config15 = table9(15);
   const openingEntities = decodeWorldEntities(readPackBlock(pack10, 16));
   const tileMap = decodeTileMap(
@@ -448,7 +509,7 @@ export async function loadOriginalWorldResources({ baseUrl = new URL('assets/pac
   const catalog = decodeFarmCatalog(pack9, textData);
   const farmEntities = decodeFarmWorldEntities(pack9, pack10);
   return {
-    packs: { 9: pack9, 10: pack10 },
+    packs: { 6: pack6, 9: pack9, 10: pack10 },
     config15,
     openingScript: decodeWorldScript(readPackBlock(pack10, 15)),
     openingEntities,
@@ -457,5 +518,6 @@ export async function loadOriginalWorldResources({ baseUrl = new URL('assets/pac
     catalog,
     farmEntities,
     table9,
+    uiScreen,
   };
 }

@@ -5,7 +5,7 @@
  */
 import { mountPhaserRuntime } from './phaser-engine.js';
 import { decodeBSpriteBlock, loadSplitPack, moduleToCanvasImage, readPackBlock } from './bsprite-loader.js';
-import { drawBSpriteBlockAnim, drawBSpriteBlockFrame, drawBSpriteFrame, drawBSpriteTileMap, withMIDPClip } from './render-original.js';
+import { drawBSpriteBlockAnim, drawBSpriteBlockFrame, drawBSpriteFrame, drawBSpriteTileMap, drawOriginalUIScreen, withMIDPClip } from './render-original.js';
 import { loadOriginalWorldResources } from './gf3-resource-loader.js';
 import {
   SCREEN_W, SCREEN_H, KEY, SOURCE_VIEW, LAND_ZONES, advanceEvidenceView, mapKeyCode,
@@ -57,20 +57,41 @@ function getSpriteBlock(blockId, paletteIndex = 0) {
   return entry;
 }
 
-function getUiSpriteBlock(blockId) {
+function getUiSpriteBlock(blockId, paletteIndex = 0) {
   if (!sourcePack7 || !Number.isInteger(blockId) || blockId < 0 || blockId >= 123) return null;
-  if (uiSpriteCache.has(blockId)) return uiSpriteCache.get(blockId);
+  const pal = Math.max(0, paletteIndex | 0);
+  const key = `${blockId}:${pal}`;
+  if (uiSpriteCache.has(key)) return uiSpriteCache.get(key);
   let entry = null;
   try {
     const raw = readPackBlock(sourcePack7, blockId);
-    const sprite = decodeBSpriteBlock(raw, { paletteIndex: 0 });
+    let sprite;
+    try {
+      sprite = decodeBSpriteBlock(raw, { paletteIndex: pal });
+    } catch {
+      sprite = decodeBSpriteBlock(raw, { paletteIndex: 0 });
+    }
     const moduleImages = sprite.moduleImages.map(moduleToCanvasImage);
     entry = { sprite, moduleImages };
   } catch {
     entry = null;
   }
-  uiSpriteCache.set(blockId, entry);
+  uiSpriteCache.set(key, entry);
   return entry;
+}
+
+// Port of a.java:9894: s < 1000 -> pack /7 (UI), s >= 1000 -> pack /5 (world)
+function getAnySpriteBlock(spriteId, paletteIndex = 0) {
+  if (spriteId < 1000) return getUiSpriteBlock(spriteId, paletteIndex);
+  return getSpriteBlock(spriteId - 1000, paletteIndex);
+}
+
+const uiScreenCache = new Map();
+function getUIScreen(screenId) {
+  if (uiScreenCache.has(screenId)) return uiScreenCache.get(screenId);
+  const widgets = sourceWorld?.uiScreen ? sourceWorld.uiScreen(screenId) : [];
+  uiScreenCache.set(screenId, widgets);
+  return widgets;
 }
 
 function loadImage(name, source) {
@@ -187,14 +208,14 @@ const KEY_BUILDING_LABELS = Object.freeze({
   17: 'Ao',
 });
 
-// Port of a.java:1853-1865, a.java:1881-1991, e.java:1710-1744 & i.java:315-350
+// Port of a.java:1853-1865, a.java:1881-1991, a.java:9553-9621 (a.M(1)), e.java:1710-1744 & i.java:315-350
 function renderFarmWorld(ctx) {
   ctx.fillStyle = '#2d4c1e';
   ctx.fillRect(0, 0, SCREEN_W, SCREEN_H);
   const s = app.session;
   const tm = sourceWorld?.tileMap;
-  const viewY = 28;
-  const viewH = SCREEN_H - 56;
+  const viewY = 0;
+  const viewH = SCREEN_H;
   if (tm && sourceTileSprite && sourceTileImages) {
     drawBSpriteTileMap(ctx, tm, sourceTileSprite, sourceTileImages, {
       x: 0,
@@ -383,86 +404,97 @@ function renderFarmWorld(ctx) {
     ctx.lineWidth = 1;
   });
 
-  // Top HUD Bar (0..28) with /7 UI icon accent & XP progress bar
-  ctx.fillStyle = '#182b13';
-  ctx.fillRect(0, 0, SCREEN_W, 28);
-  ctx.fillStyle = '#3c612d';
-  ctx.fillRect(0, 27, SCREEN_W, 1);
+  // 1:1 Original Green Farm 3 In-Game HUD from pack /6[1] + pack /7 (a.java:13154 a.M(1))
+  const hudWidgets = getUIScreen(1);
+  drawOriginalUIScreen(ctx, hudWidgets, getAnySpriteBlock, {
+    filterWidget: (w) => {
+      if (w.type !== 205) return false;
+      // Top HUD bars (Level star, XP bar, Coins pill, Cash pill, Quest icon) + bottom-left/right softkey buttons
+      // Exclude conditional seed-carousel slots (spr 9), vertical progress bar (spr 31), and timer spinner (spr 1)
+      if (w.y < 60 && w.spriteId !== 31) return true;
+      return w.index === 52 || w.index === 63 || w.index === 67;
+    },
+  });
 
-  const uiHud = getUiSpriteBlock(1);
-  if (uiHud) {
-    withMIDPClip(ctx, 2, 2, 16, 16, () => {
-      drawBSpriteBlockFrame(ctx, uiHud.sprite, uiHud.moduleImages, 0, 10, 10, 0);
-    });
-  }
+  // Live dynamic values aligned to exact /6[1] text widget coordinates (widgets [27],[26],[17],[22],[40])
   const xpNeed = xpForNextLevel(s);
-  const xpRatio = Math.max(0, Math.min(1, s.xp / Math.max(1, xpNeed)));
-  drawText(ctx, `Lv.${s.level}`, 20, 11, { size: 9, color: '#9cff7b', bold: true });
-  ctx.fillStyle = '#0d180a';
-  ctx.fillRect(46, 4, 46, 7);
-  ctx.fillStyle = '#74e352';
-  ctx.fillRect(47, 5, Math.round(44 * xpRatio), 5);
-  drawText(ctx, `⚡${s.energy}/${s.maxEnergy}`, 96, 11, { size: 8, color: '#7dd3fc', bold: true });
-  drawText(ctx, `💰${s.coins}`, SCREEN_W - 6, 11, { align: 'right', size: 9, color: '#ffd84d', bold: true });
+  drawText(ctx, `${s.level}`, 25, 19, { align: 'center', size: 9, color: '#fff8c8', bold: true });
+  drawText(ctx, `${s.xp}/${xpNeed} XP`, 103, 17, { align: 'center', size: 8, color: '#ffffff', bold: true });
+  drawText(ctx, `${s.coins}`, 57, 44, { align: 'center', size: 8, color: '#fff6b8', bold: true });
+  drawText(ctx, `${s.cash}`, 157, 44, { align: 'center', size: 8, color: '#c6ffd0', bold: true });
+  drawText(ctx, `⚡${s.energy}/${s.maxEnergy}`, 14, 60, { size: 8, color: '#ffe97d', bold: true });
 
-  const toolNames = { auto: '✋ Tay', plow: '⛏️ Cày đất', clear: '🪓 Dọn cỏ', place: `📍 Đặt ${s.placementItem?.spec?.name || ''}` };
-  drawText(ctx, `${toolNames[s.activeTool] || '✋ Tay'} · Đất:${s.unlockedZones?.length || 1}/6`, 6, 23, { size: 8, color: '#e6f0de', maxWidth: 165 });
-  const doneQ = s.quests?.filter(q => q.completed && !q.claimed).length || 0;
-  const readyCook = (s.kitchenQueue || []).filter(j => j.ready).length;
-  const rightHint = readyCook > 0 ? `🍳 ${readyCook} món` : doneQ > 0 ? `🎁 ${doneQ} NV` : `💵 ${s.cash}`;
-  drawText(ctx, rightHint, SCREEN_W - 6, 23, { align: 'right', size: 8, color: '#ffd84d', bold: true });
-
-  // Placement mode hint banner
-  if (s.activeTool === 'place' && s.placementItem) {
-    ctx.fillStyle = 'rgba(18, 42, 16, 0.9)';
-    ctx.fillRect(4, 30, SCREEN_W - 8, 16);
-    ctx.strokeStyle = '#58ff8a';
-    ctx.strokeRect(4.5, 30.5, SCREEN_W - 9, 15);
-    drawText(ctx, `Chạm bãi cỏ để đặt ${s.placementItem.spec.name} (Esc: Hủy)`, SCREEN_W / 2, 41, { align: 'center', size: 8, color: '#b7ffc6', bold: true });
+  // Active tool / placement hint pill
+  if (s.activeTool !== 'auto') {
+    const toolNames = {
+      plow: '⛏️ Cuốc: Chạm cỏ cày đất',
+      clear: '🪓 Rìu: Chạm cỏ/đá để dọn',
+      place: `📍 Chạm cỏ đặt ${s.placementItem?.spec?.name || ''} (Esc hủy)`,
+    };
+    ctx.fillStyle = 'rgba(59, 34, 13, 0.86)';
+    ctx.fillRect(10, 64, SCREEN_W - 20, 15);
+    ctx.strokeStyle = '#e8c47a';
+    ctx.strokeRect(10.5, 64.5, SCREEN_W - 21, 14);
+    drawText(ctx, toolNames[s.activeTool] || '', SCREEN_W / 2, 74, { align: 'center', size: 8, color: '#fff4c2', bold: true });
   }
 
-  // Toast banner
+  // Toast banner above bottom dock
   if (s.toast) {
-    ctx.fillStyle = 'rgba(14, 22, 13, 0.9)';
-    ctx.fillRect(4, SCREEN_H - 48, SCREEN_W - 8, 18);
-    ctx.strokeStyle = '#ffd84d';
-    ctx.strokeRect(4.5, SCREEN_H - 47.5, SCREEN_W - 9, 17);
-    drawText(ctx, s.toast, SCREEN_W / 2, SCREEN_H - 36, { align: 'center', size: 8, color: '#fff7c2', maxWidth: SCREEN_W - 14 });
+    ctx.fillStyle = 'rgba(59, 34, 13, 0.9)';
+    ctx.fillRect(6, SCREEN_H - 60, SCREEN_W - 12, 17);
+    ctx.strokeStyle = '#e8c47a';
+    ctx.strokeRect(6.5, SCREEN_H - 59.5, SCREEN_W - 13, 16);
+    drawText(ctx, s.toast, SCREEN_W / 2, SCREEN_H - 49, { align: 'center', size: 8, color: '#fff7c2', maxWidth: SCREEN_W - 18 });
   }
 
-  // Bottom 5-button Authentic Green Farm Toolbar (SCREEN_H - 28 .. SCREEN_H)
-  ctx.fillStyle = '#182b13';
-  ctx.fillRect(0, SCREEN_H - 28, SCREEN_W, 28);
-  const tabs = ['C.CỤ', 'CHỢ', 'KHO', 'NHÀ', 'NV/HX'];
-  const bw = Math.floor(SCREEN_W / tabs.length);
-  tabs.forEach((lbl, i) => {
-    const bx = i * bw + 2;
-    ctx.fillStyle = (i === 0 && s.activeTool !== 'auto') ? '#3d612a' : '#263a21';
-    ctx.fillRect(bx, SCREEN_H - 24, bw - 4, 20);
-    ctx.strokeStyle = '#78ab63';
-    ctx.strokeRect(bx + 0.5, SCREEN_H - 23.5, bw - 5, 19);
-    drawText(ctx, lbl, bx + (bw - 4) / 2, SCREEN_H - 11, { align: 'center', size: 8, color: '#f2f7ec', bold: true });
+  // Crisp labels on the original /6[1] bottom Gameloft dock buttons (y = 280..320)
+  const dockLabels = [
+    { x: 24, label: 'C.CỤ' },
+    { x: 72, label: 'CHỢ' },
+    { x: 120, label: 'KHO' },
+    { x: 168, label: 'NHÀ' },
+    { x: 216, label: 'NV/HX' },
+  ];
+  dockLabels.forEach((b) => {
+    ctx.fillStyle = 'rgba(46, 26, 9, 0.78)';
+    ctx.fillRect(b.x - 21, SCREEN_H - 13, 42, 12);
+    drawText(ctx, b.label, b.x, SCREEN_H - 4, { align: 'center', size: 7, color: '#fff4cc', bold: true });
   });
 }
 
-function renderPanelList(ctx, title, subtitle, rows, cursorIdx, footer, tabBar = null) {
-  ctx.fillStyle = '#121c11';
+// Port of a.java:9553-9621: draw real original Gameloft /6[screenId] wooden/parchment UI frame & header
+function renderPanelList(ctx, title, subtitle, rows, cursorIdx, footer, tabBar = null, screenId = 2) {
+  ctx.fillStyle = '#3c2512';
   ctx.fillRect(0, 0, SCREEN_W, SCREEN_H);
-  ctx.fillStyle = '#1e3319';
-  ctx.fillRect(0, 0, SCREEN_W, tabBar ? 54 : 38);
-  drawText(ctx, title, 8, 14, { size: 10, color: '#ffd84d', bold: true });
-  drawText(ctx, subtitle, 8, 28, { size: 8, color: '#9cff7b', maxWidth: SCREEN_W - 16 });
 
-  let listTop = 42;
+  // Draw the authentic original Gameloft /6[screenId] parchment frame (/7[22]), header ribbon (/7[33]),
+  // and bottom wooden softkey buttons (/7[12])
+  const screenWidgets = getUIScreen(screenId);
+  drawOriginalUIScreen(ctx, screenWidgets, getAnySpriteBlock, {
+    filterWidget: (w) => {
+      if (w.type !== 205) return false;
+      return w.spriteId === 22 || w.spriteId === 33 || w.spriteId === 12;
+    },
+  });
+
+  // Crisp wooden header plate over top banner for guaranteed contrast on all /6 screens
+  ctx.fillStyle = 'rgba(74, 42, 16, 0.9)';
+  ctx.fillRect(10, 4, SCREEN_W - 20, 30);
+  ctx.strokeStyle = '#d4a259';
+  ctx.strokeRect(10.5, 4.5, SCREEN_W - 21, 29);
+  drawText(ctx, title, SCREEN_W / 2, 16, { align: 'center', size: 9, color: '#fff7d1', bold: true });
+  drawText(ctx, subtitle, SCREEN_W / 2, 29, { align: 'center', size: 7, color: '#ffe8a3', bold: true, maxWidth: SCREEN_W - 26 });
+
+  let listTop = 44;
   if (tabBar && tabBar.length > 0) {
-    const tw = Math.floor((SCREEN_W - 8) / tabBar.length);
+    const tw = Math.floor((SCREEN_W - 20) / tabBar.length);
     tabBar.forEach((t, i) => {
-      const tx = 4 + i * tw;
-      ctx.fillStyle = t.active ? '#3c6629' : '#182814';
-      ctx.fillRect(tx + 1, 34, tw - 2, 17);
-      ctx.strokeStyle = t.active ? '#ffd84d' : '#416136';
-      ctx.strokeRect(tx + 1.5, 34.5, tw - 3, 16);
-      drawText(ctx, t.label, tx + tw / 2, 46, { align: 'center', size: 8, color: t.active ? '#fff7c2' : '#c6d6be', bold: t.active });
+      const tx = 10 + i * tw;
+      ctx.fillStyle = t.active ? 'rgba(139, 78, 28, 0.92)' : 'rgba(232, 206, 152, 0.85)';
+      ctx.fillRect(tx + 1, 36, tw - 2, 16);
+      ctx.strokeStyle = t.active ? '#ffd84d' : '#7a4b1f';
+      ctx.strokeRect(tx + 1.5, 36.5, tw - 3, 15);
+      drawText(ctx, t.label, tx + tw / 2, 47, { align: 'center', size: 8, color: t.active ? '#fff8d4' : '#4a290c', bold: true });
     });
     listTop = 58;
   }
@@ -474,27 +506,30 @@ function renderPanelList(ctx, title, subtitle, rows, cursorIdx, footer, tabBar =
     const idx = start + i;
     const item = rows[idx];
     const y = listTop + i * rowH;
-    ctx.fillStyle = idx === cursorIdx ? '#2e4728' : '#192617';
-    ctx.fillRect(6, y, SCREEN_W - 12, rowH - 3);
-    ctx.strokeStyle = idx === cursorIdx ? '#ffd84d' : '#334d2d';
-    ctx.strokeRect(6.5, y + 0.5, SCREEN_W - 13, rowH - 4);
-    let textX = 11;
+    // Warm Gameloft parchment row card over the original /7[22] parchment background
+    ctx.fillStyle = idx === cursorIdx ? 'rgba(255, 240, 178, 0.92)' : 'rgba(247, 232, 194, 0.78)';
+    ctx.fillRect(10, y, SCREEN_W - 20, rowH - 3);
+    ctx.strokeStyle = idx === cursorIdx ? '#c46c17' : '#9c6e3b';
+    ctx.strokeRect(10.5, y + 0.5, SCREEN_W - 21, rowH - 4);
+    let textX = 15;
     if (item.spriteBlock != null) {
       const entry = getSpriteBlock(item.spriteBlock, item.paletteIndex || 0);
       if (entry) {
-        withMIDPClip(ctx, 8, y + 2, 22, 19, () => {
-          drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, item.spriteFrame ?? 0, 19, y + 17, 0);
+        withMIDPClip(ctx, 12, y + 2, 22, 19, () => {
+          drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, item.spriteFrame ?? 0, 23, y + 17, 0);
         });
-        textX = 33;
+        textX = 37;
       }
     }
-    drawText(ctx, item.left, textX, y + 14, { size: 8, color: item.locked ? '#889483' : '#f2f7ec', maxWidth: 162 - textX });
-    drawText(ctx, item.right, SCREEN_W - 10, y + 14, { align: 'right', size: 8, color: item.rightColor || '#ffd84d', bold: true });
+    drawText(ctx, item.left, textX, y + 14, { size: 8, color: item.locked ? '#8a7356' : '#3a1f08', bold: idx === cursorIdx, maxWidth: 162 - textX });
+    const priceCol = item.rightColor === '#ff7b70' ? '#b3281d' : item.rightColor === '#9cff7b' ? '#1c6b1c' : '#7a3f06';
+    drawText(ctx, item.right, SCREEN_W - 14, y + 14, { align: 'right', size: 8, color: priceCol, bold: true });
   }
 
-  ctx.fillStyle = '#1e3319';
-  ctx.fillRect(0, SCREEN_H - 26, SCREEN_W, 26);
-  drawText(ctx, footer, SCREEN_W / 2, SCREEN_H - 10, { align: 'center', size: 8, color: '#e6f0de' });
+  // Footer text over the original /7[12] wooden softkey strip
+  ctx.fillStyle = 'rgba(59, 34, 13, 0.85)';
+  ctx.fillRect(28, SCREEN_H - 22, SCREEN_W - 56, 17);
+  drawText(ctx, footer, SCREEN_W / 2, SCREEN_H - 10, { align: 'center', size: 7, color: '#fff7d1', bold: true });
 }
 
 function getShopItems(s) {
@@ -537,7 +572,7 @@ function renderShop(ctx) {
       paletteIndex: it.paletteIndex ?? 0,
     };
   });
-  renderPanelList(ctx, 'CỬA HÀNG NÔNG TRẠI (5 MỤC)', `Xu: ${s.coins} · Cấp: ${s.level} · Chạm mục để mua/đặt`, rows, s.shopCursor, 'Chạm dòng để mua · Q: Đổi tab · E/Esc: Đóng', tabDefs);
+  renderPanelList(ctx, 'CỬA HÀNG NÔNG TRẠI', `Xu: ${s.coins} · Cấp: ${s.level}`, rows, s.shopCursor, 'Chạm mua · Q: Đổi tab · Esc: Đóng', tabDefs, 2);
 }
 
 function renderSeedPicker(ctx) {
@@ -551,7 +586,7 @@ function renderSeedPicker(ctx) {
     spriteBlock: c.worldBlock,
     spriteFrame: 2,
   }));
-  renderPanelList(ctx, 'CHỌN HẠT GIỐNG ĐỂ GIEO (/9[2])', `Xu: ${s.coins} · Cấp: ${s.level} · Chọn cây trồng vào ô đất`, rows, s.panelCursor, 'Chạm hạt giống để trồng ngay · E/Esc: Đóng');
+  renderPanelList(ctx, 'CHỌN HẠT GIỐNG', `Xu: ${s.coins} · Cấp: ${s.level}`, rows, s.panelCursor, 'Chạm hạt giống để trồng · Esc: Đóng', null, 22);
 }
 
 function renderBarn(ctx) {
@@ -565,7 +600,7 @@ function renderBarn(ctx) {
       ? items.map(it => ({ left: `${it.name} ×${it.qty}`, right: `Bán +${it.sellPrice * it.qty}G` }))
       : [{ left: 'Kho đang trống — hãy thu hoạch cây/thú!', right: '0G' }]),
   ];
-  renderPanelList(ctx, `KHO THÓC (${totalQty}/${s.barnCapacity})`, `Xu: ${s.coins} · Nông sản & thành phẩm Nhà bếp`, rows, s.barnCursor, 'Chạm để bán/nâng cấp · Q: Bán hết · E/Esc: Đóng');
+  renderPanelList(ctx, `KHO THÓC (${totalQty}/${s.barnCapacity})`, `Xu: ${s.coins} · Nông sản & thành phẩm`, rows, s.barnCursor, 'Chạm bán · Q: Bán hết · Esc: Đóng', null, 8);
 }
 
 function renderKitchen(ctx) {
@@ -585,7 +620,7 @@ function renderKitchen(ctx) {
       rightColor: canCook ? '#9cff7b' : '#ff9f70',
     };
   });
-  renderPanelList(ctx, 'NHÀ BẾP — CHẾ BIẾN (/9[7])', `Đang nấu: ${s.kitchenQueue?.length || 0}/4 · Cấp: ${s.level}`, [...queueRows, ...recipeRows], s.panelCursor, 'Chạm món đủ nguyên liệu để nấu · E/Esc: Đóng');
+  renderPanelList(ctx, 'NHÀ BẾP — CHẾ BIẾN', `Đang nấu: ${s.kitchenQueue?.length || 0}/4 · Cấp: ${s.level}`, [...queueRows, ...recipeRows], s.panelCursor, 'Chạm món để nấu · Esc: Đóng', null, 3);
 }
 
 function renderManor(ctx) {
@@ -608,7 +643,7 @@ function renderManor(ctx) {
       spriteFrame: r.frame || 0,
     };
   });
-  renderPanelList(ctx, 'DINH THỰ & CÔNG TRÌNH (/9[3])', `Xu: ${s.coins} · Sửa 9 phòng & mở nhanh các nhà`, [...quickLinks, ...roomRows], s.panelCursor, 'Chạm để vào nhà hoặc sửa phòng · E/Esc: Đóng');
+  renderPanelList(ctx, 'DINH THỰ & CÔNG TRÌNH', `Xu: ${s.coins} · Sửa 9 phòng & mở nhanh`, [...quickLinks, ...roomRows], s.panelCursor, 'Chạm vào nhà/sửa phòng · Esc: Đóng', null, 14);
 }
 
 function renderCoop(ctx) {
@@ -629,7 +664,7 @@ function renderCoop(ctx) {
       spriteFrame: a.idleFrame || 0,
     })),
   ];
-  renderPanelList(ctx, isChicken ? 'CHUỒNG GÀ (1003)' : 'CHUỒNG THÚ (1004)', `Số lượng: ${animals.length}/${isChicken ? s.coopCapacity : s.shedCapacity}`, rows, s.panelCursor, 'Chạm vật nuôi để thu hoạch/cho ăn · E/Esc: Đóng');
+  renderPanelList(ctx, isChicken ? 'CHUỒNG GÀ' : 'CHUỒNG THÚ', `Số lượng: ${animals.length}/${isChicken ? s.coopCapacity : s.shedCapacity}`, rows, s.panelCursor, 'Chạm thú để thu/cho ăn · Esc: Đóng', null, 22);
 }
 
 function renderMailbox(ctx) {
@@ -639,7 +674,7 @@ function renderMailbox(ctx) {
     right: m.claimed ? 'ĐÃ NHẬN' : m.kind === 'gift' ? `NHẬN +${m.giftCoins}G` : `GIAO +${m.giftCoins}G`,
     rightColor: m.claimed ? '#889483' : '#9cff7b',
   }));
-  renderPanelList(ctx, 'HÒM THƯ & ĐƠN HÀNG (1007)', `Xu: ${s.coins} · Quà tặng & đơn hàng từ hàng xóm`, rows, s.panelCursor, 'Chạm thư để nhận quà/giao đơn · E/Esc: Đóng');
+  renderPanelList(ctx, 'HÒM THƯ & ĐƠN HÀNG', `Xu: ${s.coins} · Quà & đơn hàng`, rows, s.panelCursor, 'Chạm thư để nhận/giao · Esc: Đóng', null, 15);
 }
 
 function renderCollections(ctx) {
@@ -653,7 +688,7 @@ function renderCollections(ctx) {
       rightColor: qty > 0 ? '#9cff7b' : '#889483',
     };
   });
-  renderPanelList(ctx, 'PHÒNG SƯU TẬP CỔ VẬT (/9[16])', 'Thu hoạch cây & dọn cỏ/đá để tìm 15 cổ vật quý!', rows, s.panelCursor, 'Chạm cổ vật đã tìm được để bán · E/Esc: Đóng');
+  renderPanelList(ctx, 'PHÒNG SƯU TẬP CỔ VẬT', 'Tìm 15 cổ vật khi thu hoạch & dọn đất!', rows, s.panelCursor, 'Chạm cổ vật để bán · Esc: Đóng', null, 9);
 }
 
 function renderQuestsOrNeighbors(ctx) {
@@ -674,14 +709,14 @@ function renderQuestsOrNeighbors(ctx) {
         spriteFrame: 0,
       };
     });
-    renderPanelList(ctx, 'HÀNG XÓM (/9[8])', `Năng lượng: ⚡${s.energy}/${s.maxEnergy} · Giúp hàng xóm kiếm Xu & XP`, rows, s.panelCursor, 'Chạm hàng xóm để ghé thăm & giúp · E/Esc: Đóng', tabDefs);
+    renderPanelList(ctx, '10 HÀNG XÓM', `Năng lượng: ⚡${s.energy}/${s.maxEnergy}`, rows, s.panelCursor, 'Chạm để ghé giúp · Esc: Đóng', tabDefs, 15);
   } else {
     const rows = (s.quests || []).map(q => ({
       left: q.title,
       right: q.claimed ? 'ĐÃ NHẬN' : q.completed ? `NHẬN +${q.rewardCoins}G` : `${q.progress}/${q.targetCount}`,
       rightColor: q.completed && !q.claimed ? '#9cff7b' : '#ffd84d',
     }));
-    renderPanelList(ctx, 'NHIỆM VỤ (/9[25])', `Xu: ${s.coins} · Cấp: ${s.level}`, rows, s.questCursor, 'Chạm NV hoàn thành để nhận thưởng · E/Esc: Đóng', tabDefs);
+    renderPanelList(ctx, 'NHIỆM VỤ', `Xu: ${s.coins} · Cấp: ${s.level}`, rows, s.questCursor, 'Chạm NV xong để nhận · Esc: Đóng', tabDefs, 9);
   }
 }
 
@@ -723,7 +758,7 @@ function onPointerDown(event) {
   const x = (event.clientX - rect.left) * (SCREEN_W / rect.width);
   const y = (event.clientY - rect.top) * (SCREEN_H / rect.height);
   const s = app.session;
-  if (s.view === SOURCE_VIEW.WORLD_LAYER && y >= 28 && y < SCREEN_H - 28) {
+  if (s.view === SOURCE_VIEW.WORLD_LAYER && y >= 50 && y < SCREEN_H - 36) {
     dragState = { pointerId: event.pointerId, startX: x, startY: y, camX: s.cameraX, camY: s.cameraY, dragged: false };
     try { canvasEl.setPointerCapture(event.pointerId); } catch { /* ignore */ }
     event.preventDefault();
@@ -918,8 +953,15 @@ function handleTap(x, y, event) {
     return;
   }
 
-  // Bottom 5-button Toolbar
-  if (y >= SCREEN_H - 28) {
+  // Top-right Quest icon in original /6[1] HUD (x >= 200, y <= 38)
+  if (x >= 200 && y <= 38) {
+    s.view = SOURCE_VIEW.QUESTS;
+    event.preventDefault();
+    return;
+  }
+
+  // Bottom original Gameloft dock (y >= SCREEN_H - 38)
+  if (y >= SCREEN_H - 38) {
     const tabIdx = Math.max(0, Math.min(4, Math.floor(x / (SCREEN_W / 5))));
     if (tabIdx === 0) {
       const order = ['auto', 'plow', 'clear'];
@@ -944,10 +986,10 @@ function handleTap(x, y, event) {
     return;
   }
 
-  // World interaction tap
+  // World interaction tap (full-bleed 240x320 viewport!)
   const wx = x + s.cameraX;
-  const wy = (y - 28) + s.cameraY;
-  const hit = sourceTileAt(sourceWorld.tileMap, x, y - 28, s.cameraX, s.cameraY);
+  const wy = y + s.cameraY;
+  const hit = sourceTileAt(sourceWorld.tileMap, x, y, s.cameraX, s.cameraY);
 
   // Mode 1: Placement Mode (Fruit Tree / Animal / Decor)
   if (s.activeTool === 'place' && s.placementItem && hit) {
