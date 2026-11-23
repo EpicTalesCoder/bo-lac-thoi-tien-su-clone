@@ -1,4 +1,40 @@
-# Bộ Prompt Mẫu 4 Chặng Để AI Port Game J2ME Giống Bản Gốc 1:1
+# Bộ Prompt Mẫu Để AI Tự Động Decompile & Port Game J2ME Giống Bản Gốc 1:1
+
+---
+
+## Prompt Tổng Tự Chủ (Copy-Paste 1 lần cho mọi AI: Antigravity / Cursor / Claude / Codex)
+
+Chỉ cần thay `<tên game hoặc slug>` (ví dụ `total-tournament`, `ancient-empires-2`, `green-farm-3` hoặc kèm đường dẫn file `.jar` mới) rồi dán nguyên đoạn sau cho AI:
+
+```text
+Hãy decompile và port 1:1 game <tên game hoặc slug> lên web-port trong monorepo này.
+
+BẮT BUỘC làm đúng theo thứ tự sau (không bỏ bước, không tự bịa game theo trí nhớ):
+1. ĐỌC TÀI LIỆU CHUẨN TRƯỚC:
+   - docs/J2ME_DECOMPILE_FIDELITY_GUIDE.md
+   - .agents/rules/j2me-port-fidelity.md
+   - .agents/skills/j2me-reverse-and-web-port/SKILL.md
+   - .agents/skills/j2me-reverse-and-web-port/references/decompile-to-source-parity.md
+2. CHUẨN BỊ BẰNG CHỨNG TỰ ĐỘNG:
+   - Nếu là file .jar mới chưa có trong games/, chạy `python3 tools/new-game-port.py <slug> <path.jar> "<Tên Game>"`.
+   - Chạy `python3 tools/prepare-j2me-evidence.py <slug>` để xuất đầy đủ `recovered/`, `bytecode-evidence/*.javap.txt`, `decompiled-*/*.java` và `CLASS-INDEX.md`.
+   - Tuyệt đối KHÔNG sửa file `games/<slug>/original/*.jar`.
+3. TỰ LẬP KẾ HOẠCH 4 CHẶNG RÕ RÀNG VÀ LÀM TỪNG CHẶNG:
+   - Chặng 1 (Phân tích — chưa sửa web-port): Viết/cập nhật `games/<slug>/analysis/CLASS-RESPONSIBILITIES.md` (vai trò từng class, state machine, cấu trúc binary map/sprite/BSprite/text, công thức gốc kèm `Class.java:line`).
+   - Chặng 2 (Giải mã & Vẽ 1:1): Viết decoder đọc trực tiếp map/sprite/palette/text gốc từ `assets/` + port hàm `paint()` vào `render-original.js` (đúng Anchor, 8 phép `drawRegionMIDP`, `setClip`, `imageSmoothingEnabled = false`, KHÔNG dùng `fillRect` thay sprite/map gốc).
+   - Chặng 3 (Gameplay chuẩn mã gốc): Port vòng lặp `run()/tick()`, điều khiển (chuột + phím), chiến đấu/kinh tế/AI/màn chơi/lưu game vào `game.js` với comment dẫn chiếu `// Port of Class.java:line`.
+   - Chặng 4 (Kiểm thử & Build): Viết/chạy test `node --check`, `node --test`, build `python3 tools/build-portal.py`, kiểm tra chạy không lỗi Console trên localhost và báo cáo rõ phần nào đã giống gốc 1:1, phần nào còn thiếu.
+
+Bắt đầu từ Bước 1 & 2, lập kế hoạch 4 chặng rồi triển khai ngay Chặng 1.
+```
+
+> **Mẹo dùng siêu ngắn trong workspace này**: Vì repo đã gắn sẵn rule [.agents/rules/j2me-port-fidelity.md](../.agents/rules/j2me-port-fidelity.md), bạn chỉ cần gõ ngắn gọn:
+> `Decompile và port 1:1 game total-tournament theo đúng rule j2me-port-fidelity.`
+> là AI Agent sẽ tự động chạy đủ quy trình trên!
+
+---
+
+## Bộ Prompt Tách Từng Chặng (Dùng khi muốn kiểm soát chặt từng bước)
 
 > **Nguyên tắc vàng**: **KHÔNG** giao cả game trong 1 câu lệnh duy nhất! Hãy thay `<slug>` bằng tên thư mục game (ví dụ `ancient-empires-2`, `green-farm-3`, `total-tournament`) và chạy lần lượt **4 chặng dưới đây**. Xong chặng nào kiểm tra trực tiếp trên trình duyệt chặng đó rồi mới sang chặng sau.
 
