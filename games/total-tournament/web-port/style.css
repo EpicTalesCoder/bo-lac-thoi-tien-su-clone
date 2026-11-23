@@ -1,6 +1,95 @@
-html, body { margin:0; min-height:100%; background:#000; color:#ddd; font-family:monospace; }
-body { display:grid; place-items:center; }
-.shell { display:grid; gap:8px; justify-items:center; padding:12px; }
-canvas { width:min(92vw, 480px); height:auto; image-rendering:pixelated; image-rendering:crisp-edges; background:#000; }
-.hint { margin:0; color:#aaa; font-size:11px; text-align:center; }
-a { color:#bbb; font-size:11px; }
+:root {
+  color-scheme: dark;
+  font-family: system-ui, -apple-system, sans-serif;
+  background: #0b0e14;
+  color: #eef1f7;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background: #0b0e14;
+}
+
+.app-shell, .viewport-stage {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(circle at center, #182030 0%, #07090d 100%);
+}
+
+#game {
+  display: block;
+  width: min(100vw, calc(100vh * 0.75));
+  height: min(100vh, calc(100vw / 0.75));
+  background: #000;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  touch-action: none;
+  box-shadow: 0 0 36px rgba(0, 0, 0, 0.8);
+}
+
+.floating-toolbar {
+  position: fixed;
+  top: 8px;
+  right: 10px;
+  z-index: 30;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid #9bb6ff44;
+  border-radius: 999px;
+  background: rgba(12, 16, 26, 0.78);
+  backdrop-filter: blur(6px);
+  opacity: 0.78;
+  transition: opacity .15s ease;
+}
+
+.floating-toolbar:hover { opacity: 1; }
+
+.runtime-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 6px;
+  color: #d6e2ff;
+  font: 500 11px monospace;
+  white-space: nowrap;
+}
+
+.runtime-badge span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #62b6ff;
+  box-shadow: 0 0 8px #62b6ffa0;
+}
+
+.floating-toolbar a,
+.floating-toolbar button {
+  padding: 4px 9px;
+  border: 1px solid #ffffff24;
+  border-radius: 999px;
+  background: #ffffff12;
+  color: #eef1f7;
+  font: 600 11px monospace;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.floating-toolbar a:hover,
+.floating-toolbar button:hover {
+  background: #ffffff26;
+}

@@ -1,18 +1,36 @@
 <!doctype html>
 <html lang="ru">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>TOTAL TOURNAMENT — NET Lizard</title>
-  <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="style.css">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+  <title>TOTAL TOURNAMENT — Full Window Web Port</title>
+  <link rel="icon" href="data:," />
+  <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <main class="shell">
-    <canvas id="game" width="240" height="320" aria-label="Total Tournament"></canvas>
-    <p class="hint">УПРАВЛЕНИЕ: 2/4/5/6/8 · ЗВУК: 0 · МЕНЮ: #</p>
-    <p><a href="../../../index.html">← К порталу игр</a></p>
+  <main class="app-shell">
+    <section class="viewport-stage" id="viewport-stage" aria-label="Total Tournament">
+      <canvas id="game" width="240" height="320" aria-label="Total Tournament"></canvas>
+      <div class="floating-toolbar" aria-label="Window tools">
+        <span class="runtime-badge"><span></span> 240×320</span>
+        <a href="../../../index.html" title="Quay lại Cổng Game">← Cổng Game</a>
+        <button type="button" id="btn-fullscreen" title="Toàn màn hình (Fullscreen)">⛶ Toàn màn hình</button>
+      </div>
+    </section>
   </main>
   <script type="module" src="game.js"></script>
+  <script>
+    (() => {
+      const stage = document.getElementById('viewport-stage');
+      const btn = document.getElementById('btn-fullscreen');
+      btn?.addEventListener('click', () => {
+        if (!document.fullscreenElement) stage?.requestFullscreen?.().catch(() => {});
+        else document.exitFullscreen?.().catch(() => {});
+      });
+    })();
+  </script>
 </body>
 </html>

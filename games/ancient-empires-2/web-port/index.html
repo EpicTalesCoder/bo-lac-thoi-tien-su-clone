@@ -1,32 +1,36 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#17141b">
-  <title>Ancient Empires II — Web Port</title>
-  <link rel="stylesheet" href="style.css">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+  <meta name="theme-color" content="#0e131a" />
+  <title>Ancient Empires II — Full Window Web Port</title>
+  <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <main class="shell">
-    <header class="masthead">
-      <div>
-        <p class="eyebrow">MACROSPACE · 2004 · WEB RECONSTRUCTION</p>
-        <h1>Ancient <span>Empires II</span></h1>
+  <main class="app-shell">
+    <section class="viewport-stage" id="viewport-stage" aria-label="Ancient Empires II">
+      <div id="game" role="application" aria-label="Game canvas"></div>
+      <div class="floating-toolbar" aria-label="Window tools">
+        <span class="runtime-badge"><span aria-hidden="true"></span><strong id="system-status">LOADING</strong></span>
+        <a href="../../../index.html" title="Quay lại Cổng Game">← Cổng Game</a>
+        <button type="button" id="btn-fullscreen" title="Toàn màn hình (Fullscreen)">⛶ Toàn màn hình</button>
       </div>
-      <p class="build-note">Evidence-backed web prototype<br>Canvas · original J2ME artwork</p>
-    </header>
-    <section class="cabinet" aria-label="Ancient Empires II game">
-      <div class="cabinet-top"><span>TACTICAL COMMAND</span><span id="system-status">LOADING</span></div>
-      <div id="game-shell">
-        <div id="game" role="application" aria-label="Game canvas"></div>
-      </div>
-      <div class="cabinet-bottom"><span>CLDC 1.0 · MIDP 1.0 RECONSTRUCTION</span><span>240 × 320</span></div>
     </section>
-    <p class="instructions">Tap / click to advance. On the board, select units with arrows or WASD and Enter; click maps directly to cursor/action. Escape backs out. End-turn and battle rules still have source fields marked CHƯA XÁC MINH.</p>
-    <a class="back-link" href="../../../portal/index.html">← Back to game portal</a>
-    <p class="scope-note">A source-guided web reconstruction, not the original Java runtime. Online services are disabled.</p>
   </main>
   <script type="module" src="game.js"></script>
+  <script>
+    (() => {
+      const stage = document.getElementById('viewport-stage');
+      const btn = document.getElementById('btn-fullscreen');
+      btn?.addEventListener('click', () => {
+        if (!document.fullscreenElement) stage?.requestFullscreen?.().catch(() => {});
+        else document.exitFullscreen?.().catch(() => {});
+      });
+    })();
+  </script>
 </body>
 </html>
