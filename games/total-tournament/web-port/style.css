@@ -1,7 +1,6 @@
-body { background:#111; color:#eee; font-family:monospace; text-align:center; padding:20px; }
-h1 { font-size:20px; color:#9cff7b; margin-bottom:8px; }
-h1 .sub { font-size:11px; color:#888; }
-canvas { border:2px solid #444; image-rendering:pixelated; image-rendering:crisp-edges;
-  width:min(92vw, 360px); height:auto; background:#000; }
-.hint { font-size:11px; color:#aaa; }
-a { color:#9cff7b; }
+html, body { margin:0; min-height:100%; background:#000; color:#ddd; font-family:monospace; }
+body { display:grid; place-items:center; }
+.shell { display:grid; gap:8px; justify-items:center; padding:12px; }
+canvas { width:min(92vw, 480px); height:auto; image-rendering:pixelated; image-rendering:crisp-edges; background:#000; }
+.hint { margin:0; color:#aaa; font-size:11px; text-align:center; }
+a { color:#bbb; font-size:11px; }

@@ -1,902 +1,406 @@
-/**
- * Total Tournament — web port (Phaser 3 pipeline, canvas 2D render vào framebuffer).
- * Kiến trúc giống game 1 của repo: sim tick 120ms (MIDP) + render mỗi rAF.
- */
-import { mountPhaserRuntime } from './phaser-engine.js';
-import { LANG, loadSave, saveSave, getLang } from './storage-i18n.js';
-import {
-  WEAPONS, MODES, TILE, MAP_W, MAP_H, WORLD_W, WORLD_H, TICK_MS,
-  createMatch, stepMatch, matchResult,
-} from './tt-core.js';
+import { loadOriginalImages, loadOriginalTables } from './tt-loader.js';
+import { decodeJ2meText, parseJ2meTextTable, wrapJ2meText } from './text-original.js';
+import { decodeFontMetrics, createOriginalFont } from './font-original.js';
+import { renderOriginal } from './render-original.js';
+import { TICK_TARGET_MS, createEngineLoop, decodeGameplayKey, getUiSpriteRect, MODE } from './tt-core.js';
+import { drawRegionMIDP, withMIDPClip } from './midp-graphics.js';
 
-/* ---------- asset loading ---------- */
-const ASSETS = ['u2','u3','u5','u0','u6','u1','s0','s1','u7','u8','u4','erou','curs','ld','fnt','f1','f2','l0','l1','li1','li2','lz','or','bg0','bg1'];
-const IMG = {};
-const canvasEl = typeof document !== 'undefined' ? document.getElementById('game') : null;
+const WIDTH = 240;
+const HEIGHT = 320;
+const canvas = document.querySelector('#game');
+const ctx = canvas?.getContext('2d', { alpha: false });
+if (canvas) { canvas.width = WIDTH; canvas.height = HEIGHT; }
+if (ctx) ctx.imageSmoothingEnabled = false;
 
-function loadImage(name) {
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => resolve([name, img]);
-    img.onerror = () => resolve([name, null]);
-    img.src = `assets/${name}.png`;
-  });
-}
-
-async function loadAll() {
-  const pairs = await Promise.all(ASSETS.map(loadImage));
-  for (const [n, img] of pairs) IMG[n] = img;
-}
-
-/* ---------- sprite kit (crop + team tint) ---------- */
-function trimCanvas(src, sx, sy, sw, sh) {
-  const c = document.createElement('canvas');
-  c.width = sw; c.height = sh;
-  const g = c.getContext('2d');
-  g.drawImage(src, sx, sy, sw, sh, 0, 0, sw, sh);
-  const d = g.getImageData(0, 0, sw, sh).data;
-  let minx = sw, miny = sh, maxx = -1, maxy = -1;
-  for (let y = 0; y < sh; y++) for (let x = 0; x < sw; x++) {
-    if (d[(y * sw + x) * 4 + 3] > 20) {
-      if (x < minx) minx = x; if (x > maxx) maxx = x;
-      if (y < miny) miny = y; if (y > maxy) maxy = y;
-    }
-  }
-  if (maxx < 0) return c;
-  const w = maxx - minx + 1, h = maxy - miny + 1;
-  const c2 = document.createElement('canvas');
-  c2.width = w; c2.height = h;
-  c2.getContext('2d').drawImage(c, minx, miny, w, h, 0, 0, w, h);
-  return c2;
-}
-
-function tintCanvas(src, color, alpha) {
-  const c = document.createElement('canvas');
-  c.width = src.width; c.height = src.height;
-  const g = c.getContext('2d');
-  g.drawImage(src, 0, 0);
-  g.globalCompositeOperation = 'source-atop';
-  g.globalAlpha = alpha;
-  g.fillStyle = color;
-  g.fillRect(0, 0, c.width, c.height);
-  return c;
-}
-
-/* Bảng frame chính xác giải mã từ file dữ liệu cu2 của JAR gốc
- * (aO[row] = dx,dy,w,h,ofsX,ofsY,imgIdx). Lính = u3(0,0,40x39) quay PHẢI.
- * Muzzle flash = u0 rows 43-48 (vàng loại A / xanh loại B). Nổ lớn = u6 33-42. */
-const CHARACTER_PARTS = {
-  // Decoded ca row 0 (Soldier) and row 110 (Mutant): each ca triple is [dx, dy, cu2 frame].
-  soldier: [
-    { image: 1, sx: 26, sy: 0, w: 28, h: 15, dx: -12, dy: 0 },
-    { image: 2, sx: 41, sy: 28, w: 42, h: 15, dx: -12, dy: -12 },
-    { image: 2, sx: 40, sy: 75, w: 44, h: 16, dx: -15, dy: -8 },
-  ],
-  mutant: [
-    { image: 1, sx: 26, sy: 0, w: 28, h: 15, dx: -12, dy: 0 },
-    { image: 3, sx: 113, sy: 21, w: 10, h: 19, dx: -19, dy: -12 },
-    { image: 3, sx: 42, sy: 55, w: 39, h: 16, dx: -15, dy: -9 },
-  ],
-};
-const FR = {
-  flashYellow: [[0, 0, 21, 27], [21, 0, 23, 30], [44, 0, 24, 29]],
-  flashBlue: [[0, 30, 21, 27], [21, 30, 23, 30], [44, 30, 24, 29]],
-  boomBig: [[68, 0, 24, 36], [22, 0, 22, 42], [63, 36, 19, 38], [44, 0, 24, 36], [0, 0, 22, 42], [44, 36, 19, 38], [0, 42, 38, 34], [82, 36, 32, 31], [92, 0, 24, 25], [82, 67, 28, 32]],
-  boomSmall: [[0, 76, 12, 12], [24, 76, 12, 12], [12, 76, 12, 12], [36, 76, 12, 13], [0, 88, 12, 12], [12, 88, 12, 12], [24, 88, 12, 12], [52, 76, 14, 14], [66, 76, 16, 16]],
-  flagRed: [[0, 0, 15, 14], [0, 14, 15, 14], [0, 28, 15, 14]],
-  flagGreen: [[15, 0, 15, 14], [15, 14, 15, 14], [15, 28, 15, 14]],
-  base: [7, 0, 0, 24, 23],
-  // u5 source crops by decoded cu2 frame: AK (77), rifle (78), plasma (79), launcher (80).
-  guns: { saw: null, mg: [5, 37, 17, 37, 8], shot: [5, 0, 0, 37, 14], rock: [5, 0, 14, 37, 16], plas: [5, 37, 0, 42, 17], beam: [5, 37, 0, 42, 17] },
-  rocketBall: [6, 68, 0, 24, 36],
-};
-
-const KIT = { soldier: null, characters: {}, flash: [], boomBig: [], boomSmall: [], flagRed: [], flagGreen: [], base: null, weapons: [], rocketBall: null, bars: {}, icons: {} };
-
-function cropImg(imgIdx, x, y, w, h) {
-  const src = IMG[`u${imgIdx}`];
-  if (!src) return null;
-  const c = document.createElement('canvas');
-  c.width = w; c.height = h;
-  c.getContext('2d').drawImage(src, x, y, w, h, 0, 0, w, h);
-  return c;
-}
-
-function buildKit() {
-  if (!IMG.u3) return;
-  for (const [character, parts] of Object.entries(CHARACTER_PARTS)) {
-    const bounds = parts.reduce((acc, part) => ({
-      minX: Math.min(acc.minX, part.dx),
-      minY: Math.min(acc.minY, part.dy - part.h),
-      maxX: Math.max(acc.maxX, part.dx + part.w),
-      maxY: Math.max(acc.maxY, part.dy),
-    }), { minX: 0, minY: 0, maxX: 0, maxY: 0 });
-    const canvas = document.createElement('canvas');
-    canvas.width = bounds.maxX - bounds.minX;
-    canvas.height = bounds.maxY - bounds.minY;
-    const ctx = canvas.getContext('2d');
-    for (const part of parts) {
-      const source = IMG[`u${part.image}`];
-      if (source && part.sx + part.w <= source.width && part.sy + part.h <= source.height) ctx.drawImage(source, part.sx, part.sy, part.w, part.h,
-        part.dx - bounds.minX, part.dy - part.h - bounds.minY, part.w, part.h);
-    }
-    KIT.characters[character] = {
-      offsetX: bounds.minX,
-      offsetY: bounds.minY,
-      green: canvas,
-      red: tintCanvas(canvas, '#ff3b2d', 0.38),
-      yellow: tintCanvas(canvas, '#ffd84d', 0.32),
-    };
-  }
-  KIT.soldier = KIT.characters.soldier;
-  KIT.flash = FR.flashYellow.map(([x, y, w, h]) => cropImg(0, x, y, w, h));
-  KIT.flashBlue = FR.flashBlue.map(([x, y, w, h]) => cropImg(0, x, y, w, h));
-  KIT.boomBig = FR.boomBig.map(([x, y, w, h]) => cropImg(6, x, y, w, h)).filter(Boolean);
-  KIT.boomSmall = FR.boomSmall.map(([x, y, w, h]) => cropImg(6, x, y, w, h)).filter(Boolean);
-  KIT.flagRed = FR.flagRed.map(([x, y, w, h]) => cropImg(4, x, y, w, h));
-  KIT.flagGreen = FR.flagGreen.map(([x, y, w, h]) => cropImg(4, x, y, w, h));
-  KIT.base = cropImg(...FR.base);
-  KIT.rocketBall = cropImg(...FR.rocketBall);
-  // icon vũ khí theo thứ tự slot 1-6
-  const order = ['saw', 'mg', 'shot', 'rock', 'plas', 'beam'];
-  for (const k of order) {
-    const g = FR.guns[k];
-    KIT.weapons.push(g ? cropImg(...g) : null);
-  }
-  // Chainsaw has no standalone icon in u5: use its composite Soldier arm pose.
-  KIT.weapons[0] = cropImg(2, 41, 28, 42, 15);
-  // thanh máu HUD từ u8
-  if (IMG.u8) {
-    KIT.bars.frame = trimCanvas(IMG.u8, 0, 15, 72, 11);
-  }
-  if (IMG.s0) {
-    KIT.icons.radar = trimCanvas(IMG.s0, 0, 0, 58, 88);
-    KIT.icons.dot1 = trimCanvas(IMG.s0, 0, 90, 22, 17);
-    KIT.icons.dot2 = trimCanvas(IMG.s0, 26, 90, 22, 17);
-  }
-}
-
-/* ---------- âm thanh WebAudio tổng hợp ---------- */
-const SFX = { ac: null, muted: false };
-function audioInit() {
-  if (SFX.ac || SFX.muted) return;
-  try { SFX.ac = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { SFX.muted = true; }
-}
-function noiseBuf(ac, dur) {
-  const b = ac.createBuffer(1, Math.max(1, ac.sampleRate * dur | 0), ac.sampleRate);
-  const d = b.getChannelData(0);
-  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
-  return b;
-}
-function sfxPlay(name) {
-  if (SFX.muted || !SFX.ac) return;
-  const ac = SFX.ac, t = ac.currentTime;
-  const g = ac.createGain(); g.connect(ac.destination);
-  if (name === 'shot' || name === 'rocket') {
-    const src = ac.createBufferSource(); src.buffer = noiseBuf(ac, 0.12);
-    const f = ac.createBiquadFilter(); f.type = 'highpass'; f.frequency.value = name === 'shot' ? 900 : 300;
-    src.connect(f); f.connect(g);
-    g.gain.setValueAtTime(name === 'shot' ? 0.06 : 0.12, t);
-    g.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
-    src.start(t); src.stop(t + 0.13);
-  } else if (name === 'boom') {
-    const src = ac.createBufferSource(); src.buffer = noiseBuf(ac, 0.45);
-    const f = ac.createBiquadFilter(); f.type = 'lowpass'; f.frequency.setValueAtTime(900, t);
-    f.frequency.exponentialRampToValueAtTime(90, t + 0.4);
-    src.connect(f); f.connect(g);
-    g.gain.setValueAtTime(0.28, t);
-    g.gain.exponentialRampToValueAtTime(0.001, t + 0.45);
-    src.start(t); src.stop(t + 0.46);
-    const o = ac.createOscillator(); o.frequency.setValueAtTime(120, t);
-    o.frequency.exponentialRampToValueAtTime(35, t + 0.4);
-    const g2 = ac.createGain(); g2.connect(ac.destination);
-    g2.gain.setValueAtTime(0.22, t); g2.gain.exponentialRampToValueAtTime(0.001, t + 0.42);
-    o.connect(g2); o.start(t); o.stop(t + 0.43);
-  } else if (name === 'hit') {
-    const o = ac.createOscillator(); o.type = 'square'; o.frequency.setValueAtTime(220, t);
-    o.frequency.exponentialRampToValueAtTime(90, t + 0.08);
-    o.connect(g); g.gain.setValueAtTime(0.07, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.09);
-    o.start(t); o.stop(t + 0.1);
-  } else if (name === 'pickup' || name === 'flag') {
-    const notes = name === 'pickup' ? [520, 780] : [420, 560, 700, 880];
-    notes.forEach((fr, i) => {
-      const o = ac.createOscillator(); o.frequency.value = fr;
-      const gg = ac.createGain(); gg.connect(ac.destination);
-      const tt = t + i * 0.07;
-      gg.gain.setValueAtTime(0.001, tt);
-      gg.gain.linearRampToValueAtTime(0.08, tt + 0.02);
-      gg.gain.exponentialRampToValueAtTime(0.001, tt + 0.1);
-      o.connect(gg); o.start(tt); o.stop(tt + 0.11);
-    });
-  } else if (name === 'saw') {
-    const o = ac.createOscillator(); o.type = 'sawtooth';
-    o.frequency.setValueAtTime(90, t); o.frequency.linearRampToValueAtTime(60, t + 0.15);
-    o.connect(g); g.gain.setValueAtTime(0.08, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.16);
-    o.start(t); o.stop(t + 0.17);
-  } else if (name === 'beam') {
-    const o = ac.createOscillator(); o.frequency.setValueAtTime(1400, t);
-    o.frequency.exponentialRampToValueAtTime(400, t + 0.1);
-    o.connect(g); g.gain.setValueAtTime(0.05, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.11);
-    o.start(t); o.stop(t + 0.12);
-  }
-}
-
-/* ---------- app state ---------- */
 const app = {
-  screen: 'boot', menuIdx: 0, modeIdx: 0, characterIdx: 0, character: 'soldier', lang: 'vi', save: { best: {} },
-  match: null, paused: false, lastTick: 0, result: null, splashT: 0, helpFrom: 'menu',
-  input: { mx: null, my: null, fire: false, keys: {} },
-  cursorCanvas: null, mouseSeen: false,
+  screen: 'startup', J: true, K: 0, mode: MODE.DEATHMATCH, character: 0, levelIndex: 0,
+  selection: 0, selectionDirection: 1, configPage: 0,
+  images: {}, data: null, font: null, loop: null, input: Object.create(null),
+  settings: { F: 15, D: 20, E: 10, G: 20, H: 5, I: 10, balance: [0, 0] },
 };
 
-function T() { return LANG[app.lang]; }
-function fmt(text, vars) {
-  let out = text;
-  for (const [k, v] of Object.entries(vars || {})) out = out.replace(`{${k}}`, v);
-  return out;
-}
-
-function startMatch() {
-  app.character = app.characterIdx === 1 ? 'mutant' : 'soldier';
-  app.match = createMatch(MODES[app.modeIdx].id, (Date.now() & 0x7fffffff), app.character);
-  app.screen = 'game';
-  app.paused = false;
-  app.result = null;
-  app.resultPending = false;
-}
-function soldierSeqReset() { /* id mới mỗi trận không quan trọng — giữ nguyên */ }
-
-function finishMatch() {
-  const res = matchResult(app.match);
-  const modeId = MODES[app.modeIdx].id;
-  const prev = app.save.best[modeId] || 0;
-  res.bestPrev = prev;
-  const scoreKey = modeId === 'surv' ? res.wave : res.kills;
-  res.bestNew = scoreKey > prev;
-  if (res.bestNew) { app.save.best[modeId] = scoreKey; saveSave(app.save); }
-  app.result = res;
-  app.screen = 'result';
-}
-
-/* ---------- input ---------- */
-function bindInput() {
-  const cv = canvasEl;
-  window.addEventListener('keydown', (e) => {
-    audioInit();
-    const k = e.key;
-    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' '].includes(k)) e.preventDefault();
-    if (k === ' ' && app.screen === 'game') app.input.fire = true;
-    handleKey(k);
+function drawSprite(ctx2d, spriteId, x, y) {
+  const rect = getUiSpriteRect(app.data.ccs, spriteId, 6);
+  const sheet = app.images[`s${rect.sheetIndex}`];
+  if (!sheet || rect.width <= 0 || rect.height <= 0) return;
+  const imageX = x - rect.sourceX;
+  const imageY = y - rect.sourceY;
+  withMIDPClip(ctx2d, x, y, rect.width, rect.height, () => {
+    ctx2d.drawImage(sheet, imageX, imageY);
   });
-  window.addEventListener('keyup', (e) => {
-    setMove(e.key, false);
-    if (e.key === ' ') app.input.fire = false;
+}
+
+function drawText(ctx2d, text, x, y, anchor = 20) {
+  app.font.draw(ctx2d, text, x, y, anchor);
+}
+
+// Source c.a(Graphics, byte), c(Graphics, byte): list geometry, cursor sheet,
+// clipped bitmap text, and selection colors follow the original menu controller.
+// Port of c.java:804-929, c.java:1373-1456. Layout derives from source menu
+// fields and the original `curs`, `erou`, `f1`, and `f2` assets.
+// Port of c.java:618-677, c.java:1373-1456. Source-derived list geometry uses
+// Q/R/S/P, font metrics, `curs`, `erou`, `f1` and `f2`; selected panel color is
+// preserved for the original confirmation and mode-selection states.
+function drawChoicePage(ctx2d, labels, state) {
+  const fontHeight = app.font.lineHeight;
+  const sourceCursor = app.images.curs;
+  const sourceCursorWidth = sourceCursor?.width ?? 0;
+  const sourceCursorHeight = sourceCursor?.height ?? 0;
+  const modeSelection = state === 5;
+  const characterSelection = state === 19;
+  const confirmation = state === 0;
+  const rowHeight = characterSelection ? 22 : sourceCursorHeight + (sourceCursorHeight >> 3);
+  const rows = labels.length;
+  const Q = WIDTH >> 1;
+  const m = sourceCursorWidth >> 1;
+  const n = m >> 1;
+  const P = WIDTH / 13;
+  const S = Q - (Q >> 1) - P - (Q >> 3);
+  const R = Q + (Q >> 1) + (Q >> 3);
+  let listTop = (HEIGHT >> 1) - ((rows * rowHeight) >> 1);
+  if (modeSelection) listTop = (HEIGHT >> 1) + (HEIGHT >> 2) - ((rows * rowHeight) >> 1);
+  if (characterSelection) listTop = (HEIGHT >> 1) - (rowHeight >> 1) + (HEIGHT >> 2);
+  const firstVisible = Math.max(0, Math.min(app.selection - 4, rows - 5));
+
+  if (characterSelection) {
+    const portrait = app.character === 0 ? app.images.f1 : app.images.f2;
+    const opponent = app.character === 0 ? app.images.f2 : app.images.f1;
+    const portraitY = (HEIGHT >> 2) - ((app.images.q?.height ?? portrait?.height ?? 0) >> 1);
+    const leftX = (WIDTH >> 2) - ((portrait?.width ?? 0) >> 1);
+    const rightX = WIDTH - (WIDTH >> 2) - ((opponent?.width ?? 0) >> 1);
+    if (portrait) ctx2d.drawImage(portrait, leftX, portraitY);
+    if (opponent) ctx2d.drawImage(opponent, rightX, portraitY);
+  }
+
+  if (sourceCursor && (state !== 11 && state !== 12)) {
+    const selectedY = characterSelection
+      ? (HEIGHT >> 1) - (rowHeight >> 1) + (HEIGHT >> 2)
+      : listTop + (app.selection - firstVisible) * rowHeight + (rowHeight >> 1);
+    const barLeft = S + P;
+    const barRight = R;
+    const inset = state === 3 && app.selection === 0 ? P >> 2 : 0;
+    const panelX = Q - ((R - S + P) >> 1) + 5 - inset;
+    const panelY = selectedY - ((sourceCursorHeight - 4) >> 1);
+    const panelWidth = R - S + P - 10 + (inset << 1);
+    ctx2d.fillStyle = characterSelection ? (app.selection === 0 ? '#ff0000' : '#0000ff') : modeSelection ? '#850000' : '#003000';
+    ctx2d.fillRect(panelX, panelY, panelWidth, sourceCursorHeight - 4);
+    withMIDPClip(ctx2d, barRight + inset, selectedY - n, P, sourceCursorHeight, () =>
+      ctx2d.drawImage(sourceCursor, barRight + inset - P, selectedY - n));
+    withMIDPClip(ctx2d, S - inset, selectedY - n, P, sourceCursorHeight, () =>
+      ctx2d.drawImage(sourceCursor, S - inset, selectedY - n));
+    ctx2d.strokeStyle = '#000000';
+    for (const offset of [4, sourceCursorHeight - 4, sourceCursorHeight - 2, 2]) {
+      ctx2d.beginPath(); ctx2d.moveTo(barLeft - inset, selectedY - n + offset); ctx2d.lineTo(barRight + (inset << 1), selectedY - n + offset); ctx2d.stroke();
+    }
+  }
+
+  labels.slice(firstVisible, firstVisible + 5).forEach((label, visibleIndex) => {
+    const absoluteIndex = firstVisible + visibleIndex;
+    const selected = absoluteIndex === app.selection;
+    const y = characterSelection
+      ? (HEIGHT >> 1) - (rowHeight >> 1) + (HEIGHT >> 2)
+      : listTop + visibleIndex * rowHeight + (rowHeight >> 1);
+    if (!characterSelection && !modeSelection) {
+      ctx2d.fillStyle = selected ? '#850000' : '#2d2d00';
+      ctx2d.fillRect(Q - ((R - S + P) >> 1) + 5, y - ((m - 4) >> 1), R - S + P - 10, m - 4);
+    }
+    drawText(ctx2d, label, Q - (app.font.measure(label) >> 1), y - (fontHeight >> 1) - 1, 20);
   });
-  const clearHeldInput = () => {
-    app.input.keys = {};
-    app.input.fire = false;
+
+  if (modeSelection) drawText(ctx2d, labels[labels.length - 1] || '', Q - (app.font.measure(labels.at(-1) || '') >> 1), HEIGHT >> 3, 20);
+  if (confirmation) drawText(ctx2d, app.data.text[0]?.[2] || '', Q - (app.font.measure(app.data.text[0]?.[2] || '') >> 1), HEIGHT >> 3, 20);
+}
+
+// Port of c.java:804-929 and c.java:1373-1456. Text and sprites are the
+// original Russian rows, fnt bitmap glyphs, and s0 strip regions—not browser fonts.
+function drawOriginalUi(ctx2d) {
+  // c(Graphics,K) consumes the localized source row whose index is K; K=19
+  // deliberately reuses row 4. Geometry comes from the native controller.
+  if (app.K === 0) {
+    drawChoicePage(ctx2d, (app.data.text[0] || []).slice(0, 2), 0);
+    drawText(ctx2d, app.data.text[0]?.[2] || '', WIDTH >> 1, HEIGHT >> 3, 20 | 1);
+  } else if (app.K === 3) {
+    drawChoicePage(ctx2d, app.data.text[3] || [], 3);
+  } else if (app.K === 4 || app.K === 19) {
+    drawChoicePage(ctx2d, (app.data.text[4] || []).slice(0, 2), app.K);
+  } else if (app.K === 5) {
+    drawChoicePage(ctx2d, app.data.text[5] || [], 5);
+  } else if (app.K >= 6 && app.K <= 10) {
+    drawConfigurationPage(ctx2d, app.data.text[app.K] || [], app.K);
+  } else if (app.K === 11) {
+    drawTextPage(ctx2d, app.data.help);
+  } else if (app.K === 12) {
+    drawTextPage(ctx2d, app.data.about);
+  } else if (app.K === 13 || app.K === 14) {
+    drawChoicePage(ctx2d, app.data.levelLabels, app.K);
+  } else if (app.K === 1 || app.K === 2) {
+    drawChoicePage(ctx2d, app.data.text[app.K] || [], app.K);
+  }
+}
+
+function drawTextPage(ctx2d, text) {
+  const lines = String(text).split(/[\r\n]+/).filter(Boolean);
+  const lineHeight = app.font.lineHeight;
+  const maxWidth = WIDTH - (WIDTH / 13 << 1) - 1;
+  const visible = [];
+  for (const rawLine of lines) {
+    const words = rawLine.split(' ');
+    let current = '';
+    for (const word of words) {
+      const next = current ? `${current} ${word}` : word;
+      if (current && app.font.measure(next) > maxWidth) {
+        visible.push(current);
+        current = word;
+      } else current = next;
+    }
+    if (current) visible.push(current);
+  }
+  const rowCapacity = Math.max(1, Math.floor((HEIGHT - 4 * lineHeight) / lineHeight));
+  visible.slice(0, rowCapacity).forEach((line, index) => drawText(ctx2d, line, WIDTH >> 3, lineHeight * 2 + index * lineHeight, 20));
+  drawText(ctx2d, app.data.text[2]?.[2] || '', WIDTH >> 1, HEIGHT - lineHeight, 20 | 1 | 2);
+}
+
+// Port of c.java:618-677 and c.java:804-1456. The original shows the selected
+// configuration row, five stat controls and one explanation page at a time.
+function drawConfigurationPage(ctx2d, labels, state) {
+  const parameters = app.settings;
+  const mode = state - 6;
+  const primary = [parameters.F, parameters.F, parameters.D, parameters.E, parameters.G][mode];
+  const values = [primary, parameters.H, parameters.I, `${parameters.balance[0]}:${parameters.balance[1]}`];
+  const fontHeight = app.font.lineHeight;
+  const layout = app.data.uiLayout;
+  const rowHeight = layout.optionRowHeight;
+  const rowStart = layout.optionStartY;
+  const selected = Math.max(0, Math.min(app.selection, labels.length - 1));
+
+  // Source c(Graphics,K) paints all option rows, values, arrows and stat sprite IDs 27/30-40.
+  for (let index = 0; index < Math.min(4, labels.length); index++) {
+    const y = rowStart + index * rowHeight;
+    drawText(ctx2d, labels[index], layout.leftTextX, y, 20);
+    const value = String(values[index] ?? '');
+    drawText(ctx2d, value, layout.valueX - app.font.measure(value), y, 20);
+    const valueSprite = index === 3 ? 40 : 27 + index;
+    drawSprite(ctx2d, valueSprite, layout.valueSpriteX, y - (app.data.ccs[3][valueSprite] >> 1));
+  }
+
+  const selectedY = rowStart + selected * rowHeight;
+  ctx2d.fillStyle = '#408000';
+  ctx2d.fillRect(2, selectedY - (layout.optionHeight >> 1), WIDTH - 4, layout.optionHeight);
+  ctx2d.strokeStyle = '#b9b9b9';
+  ctx2d.strokeRect(1, selectedY - (layout.optionHeight >> 1) - 1, WIDTH - 3, layout.optionHeight + 1);
+  drawText(ctx2d, labels[selected] || '', layout.leftTextX, selectedY, 20);
+  const selectedValue = String(values[selected] ?? '');
+  drawText(ctx2d, selectedValue, layout.valueX - app.font.measure(selectedValue), selectedY, 20);
+  drawSprite(ctx2d, selected === 3 ? 40 : 27 + selected, layout.valueSpriteX, selectedY - (app.data.ccs[3][27] >> 1));
+  drawSprite(ctx2d, app.selectionDirection < 0 ? 37 : 38, layout.valueSpriteX - 8, selectedY - 3);
+  drawSprite(ctx2d, app.selectionDirection < 0 ? 39 : 36, layout.valueSpriteX - 21, selectedY - 3);
+
+  const explanation = app.data.text3Rows[5 + mode] || '';
+  const explanationLines = wrapJ2meText(explanation, app.font, layout.explanationWidth);
+  const page = Math.max(0, app.configPage || 0);
+  const visibleLines = explanationLines.slice(page * layout.explanationLines, (page + 1) * layout.explanationLines);
+  visibleLines.forEach((line, index) => drawText(ctx2d, line, layout.explanationX, layout.explanationY + index * fontHeight, 20));
+}
+
+
+function actorPose(actor) {
+  const weaponSet = app.data.wlg[actor.weaponSet] || app.data.wlg[0];
+  const weapon = weaponSet[actor.weaponSlot] ?? 0;
+  const animation = app.data.mua[weapon]?.[7 + (actor.animation << 1)] ?? 0;
+  const poseIndex = actor.character * 110 + animation + actor.animationFrame;
+  return app.data.ca[poseIndex] || app.data.ca[0] || [];
+}
+
+function createRenderState() {
+  const state = {
+    screen: app.screen === 'startup' ? 'startup' : app.screen === 'title' ? 'title' : app.screen === 'game' ? 'game' : 'menu',
+    viewport: { width: WIDTH, height: HEIGHT },
+    backgroundName: app.K === 4 || app.K === 19 ? (app.data.graphicsBackground === 2 ? 'li2' : 'li1') : null,
+    camera: app.match?.camera || { x: 0, y: 0 },
+    level: app.match?.level || null,
+    actors: app.match?.actors || [],
+    tables: { ...app.data, poseForActor: actorPose },
+    drawOriginalUi: drawOriginalUi,
+    drawOriginalHud: drawOriginalHud,
+    drawMapProps: drawMapProps,
+    drawProjectiles: drawProjectiles,
+    drawEffects: drawEffects,
   };
-  window.addEventListener('blur', clearHeldInput);
-  document.addEventListener('visibilitychange', () => { if (document.hidden) clearHeldInput(); });
-  cv.addEventListener('mousemove', (e) => {
-    const r = cv.getBoundingClientRect();
-    const wx = (e.clientX - r.left) * (240 / r.width);
-    const wy = (e.clientY - r.top) * (320 / r.height);
-    app.cursorCanvas = { x: wx, y: wy };
-    app.mouseSeen = true;
-    app.cursorScreen = { x: wx, y: wy };
-  });
-  cv.addEventListener('mousedown', (e) => { audioInit(); app.input.fire = true; clickScreen(); });
-  window.addEventListener('mouseup', () => { app.input.fire = false; });
-  cv.addEventListener('contextmenu', (e) => e.preventDefault());
+  return state;
 }
 
-function setMove(k, down) {
-  const K = app.input.keys;
-  if (k === 'ArrowUp' || k === 'w' || k === 'W') K.up = down;
-  if (k === 'ArrowDown' || k === 's' || k === 'S') K.down = down;
-  if (k === 'ArrowLeft' || k === 'a' || k === 'A') K.left = down;
-  if (k === 'ArrowRight' || k === 'd' || k === 'D') K.right = down;
-}
-
-function handleKey(k) {
-  const down = true;
-  setMove(k, down);
-  const S = app.screen;
-  if (S === 'splash') { app.screen = 'title'; return; }
-  if (S === 'title') { app.screen = 'menu'; return; }
-  if (S === 'menu') {
-    if (k === 'ArrowUp' || k === 'w') app.menuIdx = (app.menuIdx + T().menu.length - 1) % T().menu.length;
-    if (k === 'ArrowDown' || k === 's') app.menuIdx = (app.menuIdx + 1) % T().menu.length;
-    if (k === 'Enter' || k === ' ') activateMenu();
-    return;
-  }
-  if (S === 'mode') {
-    if (k === 'ArrowUp' || k === 'w') app.modeIdx = (app.modeIdx + MODES.length - 1) % MODES.length;
-    if (k === 'ArrowDown' || k === 's') app.modeIdx = (app.modeIdx + 1) % MODES.length;
-    if (k === 'Enter' || k === ' ') { app.characterIdx = 0; app.screen = 'character'; }
-    if (k === 'q' || k === 'Q' || k === 'Escape') app.screen = 'menu';
-    return;
-  }
-  if (S === 'character') {
-    if (k === 'ArrowUp' || k === 'w' || k === 'ArrowDown' || k === 's') app.characterIdx = (app.characterIdx + 1) % 2;
-    if (k === 'Enter' || k === ' ') startMatch();
-    if (k === 'q' || k === 'Q' || k === 'Escape') app.screen = 'mode';
-    return;
-  }
-  if (S === 'help' || S === 'about') { app.screen = app.helpFrom; return; }
-  if (S === 'game') {
-    if (k === 'p' || k === 'P') app.paused = !app.paused;
-    if (k === 'm' || k === 'M') { SFX.muted = !SFX.muted; }
-    if (/^[1-6]$/.test(k) && app.match) app.match.player.weapon = Number(k) - 1;
-    if ((k === 'q' || k === 'Q') && app.match) { app.screen = 'menu'; app.match = null; }
-    if (k === 'Enter' && app.match && app.match.over) finishMatch();
-    return;
-  }
-  if (S === 'result') {
-    if (k === 'Enter') startMatch();
-    if (k === 'q' || k === 'Q') { app.screen = 'menu'; app.match = null; }
+// Port of e.java:1972-2031. Background parallax and tile map use source sheets.
+function drawMapProps(ctx2d) {
+  const level = app.match?.level;
+  if (!level) return;
+  for (const prop of level.propPlacements) {
+    const frame = prop.code - 31;
+    if (frame < 0 || frame >= app.data.cu2.length) continue;
+    const meta = app.data.cu2[frame];
+    const sheet = app.images[`u${meta[6]}`];
+    if (!sheet) continue;
+    const x = prop.x * 16 - app.match.camera.x;
+    const y = prop.y * 16 - app.match.camera.y;
+    ctx2d.save();
+    ctx2d.beginPath();
+    ctx2d.rect(x, y, meta[2], meta[3]);
+    ctx2d.clip();
+    ctx2d.drawImage(sheet, x - meta[0], y - meta[1] - meta[3]);
+    ctx2d.restore();
   }
 }
 
-function activateMenu() {
-  const i = app.menuIdx;
-  if (i === 0) app.screen = 'mode';
-  else if (i === 1) {
-    app.lang = app.lang === 'vi' ? 'en' : 'vi';
-    app.save.lang = app.lang; saveSave(app.save);
-  } else if (i === 2) { app.helpFrom = 'menu'; app.screen = 'help'; }
-  else app.screen = 'about';
+function drawProjectiles(ctx2d) {
+  if (!app.match) return;
+  for (const projectile of app.match.projectiles) {
+    const sprite = app.data.cu2[app.data.projectileFrame(projectile.weapon)];
+    const sheet = app.images[`u${sprite[6]}`];
+    if (!sheet) continue;
+    ctx2d.save();
+    ctx2d.beginPath();
+    ctx2d.rect(projectile.x - app.match.camera.x, projectile.y - app.match.camera.y, sprite[2], sprite[3]);
+    ctx2d.clip();
+    ctx2d.drawImage(sheet, projectile.x - app.match.camera.x - sprite[0], projectile.y - app.match.camera.y - sprite[1] - sprite[3]);
+    ctx2d.restore();
+  }
+}
+function drawEffects(ctx2d) { app.data.drawEffects(ctx2d, app.images, app.match); }
+
+function drawOriginalHud(ctx2d) {
+  const match = app.match;
+  if (!match) return;
+  // Source ccs IDs are exact sprite-table identities from e.java:2724-2793.
+  drawSprite(ctx2d, 18, 0, 0);
+  drawSprite(ctx2d, 17, WIDTH >> 1, HEIGHT - 21);
+  drawSprite(ctx2d, 21 + (match.player.weaponSlot ?? 0), WIDTH >> 1, HEIGHT - 21);
+  drawText(ctx2d, String(match.player.health), 18, 4, 20);
+  drawText(ctx2d, String(match.player.ammo[match.player.weapon] ?? 0), 72, HEIGHT - 8, 20);
+  drawText(ctx2d, `${match.minutes}:${String(match.seconds).padStart(2, '0')}`, WIDTH >> 1, 2, 20 | 1);
 }
 
-function clickScreen() {
-  const S = app.screen;
-  const cx = app.cursorScreen ? app.cursorScreen.x : -1, cy = app.cursorScreen ? app.cursorScreen.y : -1;
-  if (S === 'splash' || S === 'title') { handleKey('Enter'); return; }
-  if (S === 'menu') {
-    const items = T().menu;
-    const y0 = 120, lh = 22;
-    for (let i = 0; i < items.length; i++) {
-      if (cy >= y0 + i * lh - 8 && cy < y0 + (i + 1) * lh - 8) { app.menuIdx = i; activateMenu(); return; }
+function paint() {
+  if (!ctx || !app.data) return;
+  ctx.imageSmoothingEnabled = false;
+  renderOriginal(ctx, createRenderState(), { images: app.images });
+}
+
+// Original source state `K`/mode `t` remain distinct; the menu selection changes
+// only at observed source menu boundaries, with raw text row ordering retained.
+function resetMenuSelection(state) {
+  app.K = state;
+  app.selection = 0;
+  app.screen = 'menu';
+}
+
+// Port of c.java:355-616. State-specific action semantics come from the
+// original menu controller; gameplay settings are never skipped or guessed.
+function activateCurrentSelection() {
+  const selected = app.selection;
+  if (app.K === 0) {
+    if (selected < 2) {
+      app.data.soundEnabled = selected === 0;
+      resetMenuSelection(3);
     }
-    return;
-  }
-  if (S === 'mode') {
-    const y0 = 78, lh = 20;
-    for (let i = 0; i < MODES.length; i++) {
-      if (cy >= y0 + i * lh - 6 && cy < y0 + (i + 1) * lh - 6) { app.modeIdx = i; app.screen = 'character'; return; }
-    }
-    if (cy > 270 || (cy > 240 && cy < 270)) app.screen = 'menu';
-    return;
-  }
-  if (S === 'character') {
-    if (cy >= 112 && cy < 158) { app.characterIdx = 0; startMatch(); return; }
-    if (cy >= 160 && cy < 206) { app.characterIdx = 1; startMatch(); return; }
-    if (cy > 270) app.screen = 'mode';
-    return;
-  }
-  if (S === 'help' || S === 'about') { handleKey('Enter'); return; }
-  if (S === 'result') handleKey('Enter');
-}
-
-/* ---------- camera ---------- */
-function updateCam(m) {
-  const p = m.player;
-  if (!m.cam) m.cam = { x: Math.max(0, Math.min(WORLD_W - 240, p.x - 120)), y: Math.max(0, Math.min(WORLD_H - 320, p.y - 160)) };
-  // Let the player travel inside a visible dead zone before the camera follows.
-  const screenX = p.x - m.cam.x, screenY = p.y - m.cam.y;
-  let cx = screenX < 80 ? p.x - 80 : (screenX > 160 ? p.x - 160 : m.cam.x);
-  let cy = screenY < 112 ? p.y - 112 : (screenY > 208 ? p.y - 208 : m.cam.y);
-  cx = Math.max(0, Math.min(WORLD_W - 240, cx));
-  cy = Math.max(0, Math.min(WORLD_H - 320, cy));
-  m.cam.x += (cx - m.cam.x) * 0.25;
-  m.cam.y += (cy - m.cam.y) * 0.25;
-}
-
-/* ---------- render ---------- */
-function drawPatternFloor(g, cam) {
-  const im = IMG.l0 || IMG.bg0;
-  if (im) {
-    const pat = g.createPattern(patternOf(im, 64), 'repeat');
-    g.save();
-    g.fillStyle = '#20281f';
-    g.fillRect(0, 0, 240, 320);
-    g.translate(-cam.x, -cam.y);
-    g.fillStyle = pat; g.globalAlpha = 0.5;
-    g.fillRect(0, 0, WORLD_W, WORLD_H);
-    g.restore();
-  } else {
-    g.fillStyle = '#20281f'; g.fillRect(0, 0, 240, 320);
-  }
-}
-const _patCache = new Map();
-function patternOf(im, size) {
-  const key = (im.src || im) + size;
-  if (_patCache.has(key)) return _patCache.get(key);
-  const c = document.createElement('canvas');
-  c.width = size; c.height = size;
-  const g = c.getContext('2d');
-  g.imageSmoothingEnabled = false;
-  g.drawImage(im, 0, 0, size, size);
-  _patCache.set(key, c);
-  return c;
-}
-
-function drawWorldTileWalls(g, m, cam) {
-  const im = IMG.l1;
-  const x0 = Math.max(0, Math.floor(cam.x / TILE)), x1 = Math.min(MAP_W - 1, Math.ceil((cam.x + 240) / TILE));
-  const y0 = Math.max(0, Math.floor(cam.y / TILE)), y1 = Math.min(MAP_H - 1, Math.ceil((cam.y + 320) / TILE));
-  for (let ty = y0; ty <= y1; ty++) for (let tx = x0; tx <= x1; tx++) {
-    if (!m.grid[ty * MAP_W + tx]) continue;
-    const x = tx * TILE - cam.x, y = ty * TILE - cam.y;
-    if (im) { g.drawImage(im, 0, 0, 64, 64, x, y, TILE, TILE); }
-    g.fillStyle = 'rgba(8,12,10,0.45)'; g.fillRect(x, y, TILE, TILE);
-    g.strokeStyle = '#141a14'; g.strokeRect(x + 0.5, y + 0.5, TILE - 1, TILE - 1);
-  }
-}
-
-function soldierColor(team) { return team === 0 ? '#66cc55' : '#ff5544'; }
-
-function drawSoldier(g, m, s, ix, iy, cam) {
-  if (s.dead) return;
-  const moving = Math.abs(s.x - s.px) + Math.abs(s.y - s.py) > 0.4;
-  const bob = moving && Math.floor(m.time / 120) % 2 === 0 ? 1 : 0;
-  const teamKey = s === m.player ? 'green' : (m.mode.teams ? (s.team === m.player.team ? 'green' : 'red') : 'red');
-  const characterKit = KIT.characters[s.character] || KIT.characters.soldier || KIT.soldier;
-  const spr = (characterKit && characterKit[teamKey]) || characterKit;
-  if (!spr) return;
-  const dw = spr.width, dh = spr.height;
-  const offsetX = characterKit?.offsetX || 0;
-  const offsetY = characterKit?.offsetY || 0;
-  g.save();
-  g.translate(ix, iy + bob - 6);
-  if (Math.cos(s.dir) < 0) g.scale(-1, 1);
-  g.drawImage(spr, offsetX, offsetY, dw, dh);
-  g.restore();
-  if (s.hitT > 0) {
-    g.globalAlpha = Math.min(0.6, s.hitT / 300);
-    g.fillStyle = '#fff';
-    g.save();
-    g.translate(ix, iy + bob - 6);
-    if (Math.cos(s.dir) < 0) g.scale(-1, 1);
-    g.fillRect(-dw / 2 + offsetX, offsetY, dw, dh);
-    g.restore();
-    g.globalAlpha = 1;
-  }
-  // vòng người chơi
-  if (!s.bot) {
-    g.strokeStyle = '#fff'; g.globalAlpha = 0.7;
-    g.beginPath(); g.arc(ix, iy, 13, 0, Math.PI * 2); g.stroke();
-    g.globalAlpha = 1;
-  }
-  // súng trên tay
-  const w = WEAPONS[s.weapon];
-  const icon = KIT.weapons[s.weapon];
-  const hx = ix + Math.cos(s.dir) * 12, hy = iy - 10 + Math.sin(s.dir) * 12;
-  const muzzleX = ix + Math.cos(s.dir) * (w.muzzleOffset || 28);
-  const muzzleY = iy - 10 + Math.sin(s.dir) * (w.muzzleOffset || 28);
-  // muzzle flash 3 frame trỏ theo hướng bắn, tại đầu nòng
-  if (s.fireT > 40 && KIT.flash.length) {
-    const fi = Math.floor(s.fireT / 90) % KIT.flash.length;
-    const fl = KIT.flash[fi];
-    g.save();
-    g.translate(muzzleX, muzzleY);
-    g.rotate(s.dir);
-    const fs = 0.6;
-    g.globalAlpha = Math.min(1, s.fireT / 200);
-    g.drawImage(fl, -fl.width * fs / 2, -fl.height * fs / 2, fl.width * fs, fl.height * fs);
-    g.restore();
-    g.globalAlpha = 1;
-  }
-  if (icon) {
-    g.save();
-    g.translate(hx, hy);
-    g.rotate(s.dir);
-    g.drawImage(icon, -icon.width / 4, -icon.height / 2, icon.width / 2, icon.height);
-    g.restore();
-  } else {
-    g.strokeStyle = w.color; g.lineWidth = 2;
-    g.beginPath(); g.moveTo(ix + Math.cos(s.dir) * 6, iy + Math.sin(s.dir) * 6); g.lineTo(hx, hy); g.stroke();
-    g.lineWidth = 1;
-  }
-  // Muzzle flash follows the barrel rather than appearing beside the hands.
-  // cầm cờ
-  if (s.carrying >= 0 && m.flags) {
-    const f = m.flags[s.carrying];
-    const flags = f.team === 1 ? KIT.flagRed : KIT.flagGreen;
-    if (flags.length) {
-      const ff = flags[Math.floor(m.time / 150) % flags.length];
-      g.drawImage(ff, ix - 8, iy - dh / 2 - 16);
-    }
-  }
-  // thanh máu nhỏ trên đầu địch
-  if (s.bot && s.hp < 100) {
-    g.fillStyle = '#300'; g.fillRect(ix - 10, iy - dh / 2 - 10, 20, 2);
-    g.fillStyle = soldierColor(s.team); g.fillRect(ix - 10, iy - dh / 2 - 10, 20 * Math.max(0, s.hp) / 100, 2);
-  }
-}
-
-function drawWorld(g, m, cam, lerpT) {
-  drawPatternFloor(g, cam);
-  drawWorldTileWalls(g, m, cam);
-  // pickups
-  for (const p of m.pickups) {
-    if (!p.active) continue;
-    const x = p.x - cam.x, y = p.y - cam.y;
-    if (x < -16 || y < -16 || x > 256 || y > 336) continue;
-    if (p.type === 'crate') {
-      g.fillStyle = '#7a5a2a'; g.fillRect(x - 7, y - 7, 14, 14);
-      g.strokeStyle = '#c9a04d'; g.strokeRect(x - 6.5, y - 6.5, 13, 13);
-      const wi = ((p.x + p.y) / 8 | 0) % 6;
-      if (KIT.weapons[wi]) g.drawImage(KIT.weapons[wi], x - 5, y - 9, 10, 18);
+  } else if (app.K === 3) {
+    if (selected === 0) resetMenuSelection(5);
+    else if (selected === 1) resetMenuSelection(1);
+    else if (selected === 2) resetMenuSelection(11);
+    else if (selected === 3) resetMenuSelection(12);
+    else app.screen = 'exit';
+  } else if (app.K === 5) {
+    if (selected <= 4) {
+      app.mode = selected;
+      app.K = 6 + selected;
+      app.selection = 0;
+    } else if (selected === 5) resetMenuSelection(3);
+  } else if (app.K >= 6 && app.K <= 10) {
+    app.K = 13;
+    app.selection = 0;
+  } else if (app.K === 13) {
+    if (selected === app.data.levelLabels.length - 1) {
+      app.K = 6 + app.mode;
+      app.selection = 0;
     } else {
-      g.fillStyle = p.type === 'heart' ? '#ff4466' : '#55ccff';
-      g.fillRect(x - 6, y - 6, 12, 12);
-      g.fillStyle = '#111';
-      g.font = '9px monospace'; g.textAlign = 'center';
-      g.fillText(p.type === 'heart' ? '+' : 'S', x, y + 3);
+      app.levelIndex = selected;
+      app.K = 19;
+      app.selection = 0;
     }
-  }
-  // cờ + căn cứ (sprite gốc: cờ u4 3 frame, căn cứ u7)
-  if (m.flags) {
-    const tf = Math.floor(Date.now() / 150) % 3;
-    for (const f of m.flags) {
-      const x = f.x - cam.x, y = f.y - cam.y;
-      if (KIT.base) g.drawImage(KIT.base, x - 12, y - 4);
-      const flags = f.team === 1 ? KIT.flagRed : KIT.flagGreen;
-      if (flags.length) {
-        g.drawImage(flags[tf], x - 8, y - 16);
-      } else {
-        g.fillStyle = f.team === 1 ? '#ff5544' : '#66cc55';
-        g.fillRect(x + 1, y - 16, 9, 6);
-      }
-    }
-  }
-  // lính
-  for (const s of m.soldiers) {
-    const ix = (s.px + (s.x - s.px) * lerpT) - cam.x;
-    const iy = (s.py + (s.y - s.py) * lerpT) - cam.y;
-    if (ix < -24 || iy < -24 || ix > 264 || iy > 344) continue;
-    drawSoldier(g, m, s, ix, iy, cam);
-  }
-  // đạn
-  for (const b of m.bullets) {
-    if (b.beam) {
-      g.strokeStyle = b.color; g.globalAlpha = Math.min(1, b.life / 90); g.lineWidth = 2;
-      g.beginPath(); g.moveTo(b.x0 - cam.x, b.y0 - cam.y); g.lineTo(b.x1 - cam.x, b.y1 - cam.y); g.stroke();
-      g.globalAlpha = 1; g.lineWidth = 1;
-      continue;
-    }
-    const x = b.x - cam.x, y = b.y - cam.y;
-    if (b.aoe && KIT.rocketBall) {
-      // đạn rocket = cầu lửa
-      const rb = KIT.rocketBall;
-      g.save();
-      g.translate(x, y);
-      g.rotate(Math.atan2(b.dy, b.dx));
-      g.drawImage(rb, -6, -6, 14, 14);
-      g.restore();
-      g.globalAlpha = 0.35; g.fillStyle = '#ffb84d';
-      g.fillRect(x - b.dx * 4 - 1, y - b.dy * 4 - 1, 3, 3);
-      g.globalAlpha = 1;
-      continue;
-    }
-    g.fillStyle = b.color;
-    const sz = b.aoe ? 4 : 2;
-    g.fillRect(x - sz / 2, y - sz / 2, sz, sz);
-    if (b.trail) { g.globalAlpha = 0.4; g.fillRect(x - b.dx * 2, y - b.dy * 2, 2, 2); g.globalAlpha = 1; }
-  }
-  // nổ: chuỗi frame cầu lửa u6 (lớn 10 frame, nhỏ 9 frame)
-  for (const e of m.explosions) {
-    const set = e.small ? KIT.boomSmall : KIT.boomBig;
-    if (!set || !set.length) continue;
-    const fi = Math.min(set.length - 1, Math.floor(e.t / 110));
-    const spr = set[fi];
-    const scale = e.small ? 0.8 : 1.25;
-    g.drawImage(spr, e.x - cam.x - spr.width * scale / 2, e.y - cam.y - spr.height * scale / 2, spr.width * scale, spr.height * scale);
-  }
-  // hạt
-  for (const p of m.particles) {
-    g.fillStyle = p.color; g.globalAlpha = Math.min(1, p.life / 300);
-    g.fillRect(p.x - cam.x, p.y - cam.y, p.size, p.size);
-  }
-  g.globalAlpha = 1;
-  // Con trỏ giữ vị trí màn hình; tọa độ ngắm world cập nhật theo camera.
-  if (app.cursorCanvas) {
-    app.input.mx = app.cursorCanvas.x + cam.x;
-    app.input.my = app.cursorCanvas.y + cam.y;
-  }
-  if (IMG.curs && app.mouseSeen && app.cursorCanvas) {
-    g.drawImage(IMG.curs, app.cursorCanvas.x - 16, app.cursorCanvas.y - 13);
-  }
+  } else if (app.K === 19) {
+    if (selected <= 1) {
+      app.K = 1;
+      app.selection = 0;
+    } else if (selected === 2) resetMenuSelection(3);
+  } else if (app.K === 11 || app.K === 12) resetMenuSelection(3);
 }
 
-function drawHud(g, m) {
-  const T2 = T();
-  g.fillStyle = 'rgba(0,0,0,0.55)'; g.fillRect(0, 0, 240, 34);
-  g.fillStyle = 'rgba(255,255,255,0.25)'; g.fillRect(0, 34, 240, 1);
-  const p = m.player;
-  // máu
-  if (KIT.bars.frame) g.drawImage(KIT.bars.frame, 4, 3, 50, 8);
-  else { g.strokeStyle = '#888'; g.strokeRect(4.5, 3.5, 50, 8); }
-  g.fillStyle = p.hp > 40 ? '#66cc55' : '#ff5544';
-  g.fillRect(6, 5, 46 * Math.max(0, p.hp) / 100, 4);
-  if (p.armor > 0) {
-    g.fillStyle = '#55ccff';
-    g.fillRect(6, 9, 46 * p.armor / 100, 2);
-  }
-  // vũ khí + đạn
-  const wi = KIT.weapons[p.weapon];
-  if (wi) g.drawImage(wi, 60, 2, 10, 24);
-  const w = WEAPONS[p.weapon];
-  g.fillStyle = '#eee'; g.font = '9px monospace'; g.textAlign = 'left';
-  const ammoTxt = w.ammoMax === Infinity ? '∞' : String(p.ammo[p.weapon]);
-  g.fillText(ammoTxt, 73, 14);
-  g.fillStyle = '#9cf'; g.font = '7px monospace';
-  g.fillText(`${p.weapon + 1}.${app.lang === 'vi' ? w.name.vi : w.name.en}`, 73, 25);
-  // điểm/timer phải
-  g.textAlign = 'right';
-  g.fillStyle = '#ffd84d'; g.font = '9px monospace';
-  const modeId = m.mode.id;
-  let scoreLine;
-  if (m.mode.teams) scoreLine = fmt(T2.teamFrags, { g: m.frags[0], r: m.frags[1] });
-  else if (modeId === 'ctf') scoreLine = `${T2.captures} ${m.caps[0]}/${m.mode.capLimit}`;
-  else if (modeId === 'surv') scoreLine = `${T2.wave} ${m.wave}`;
-  else scoreLine = `${T2.frags} ${p.kills}/${m.mode.fragLimit}`;
-  g.fillText(scoreLine, 236, 14);
-  const sec = Math.floor(m.time / 1000);
-  g.fillStyle = '#9cff7b'; g.font = '8px monospace';
-  g.fillText(`${T2.kills} ${p.kills} · ${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`, 236, 25);
-  // Radar phía trên phải đặt dưới dải HUD để không đè điểm số.
-  drawRadar(g, m);
-  // announce
-  g.textAlign = 'center';
-  for (const a of m.announces) {
-    g.globalAlpha = Math.min(1, a.t / 700);
-    g.fillStyle = '#ffd84d'; g.font = 'bold 14px monospace';
-    g.fillText(typeof a.text === 'string' ? a.text : (app.lang === 'vi' ? a.text.vi : a.text.en), 120, 120);
-    g.globalAlpha = 1;
-  }
-  // paused
-  if (app.paused) {
-    g.fillStyle = 'rgba(0,0,0,0.7)'; g.fillRect(0, 0, 240, 320);
-    g.fillStyle = '#ffd84d'; g.font = 'bold 18px monospace'; g.textAlign = 'center';
-    g.fillText(T2.paused, 120, 140);
-    g.fillStyle = '#aaa'; g.font = '8px monospace';
-    g.fillText(T2.resume, 120, 165);
-  }
-  if (m.over) {
-    g.fillStyle = 'rgba(0,0,0,0.75)'; g.fillRect(0, 0, 240, 320);
-    g.fillStyle = m.winner === 'win' ? '#9cff7b' : '#ff5544';
-    g.font = 'bold 20px monospace'; g.textAlign = 'center';
-    g.fillText(m.winner === 'win' ? T2.win : T2.lose, 120, 130);
-    g.fillStyle = '#ccc'; g.font = '9px monospace';
-    g.fillText(`${T2.kills}: ${p.kills}   ${T2.deaths}: ${p.deaths}`, 120, 160);
-    g.fillText(T2.again, 120, 200);
-  }
+function menuLength(state) {
+  if (state === 0) return Math.max(1, (app.data.text[0] || []).length - 1);
+  if (state === 5) return app.data.text[4]?.length ?? 0;
+  if (state === 3) return app.data.text[3]?.length ?? 0;
+  if (state >= 6 && state <= 10) return app.data.text[state - 1]?.length ?? 0;
+  if (state === 13 || state === 14) return app.data.levelLabels.length;
+  if (state === 19) return app.data.text[3]?.length ?? 0;
+  return app.data.text[2]?.length ?? 0;
 }
 
-function drawRadar(g, m) {
-  const R = 26, cx = 240 - R - 6, cy = 36 + R + 6;
-  g.save();
-  g.beginPath(); g.arc(cx, cy, R, 0, Math.PI * 2);
-  g.fillStyle = 'rgba(10,16,10,0.65)'; g.fill();
-  g.clip();
-  const sx = R * 2 / WORLD_W, sy = R * 2 / WORLD_H;
-  g.fillStyle = 'rgba(140,150,140,0.5)';
-  for (let ty = 0; ty < MAP_H; ty += 2) for (let tx = 0; tx < MAP_W; tx += 2) {
-    if (m.grid[ty * MAP_W + tx]) g.fillRect(cx - R + tx * TILE * sx, cy - R + ty * TILE * sy, 1.6, 1.6);
-  }
-  if (m.flags) for (const f of m.flags) {
-    g.fillStyle = '#ffd84d';
-    g.fillRect(cx - R + f.x * sx - 1.5, cy - R + f.y * sy - 1.5, 3, 3);
-  }
-  for (const s of m.soldiers) {
-    if (s.dead) continue;
-    const hostile = s !== m.player && s.team !== m.player.team;
-    g.fillStyle = s === m.player ? '#fff' : (hostile ? '#ff5544' : '#66cc55');
-    g.fillRect(cx - R + s.x * sx - 1, cy - R + s.y * sy - 1, 2.5, 2.5);
-  }
-  g.restore();
-  g.strokeStyle = 'rgba(200,220,200,0.5)';
-  g.beginPath(); g.arc(cx, cy, R, 0, Math.PI * 2); g.stroke();
+function handleSourceInput(event) {
+  if (!app.data || event.type === 'source-tick' || !event.code) return;
+  const key = decodeGameplayKey(event.code);
+  if (event.type === 'key-down') {
+    const count = Math.max(1, menuLength(app.K));
+    if (event.code === 50 || event.code === 56) app.selection = (app.selection + 1) % count;
+    else if (event.code === 52) app.selection = (app.selection + count - 1) % count;
+    else if (event.code === 53) activateCurrentSelection();
+    else if (app.screen === 'game' && key) app.input[key] = true;
+  } else if (event.type === 'key-up' && key && app.input) app.input[key] = false;
 }
 
-/* ---------- màn hình menu ---------- */
-function drawBg(g, key) {
-  const im = IMG[key] || IMG.bg0;
-  if (im) {
-    const sc = Math.max(240 / im.width, 320 / im.height);
-    const dw = im.width * sc, dh = im.height * sc;
-    g.drawImage(im, (240 - dw) / 2, (320 - dh) / 2, dw, dh);
-    g.fillStyle = 'rgba(5,10,5,0.62)'; g.fillRect(0, 0, 240, 320);
-  } else { g.fillStyle = '#0c120c'; g.fillRect(0, 0, 240, 320); }
-}
-
-function drawMenuList(g, items, sel, y0, lh, color) {
-  g.textAlign = 'center';
-  for (let i = 0; i < items.length; i++) {
-    const on = i === sel;
-    g.fillStyle = on ? (color || '#ffd84d') : '#cfcfcf';
-    g.font = (on ? 'bold ' : '') + '11px monospace';
-    g.fillText((on ? '▶ ' : '  ') + items[i], 120, y0 + i * lh);
-  }
-}
-
-function renderFrame(g) {
-  const T2 = T();
-  const S = app.screen;
-  if (S === 'boot') {
-    g.fillStyle = '#000'; g.fillRect(0, 0, 240, 320);
-    g.fillStyle = '#9cff7b'; g.font = '10px monospace'; g.textAlign = 'center';
-    g.fillText(T2.loading, 120, 160);
-    return;
-  }
-  if (S === 'splash') {
-    g.fillStyle = '#000'; g.fillRect(0, 0, 240, 320);
-    if (IMG.lz) {
-      const a = Math.sin(Math.min(1, app.splashT / 1600) * Math.PI);
-      g.globalAlpha = Math.max(0.15, a);
-      g.drawImage(IMG.lz, (240 - IMG.lz.width) / 2, (320 - IMG.lz.height) / 2);
-      g.globalAlpha = 1;
-    }
-    return;
-  }
-  if (S === 'title') {
-    if (IMG.or) { g.drawImage(IMG.or, 0, 0, 240, 320); }
-    else drawBg(g, 'bg0');
-    g.fillStyle = 'rgba(0,0,0,0.25)'; g.fillRect(0, 280, 240, 40);
-    if (Math.floor(Date.now() / 450) % 2 === 0) {
-      g.fillStyle = '#ffd84d'; g.font = 'bold 11px monospace'; g.textAlign = 'center';
-      g.fillText(T2.pressAny, 120, 300);
-    }
-    g.fillStyle = '#8f8'; g.font = '7px monospace';
-    g.fillText('Phaser 3 · J2ME port', 120, 313);
-    return;
-  }
-  if (S === 'menu') {
-    drawBg(g, 'li1');
-    g.fillStyle = '#ffd84d'; g.font = 'bold 16px monospace'; g.textAlign = 'center';
-    g.fillText('TOTAL', 120, 70);
-    g.fillText('TOURNAMENT', 120, 90);
-    drawMenuList(g, T2.menu, app.menuIdx, 130, 22);
-    g.fillStyle = '#777'; g.font = '7px monospace';
-    g.fillText('Net Lizard · web port', 120, 310);
-    return;
-  }
-  if (S === 'mode') {
-    drawBg(g, 'li2');
-    g.fillStyle = '#ffd84d'; g.font = 'bold 12px monospace'; g.textAlign = 'center';
-    g.fillText(T2.chooseMode, 120, 50);
-    drawMenuList(g, T2.modes, app.modeIdx, 84, 20);
-    g.fillStyle = '#bbb'; g.font = '8px monospace';
-    wrapText(g, T2.modeDesc[app.modeIdx], 120, 200, 216, 12);
-    g.fillStyle = '#9cff7b'; g.font = '9px monospace';
-    g.fillText(T2.start, 120, 285);
-    g.fillStyle = '#777'; g.font = '7px monospace';
-    g.fillText(T2.back, 120, 308);
-    return;
-  }
-  if (S === 'character') {
-    drawBg(g, 'li2');
-    g.fillStyle = '#ffd84d'; g.font = 'bold 12px monospace'; g.textAlign = 'center';
-    g.fillText(T2.chooseCharacter, 120, 60);
-    const previewKey = app.characterIdx === 0 ? 'soldier' : 'mutant';
-    const preview = KIT.characters[previewKey]?.green;
-    if (preview) g.drawImage(preview, 90, 78, 60, 58);
-    drawMenuList(g, T2.characters, app.characterIdx, 156, 34);
-    g.fillStyle = '#9cff7b'; g.font = 'bold 8px monospace';
-    g.fillText(T2.confirmCharacter, 120, 242);
-    g.fillStyle = '#aaa'; g.font = '8px monospace';
-    g.fillText(T2.nextCharacter, 120, 260);
-    g.fillStyle = '#777'; g.font = '7px monospace';
-    g.fillText(T2.back, 120, 308);
-    return;
-  }
-  if (S === 'help' || S === 'about') {
-    drawBg(g, S === 'help' ? 'bg1' : 'bg0');
-    const lines = S === 'help' ? T2.help : T2.about;
-    g.textAlign = 'center';
-    let y = 60;
-    for (const ln of lines) {
-      if (ln === '') { y += 10; continue; }
-      g.fillStyle = '#ddd'; g.font = '9px monospace';
-      g.fillText(ln, 120, y);
-      y += 15;
-    }
-    g.fillStyle = '#777'; g.font = '7px monospace';
-    g.fillText(T2.back, 120, 306);
-    return;
-  }
-  if (S === 'game') {
-    const m = app.match;
-    if (!m) { app.screen = 'menu'; return; }
-    const now = performance.now();
-    const lerpT = app.paused || m.over ? 1 : Math.max(0, Math.min(1, (now - app.lastTick) / TICK_MS));
-    updateCam(m);
-    drawWorld(g, m, m.cam, lerpT);
-    drawHud(g, m);
-    return;
-  }
-  if (S === 'result') {
-    drawBg(g, 'li1');
-    const r = app.result, m = app.match, T3 = T2;
-    g.textAlign = 'center';
-    g.fillStyle = '#ffd84d'; g.font = 'bold 14px monospace';
-    g.fillText(T3.result, 120, 60);
-    const win = r.winner;
-    g.fillStyle = win === 'win' ? '#9cff7b' : '#ff5544';
-    g.font = 'bold 20px monospace';
-    g.fillText(win === 'win' ? T3.win : (win === 'draw' ? T3.draw : T3.lose), 120, 95);
-    g.fillStyle = '#ddd'; g.font = '10px monospace';
-    const modeId = m.mode.id;
-    const rows = [
-      `${T3.kills}: ${r.kills}`,
-      `${T3.deaths}: ${r.deaths}`,
-    ];
-    if (modeId === 'surv') rows.push(`${T3.wave}: ${r.wave}`, `Score: ${r.score}`);
-    if (modeId === 'ctf') rows.push(`${T3.captures}: ${r.captures}`, `${m.frags[0]} - ${m.frags[1]}`);
-    if (modeId === 'team') rows.push(`${m.frags[0]} - ${m.frags[1]}`);
-    if (modeId === 'dm') rows.push(`Score: ${r.score}`);
-    let y = 130;
-    for (const row of rows) { g.fillText(row, 120, y); y += 18; }
-    if (r.bestNew) {
-      g.fillStyle = '#ffd84d'; g.font = 'bold 10px monospace';
-      g.fillText(`★ ${T3.best}: ${app.save.best[modeId]}`, 120, y + 6);
-    } else {
-      g.fillStyle = '#999'; g.font = '9px monospace';
-      g.fillText(`${T3.best}: ${r.bestPrev}`, 120, y + 6);
-    }
-    g.fillStyle = '#9cff7b'; g.font = '8px monospace';
-    g.fillText(T3.again, 120, 285);
-    return;
-  }
-}
-
-function wrapText(g, text, cx, y0, maxW, lh) {
-  const words = text.split(' ');
-  let line = '', y = y0;
-  for (const w of words) {
-    const t2 = line + (line ? ' ' : '') + w;
-    if (g.measureText(t2).width > maxW && line) { g.fillText(line, cx, y); line = w; y += lh; }
-    else line = t2;
-  }
-  if (line) g.fillText(line, cx, y);
-}
-
-/* ---------- boot ---------- */
 async function boot() {
-  app.save = loadSave();
-  app.lang = getLang(app.save);
-  bindInput();
-  await loadAll();
-  buildKit();
-  app.screen = 'splash';
-  const splashStart = performance.now();
-  // splash tự chuyển sau 1.9s
-  const iv = setInterval(() => {
-    app.splashT = performance.now() - splashStart;
-    if (app.splashT > 1900 && app.screen === 'splash') { app.screen = 'title'; clearInterval(iv); }
-    if (app.screen !== 'splash') clearInterval(iv);
-  }, 100);
-  mountPhaserRuntime({
-    canvas: canvasEl,
-    width: 240,
-    height: 320,
-    tickMs: TICK_MS,
-    onStepSimulation() {
-      app.lastTick = performance.now();
-      const m = app.match;
-      if (m && app.screen === 'game' && !app.paused) {
-        stepMatch(m, app.input);
-        // phát âm thanh từ queue của sim
-        if (m.sounds && m.sounds.length) { for (const s of m.sounds) sfxPlay(s.name); m.sounds.length = 0; }
-        if (m.over && !app.resultPending) { app.resultPending = true; setTimeout(() => { if (app.screen === 'game') finishMatch(); }, 1400); }
-      }
-    },
-    onFrameInterpolate() { return app.screen === 'game' && !app.paused; },
-    onRenderFrame(ctx) { renderFrame(ctx); },
-  });
+  if (!canvas || !ctx) return;
+  try {
+    const [images, tables] = await Promise.all([loadOriginalImages(), loadOriginalTables()]);
+    app.images = images;
+    app.data = tables;
+    app.data.text = parseJ2meTextTable(tables.raw.text);
+    app.data.about = decodeJ2meText(tables.raw.text1);
+    app.data.help = decodeJ2meText(tables.raw.text2);
+    app.data.settings = decodeJ2meText(tables.raw.text3);
+    app.data.status = decodeJ2meText(tables.raw.text4);
+    app.data.text3Rows = app.data.settings.split(/[\r\n]+/).filter(Boolean);
+    app.data.levelLabels = Array.from({ length: 12 }, (_, index) => index === 11 ? app.data.text[5]?.[2] || 'Назад' : `${index + 1}. Уровень`);
+    app.font = createOriginalFont(images.fnt, decodeFontMetrics(tables.raw.cf));
+    app.data.drawChoice = drawChoicePage;
+    app.data.drawSettings = drawChoicePage;
+    app.data.drawMenu = drawChoicePage;
+    app.data.drawModeMenu = drawChoicePage;
+    app.data.drawTextPage = drawTextPage;
+    app.data.drawOriginalPage = drawOriginalUi;
+    app.data.drawHud = drawOriginalHud;
+    app.data.selectionIndex = () => app.selection;
+    app.data.animationForActor = actorPose;
+    app.data.drawEffects = () => {};
+    app.data.projectileFrame = (weapon) => [0, 69, 70, 71, 72, 73][weapon] || 69;
+    app.screen = 'startup';
+    app.K = 0;
+    app.loop = createEngineLoop({
+      tick(event) {
+        handleSourceInput(event);
+        if (event.type === 'source-tick' && app.screen === 'game') app.data.tickSourceMatch?.(app.match, app.input);
+      },
+      render: paint,
+      frameBudget: TICK_TARGET_MS,
+    });
+    app.loop.start();
+    window.setTimeout(() => { if (app.screen === 'startup') app.screen = 'title'; }, 2500);
+  } catch (error) {
+    console.error('Original JAR loading failed:', error);
+    app.screen = 'error';
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, WIDTH, HEIGHT);
+    ctx.fillStyle = '#fff';
+    ctx.font = '10px monospace';
+    ctx.fillText(String(error.message || error).slice(0, 32), 8, 20);
+  }
 }
 
-if (canvasEl) boot();
+if (canvas && ctx) boot();

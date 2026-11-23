@@ -7,6 +7,9 @@ Bytecode evidence: `analysis/bytecode-evidence/*.javap.txt` — sinh lại bằn
 
 ## 1. Nhận dạng (META-INF/MANIFEST.MF)
 
+- Class map đã được tách thành [CLASS-RESPONSIBILITIES.md](CLASS-RESPONSIBILITIES.md).
+- SHA-256 của JAR gốc được ghi trong [ASSETS-SHA256.txt](ASSETS-SHA256.txt); giữ nguyên file nguồn.
+
 | Trường | Giá trị |
 |---|---|
 | MIDlet-Name | TOTAL TOURNAMENT JaFan.ru |
@@ -23,17 +26,19 @@ Bytecode evidence: `analysis/bytecode-evidence/*.javap.txt` — sinh lại bằn
 | `tr` | MIDlet entry (startApp/pauseApp) |
 | `e` | Engine chính (~4120 dòng): game loop, render, AI, bảng frame `aO` (từ cu2), composite thân lính `aH` (từ ca), vũ khí, level, HUD |
 | `b` | Loader tài nguyên: giải mã ảnh 3 tầng XOR, tokenizer chuỗi, RecordStore lưu game; instance tĩnh `b.d` = data accessor |
-| `c` | Layout/wrap text lên bitmap font |
-| `a` | Canvas fullscreen + bảng font metrics `cf` (6 byte/glyph) |
-| `d` | File data accessor (đọc raw bytes trong jar) |
-| `com/nokia/mid/ui/*` (6), `com/nokia/mid/sound/*` (2), `com/hellomoto/fullscreen/FullCn` | Stub API Nokia/hellomoto |
+| `c` | UI menu/dialog: layout, wrap text, điều hướng màn hình |
+| `a` | Bitmap-font renderer và bảng font metrics `cf` (6 byte/glyph) |
+| `d` | Điều phối phát nhạc MIDI/AMR qua MIDP Player (JAR không kèm track âm thanh) |
+| `com/nokia/mid/ui/*` (6), `com/nokia/mid/sound/*` (2), `com/hellomoto/fullscreen/FullCn` | Tương thích API Nokia/Motorola; gồm adapter graphics và stub điều khiển thiết bị/âm thanh |
+
+Bảng vai trò chi tiết kèm bằng chứng: [CLASS-RESPONSIBILITIES.md](CLASS-RESPONSIBILITIES.md).
 | **Lưu ý âm thanh:** jar KHÔNG có file nhạc/âm (.mid/.amr/.wav) — chỉ stub `com.nokia.mid.sound.Sound` |
 
 ## 3. Sơ đồ giải mã tài nguyên (b.java `b.a(String)`)
 
-1. **PNG trần** → dùng ngay (`bg0, bg1, or, li1, li2, f1, f2, fnt, curs, erou, ld, lz(2 tầng), text1, text2`).
+1. **PNG trần** → dùng ngay (`bg0, bg1, or, li1, li2, f1, f2, fnt, curs, erou, ld, text1, text2`).
 2. **XOR stream key 100 tăng dần** toàn bộ buffer → PNG (l0, l1, s0, s1, u0–u8).
-3. **XOR kép**: XOR key-100-stream (in-place) → key mới = `buf[2]-3` (byte, signed) → XOR stream lần 2, cắt từ offset 3 (`lz`).
+3. **Startup `lz` riêng trong `e.run()`**: đọc prefix 3 byte, payload length = `3 + u8(buf[0])*256 + u8(buf[1])`, key = `(signed(buf[2]) - 3) & 0xff`; XOR key tăng dần từ byte 0 đến hết buffer, rồi `Image.createImage(buf, 3, len-3)`. Đã đối chiếu với `e.javap.txt`; decoded payload là PNG 240×299. Không áp dụng XOR-100 trước.
 4. **Không giải mã — file dữ liệu nguỵ trang .png** (đọc raw qua `b.d.a(name, -1)`): `cu2, ca, cc, ccs, cf, ll, mua, obj0, wlg, wpn, text, text1–4`.
 
 Script decode tham khảo: xem `analysis/data/` (đã kèm bản raw gốc).
@@ -65,6 +70,8 @@ Script decode tham khảo: xem `analysis/data/` (đã kèm bản raw gốc).
 | ico (MIDlet) | 52×52 | Icon app — decode mới succeed (double XOR) |
 
 ## 5. File dữ liệu (đã parse — `analysis/data/tables.json`)
+
+**Signed-byte check:** Các cột offset/delta trong `cu2` và `ca` được giữ theo ngữ nghĩa `byte` có dấu của Java; khi tự giải mã byte thô, dùng `b > 127 ? b - 256 : b` cho giá trị có dấu và `b & 0xff` cho chỉ số/giá trị không dấu. Không chuyển mọi cột sang cùng một kiểu: ví dụ `ca` có offset âm, trong khi các mã ảnh/weapon có quy tắc riêng được ghi ở từng dòng dưới đây.
 
 | File | Format (từ code e.java) | Nội dung |
 |---|---|---|
