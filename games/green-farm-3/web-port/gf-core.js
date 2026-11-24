@@ -265,9 +265,17 @@ function executePendingFarmerAction(session) {
   if (act.type === 'tile') {
     const plotBefore = session.plots.get(`${act.row},${act.col}`);
     if (plotBefore && plotBefore.stage === 'tilled' && act.openSeedPicker) {
-      session.seedPickerTarget = { row: act.row, col: act.col, worldX: act.worldX, worldY: act.worldY };
-      session.panelCursor = 0;
-      session.view = SOURCE_VIEW.SEED_PICKER;
+      // Port of a.java:3804-3936: open the on-world bottom Seed Carousel (/6[1] widgets 73..83)
+      // right over the live farm world instead of leaving for a modal list!
+      const fieldCrops = (session.catalog?.crops || []).filter(c => c.id !== 3000 && !c.isTree);
+      const curIdx = Math.max(0, fieldCrops.findIndex(c => c.id === session.selectedCropId));
+      session.seedCarousel = {
+        row: act.row,
+        col: act.col,
+        worldX: act.worldX,
+        worldY: act.worldY,
+        index: curIdx,
+      };
       f.state = 'idle';
       f.anim = 2;
       return;
@@ -544,7 +552,8 @@ export function createFarmSession(worldResources, textData = {}) {
     selectedCropId: wheat?.id ?? 3004,
     activeTool: 'auto', // 'auto' | 'plow' | 'clear' | 'place'
     placementItem: null, // { kind: 'tree'|'animal'|'decor', spec }
-    seedPickerTarget: null, // { row, col, worldX, worldY }
+    seedPickerTarget: null,
+    seedCarousel: null, // Port of a.java:3804-3936: { row, col, worldX, worldY, index } on-world bottom carousel!
     shopTab: 'crops', // 'crops' | 'trees' | 'animals' | 'buildings' | 'decor'
     shopCursor: 0,
     panelCursor: 0,

@@ -442,17 +442,72 @@ function renderFarmWorld(ctx) {
 
   // --- 1:1 ORIGINAL GAMELOFT /6[1] HUD (NO IAP '+' TOP-UP BUTTONS) ---
   const hudWidgets = getUIScreen(1);
+  const carouselOpen = !!s.seedCarousel && !vn;
   drawOriginalUIScreen(ctx, hudWidgets, getAnySpriteBlock, {
     filterWidget: (w) => {
       if (w.type !== 205) return false;
-      // Remove green IAP '+' buttons (spr 41 frm 3) and their star badges (spr 20 frm 183)
       if (w.spriteId === 41 && w.frameIndex === 3) return false;
       if (w.spriteId === 20 && w.frameIndex === 183) return false;
       if (w.y < 60 && w.spriteId !== 31) return true;
-      if (vn && w.index === 67) return false; // Hide Market Stand under VỀ NHÀ when visiting a neighbor
+      // When Seed Carousel is open on an empty tilled plot, hide bottom softkeys (a.java:3816)
+      if (carouselOpen) return false;
+      if (vn && w.index === 67) return false;
       return w.index === 52 || w.index === 63 || w.index === 67;
     },
   });
+
+  // --- 1:1 ON-WORLD SEED CAROUSEL (/6[1] widgets 73, 75..78, 82 — a.java:3804-3936) ---
+  if (carouselOpen) {
+    const fieldCrops = (s.catalog?.crops || []).filter(c => c.id !== 3000 && !c.isTree);
+    const count = fieldCrops.length;
+    if (count > 0) {
+      const idx = ((s.seedCarousel.index % count) + count) % count;
+      const prevIdx = (idx - 1 + count) % count;
+      const nextIdx = (idx + 1) % count;
+
+      // Widget [75]: Original Gameloft curved carousel tray (x=45, y=260, spr=20, frm=105)
+      const spr20 = getUiSpriteBlock(20);
+      if (spr20) drawBSpriteBlockFrame(ctx, spr20.sprite, spr20.moduleImages, 105, 45, 260, 0);
+
+      // Widgets [76], [77], [78]: Left (80,281), Center (124,281), Right (170,282) crop seed icons
+      const slots = [
+        { crop: fieldCrops[prevIdx], x: 80, y: 281 },
+        { crop: fieldCrops[idx], x: 124, y: 281 },
+        { crop: fieldCrops[nextIdx], x: 170, y: 282 },
+      ];
+      const spr9 = getUiSpriteBlock(9);
+      for (const sl of slots) {
+        const unlocked = s.level >= (sl.crop.unlockLevel || 1);
+        if (unlocked && spr9) {
+          // Port of a.java:3858: w[n3] = col4 - 12 (frames 0..11 of /7[9])
+          const seedFrm = Math.max(0, Math.min(spr9.sprite.frames.length - 1, (sl.crop.iconFrame ?? 12) - 12));
+          drawBSpriteBlockFrameScaled(ctx, spr9.sprite, spr9.moduleImages, seedFrm, sl.x, sl.y, 28, 28);
+        } else if (spr20) {
+          // Port of a.java:3861: locked padlock icon (/7[20] frame 123)
+          drawBSpriteBlockFrameScaled(ctx, spr20.sprite, spr20.moduleImages, 123, sl.x, sl.y, 24, 24);
+        }
+      }
+
+      // Widget [82]: Center selection highlight ring (x=123, y=283, spr=20, frm=174)
+      if (spr20) drawBSpriteBlockFrame(ctx, spr20.sprite, spr20.moduleImages, 174, 123, 283, 0);
+
+      // Widget [73]: Back / Cancel button (x=211, y=291, spr=12, frm=0)
+      const spr12 = getUiSpriteBlock(12);
+      if (spr12) drawBSpriteBlockFrame(ctx, spr12.sprite, spr12.moduleImages, 0, 211, 291, 0);
+
+      // Selected crop name & cost pill right above the carousel tray
+      const cur = fieldCrops[idx];
+      const locked = s.level < (cur.unlockLevel || 1);
+      ctx.fillStyle = 'rgba(59, 34, 13, 0.9)';
+      ctx.fillRect(36, 238, 168, 18);
+      ctx.strokeStyle = '#e8c47a';
+      ctx.strokeRect(36.5, 238.5, 167, 17);
+      const label = locked
+        ? `${cur.name} (Mở ở Cấp ${cur.unlockLevel})`
+        : `${cur.name} · ${cur.buyPrice} Xu · ${cur.growSec}s`;
+      drawText(ctx, label, 120, 250, { align: 'center', size: 8, color: locked ? '#ffb09c' : '#fff7c2', bold: true });
+    }
+  }
 
   const xpNeed = xpForNextLevel(s);
   const drawHudNum = (val, x, y, color, shadow = '#2b1505') => {
@@ -500,7 +555,7 @@ function renderFarmWorld(ctx) {
     drawText(ctx, toolNames[s.activeTool] || '', SCREEN_W / 2, 75, { align: 'center', size: 8, color: '#fff4c2', bold: true });
   }
 
-  if (s.toast) {
+  if (s.toast && !carouselOpen) {
     ctx.fillStyle = 'rgba(59, 34, 13, 0.9)';
     ctx.fillRect(8, SCREEN_H - 56, SCREEN_W - 16, 16);
     ctx.strokeStyle = '#e8c47a';
@@ -542,153 +597,175 @@ function getShopItems(s) {
   return s.catalog.decorations || [];
 }
 
-// --- SCREEN A: AUTHENTIC 2x3 CARD-GRID SHOP (/6[2]) WITH /7[9] ICONS ---
+// --- SCREEN A: 1:1 ORIGINAL GAMELOFT /6[2] SHOP (4 /7[4] TABS + 2x2 /7[20] CARDS!) ---
 function renderShop(ctx) {
   const s = app.session;
-  drawOriginalWindowShell(ctx, 2, 'CỬA HÀNG NÔNG TRẠI', `Xu: ${s.coins}  ·  Cấp: ${s.level}`);
+  ctx.fillStyle = '#3c2512';
+  ctx.fillRect(0, 0, SCREEN_W, SCREEN_H);
 
-  const tabDefs = [
-    { id: 'crops', label: 'HẠT' },
-    { id: 'trees', label: 'CÂY' },
-    { id: 'animals', label: 'THÚ' },
-    { id: 'land', label: 'ĐẤT' },
-    { id: 'decor', label: 'ĐỒ' },
-  ];
-  const tw = Math.floor(208 / 5);
-  tabDefs.forEach((t, i) => {
-    const tx = 16 + i * tw;
-    const active = s.shopTab === t.id;
-    ctx.fillStyle = active ? '#8c4b18' : '#e6ca94';
-    ctx.fillRect(tx + 1, 38, tw - 2, 16);
-    ctx.strokeStyle = active ? '#ffd84d' : '#8b5a2b';
-    ctx.strokeRect(tx + 1.5, 38.5, tw - 3, 15);
-    drawText(ctx, t.label, tx + tw / 2, 49, { align: 'center', size: 8, color: active ? '#fff8d4' : '#4a290c', bold: true });
+  // Render authentic /6[2] Shop backdrop, Coins/Cash pills, and 4 real /7[4] category icon tabs
+  const w2 = getUIScreen(2);
+  drawOriginalUIScreen(ctx, w2, getAnySpriteBlock, {
+    filterWidget: (w) => {
+      if (w.type !== 205) return false;
+      if (w.spriteId === 22 || w.spriteId === 33 || w.spriteId === 4) return true;
+      // Keep top Coins/Cash bars (y < 45, excluding IAP '+' [8,9]) and 4 tab backgrounds (y=50, frm=9)
+      if (w.spriteId === 20 && w.y < 45 && w.index !== 8 && w.index !== 9) return true;
+      if (w.spriteId === 20 && w.frameIndex === 9 && w.y === 50) return true;
+      return false;
+    },
   });
 
+  // Live Coins & Cash inside /6[2]'s top bars (x=30..108, x=126..188, y=25)
+  drawText(ctx, `${s.coins}`, 70, 36, { align: 'center', size: 8, color: '#4a2508', bold: true });
+  drawText(ctx, `${s.cash}`, 158, 36, { align: 'center', size: 8, color: '#1c6b1c', bold: true });
+
+  // Highlight active tab among the 4 original /6[2] tabs (x=31, 76, 121, 166, y=50)
+  const tabOrder = ['crops', 'trees', 'animals', 'decor'];
+  const activeTabIdx = Math.max(0, tabOrder.indexOf(s.shopTab === 'land' ? 'decor' : s.shopTab));
+  ctx.strokeStyle = '#ffd84d';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(31 + activeTabIdx * 45 - 1, 49, 40, 31);
+  ctx.lineWidth = 1;
+
+  // 4 live items mapped 1:1 onto /6[2]'s exact 2x2 card coordinates:
+  // Top row cards: (31,85) & (126,85) -> icons at (73,134) & (168,134), prices at (75,172) & (170,172)
+  // Bottom row cards: (31,182) & (126,182) -> icons at (73,231) & (168,231), prices at (75,269) & (170,269)
   const list = getShopItems(s);
-  const perPage = 6;
+  const perPage = 4;
   const page = Math.floor(s.shopCursor / perPage);
   const totalPages = Math.max(1, Math.ceil(list.length / perPage));
   const start = page * perPage;
+  const cardCoords = [
+    { x: 31, y: 85, ix: 78, iy: 128, px: 76, py: 172 },
+    { x: 126, y: 85, ix: 173, iy: 128, px: 171, py: 172 },
+    { x: 31, y: 182, ix: 78, iy: 225, px: 76, py: 269 },
+    { x: 126, y: 182, ix: 173, iy: 225, px: 171, py: 269 },
+  ];
 
   for (let i = 0; i < perPage && start + i < list.length; i += 1) {
     const idx = start + i;
     const item = list[idx];
-    const col = i % 2;
-    const row = Math.floor(i / 2);
-    const cx = 18 + col * 104;
-    const cy = 58 + row * 71;
+    const c = cardCoords[i];
     const selected = idx === s.shopCursor;
     const owned = s.shopTab === 'land' && (s.unlockedZones || []).includes(item.id);
     const locked = !owned && ((item.unlockLevel || 1) > s.level);
     const price = s.shopTab === 'land' ? item.cost : item.buyPrice;
 
-    // Warm parchment card strictly inside 2x3 grid
+    // Clean warm Gameloft parchment card at exact /6[2] 2x2 slot position
     ctx.fillStyle = selected ? '#fff1b8' : '#f7e6c0';
-    ctx.fillRect(cx, cy, 100, 67);
+    ctx.fillRect(c.x, c.y, 88, 92);
     ctx.strokeStyle = selected ? '#c46210' : '#9c6e3b';
     ctx.lineWidth = selected ? 2 : 1;
-    ctx.strokeRect(cx + 0.5, cy + 0.5, 99, 66);
+    ctx.strokeRect(c.x + 0.5, c.y + 0.5, 87, 91);
     ctx.lineWidth = 1;
+    // Price pill strip at bottom of card
+    ctx.fillStyle = '#e5c687';
+    ctx.fillRect(c.x + 6, c.y + 72, 76, 15);
+    ctx.strokeStyle = '#9c6e3b';
+    ctx.strokeRect(c.x + 6.5, c.y + 72.5, 75, 14);
 
-    // Draw crisp scaled original icon (/7[9] for crops/trees, /5 for animals/decor)
     if (s.shopTab === 'crops' || s.shopTab === 'trees') {
       const ui9 = getUiSpriteBlock(item.iconBlock ?? 9);
       if (ui9 && item.iconFrame >= 0 && item.iconFrame < ui9.sprite.frames.length) {
-        drawBSpriteBlockFrameScaled(ctx, ui9.sprite, ui9.moduleImages, item.iconFrame, cx + 50, cy + 25, 38, 34);
-      } else {
-        const sp = getSpriteBlock(item.worldBlock, 0);
-        if (sp) drawBSpriteBlockFrameScaled(ctx, sp.sprite, sp.moduleImages, s.shopTab === 'trees' ? 1 : 2, cx + 50, cy + 25, 38, 34);
+        drawBSpriteBlockFrameScaled(ctx, ui9.sprite, ui9.moduleImages, item.iconFrame, c.ix, c.iy, 38, 34);
       }
     } else if (s.shopTab === 'animals' || s.shopTab === 'decor') {
       const sp = getSpriteBlock(item.worldBlock, item.paletteIndex || 0);
-      if (sp) drawBSpriteBlockFrameScaled(ctx, sp.sprite, sp.moduleImages, item.idleFrame ?? item.frame ?? 0, cx + 50, cy + 25, 42, 34);
+      if (sp) drawBSpriteBlockFrameScaled(ctx, sp.sprite, sp.moduleImages, item.idleFrame ?? item.frame ?? 0, c.ix, c.iy, 40, 34);
     } else {
       const sp6 = getSpriteBlock(6, 0);
-      if (sp6) drawBSpriteBlockFrameScaled(ctx, sp6.sprite, sp6.moduleImages, 0, cx + 50, cy + 25, 48, 32);
+      if (sp6) drawBSpriteBlockFrameScaled(ctx, sp6.sprite, sp6.moduleImages, 0, c.ix, c.iy, 44, 30);
     }
 
-    drawText(ctx, item.name, cx + 50, cy + 50, { align: 'center', size: 8, color: locked ? '#8a7356' : '#3a1f08', bold: true, maxWidth: 94 });
-    const rightTxt = owned ? 'ĐÃ MUA' : locked ? `Cấp ${item.unlockLevel}` : `${price} Xu`;
-    const rightCol = owned ? '#1c6b1c' : locked ? '#8a7356' : (s.coins >= price ? '#8c4b18' : '#b3281d');
-    drawText(ctx, rightTxt, cx + 50, cy + 62, { align: 'center', size: 8, color: rightCol, bold: true });
+    drawText(ctx, item.name, c.x + 44, c.y + 13, { align: 'center', size: 7, color: '#3a1f08', bold: true, maxWidth: 82 });
+    const rightTxt = owned ? 'ĐÃ MUA' : locked ? `Lv.${item.unlockLevel}` : `${price}`;
+    drawText(ctx, rightTxt, c.px, c.py, { align: 'center', size: 8, color: owned ? '#1c6b1c' : locked ? '#7a5c3d' : '#4a2508', bold: true });
   }
 
-  // Page indicator centered between ✔ and ⬅ buttons (never overlapping them!)
-  drawText(ctx, `Trang ${page + 1}/${totalPages} (◀ ▶)`, SCREEN_W / 2, 306, { align: 'center', size: 8, color: '#fff7d1', bold: true });
+  // Bottom softkeys (/7[12]) & Land/Page bar
+  const softkeys = getUiSpriteBlock(12);
+  if (softkeys) {
+    drawBSpriteBlockFrame(ctx, softkeys.sprite, softkeys.moduleImages, 2, 4, 289, 0);
+    drawBSpriteBlockFrame(ctx, softkeys.sprite, softkeys.moduleImages, 0, 208, 289, 0);
+  }
+  drawText(ctx, `◀ Trang ${page + 1}/${totalPages} ▶`, SCREEN_W / 2, 306, { align: 'center', size: 8, color: '#fff7d1', bold: true });
 }
 
-// --- SCREEN B: AUTHENTIC KITCHEN WORKBENCH (/6[3]) ---
+// --- SCREEN B: 1:1 ORIGINAL GAMELOFT /6[3] KITCHEN (3x2 RECIPE CARDS AT x=20, 88, 155!) ---
 function renderKitchen(ctx) {
   const s = app.session;
-  drawOriginalWindowShell(ctx, 3, 'NHÀ BẾP — CHẾ BIẾN', `Bếp đang nấu: ${s.kitchenQueue?.length || 0}/4  ·  Cấp ${s.level}`);
+  ctx.fillStyle = '#3c2512';
+  ctx.fillRect(0, 0, SCREEN_W, SCREEN_H);
+
+  // Render authentic /6[3] Kitchen backdrop & top 2 tabs (without stray dynamic overlay badges)
+  const w3 = getUIScreen(3);
+  drawOriginalUIScreen(ctx, w3, getAnySpriteBlock, {
+    filterWidget: (w) => {
+      if (w.type !== 205) return false;
+      if (w.spriteId === 22 || w.spriteId === 33 || w.spriteId === 28) return true;
+      return w.spriteId === 20 && w.y < 65;
+    },
+  });
+
+  // Clean header ribbon for title & active stove status
+  ctx.fillStyle = '#5c3314';
+  ctx.fillRect(16, 6, 208, 36);
+  ctx.strokeStyle = '#d4a259';
+  ctx.strokeRect(16.5, 6.5, 207, 35);
+  drawText(ctx, `NHÀ BẾP · Bếp ${s.kitchenQueue?.length || 0}/4`, SCREEN_W / 2, 20, { align: 'center', size: 9, color: '#fff7d1', bold: true });
+  const readyJob = (s.kitchenQueue || []).find(j => j.ready);
+  const cookingJob = (s.kitchenQueue || []).find(j => !j.ready);
+  const stoveHint = readyJob
+    ? `Xong: ${readyJob.name} (Chạm đây nhận!)`
+    : cookingJob
+      ? `Đang nấu: ${cookingJob.name} (${Math.ceil((cookingJob.cookMs - cookingJob.progressMs) / 1000)}s)`
+      : 'Chạm thẻ món bên dưới để nấu';
+  drawText(ctx, stoveHint, SCREEN_W / 2, 35, { align: 'center', size: 7, color: readyJob ? '#9cff7b' : '#ffe49e', bold: true });
+
+  // 6 live recipes per page mapped 1:1 onto /6[3]'s 3x2 card coordinates (x = 20, 88, 155; y = 92, 182)
   const recipes = s.catalog.recipes || [];
-  const selIdx = Math.max(0, Math.min(recipes.length - 1, s.panelCursor));
-  const sel = recipes[selIdx];
+  const perPage = 6;
+  const page = Math.floor(s.panelCursor / perPage);
+  const totalPages = Math.max(1, Math.ceil(recipes.length / perPage));
+  const start = page * perPage;
+  const colsX = [20, 88, 155];
+  const rowsY = [92, 182];
 
-  // Top Workbench Card (y = 40..124)
-  ctx.fillStyle = '#faebc8';
-  ctx.fillRect(18, 40, 204, 84);
-  ctx.strokeStyle = '#9c6e3b';
-  ctx.strokeRect(18.5, 40.5, 203, 83);
-  if (sel) {
-    const canCook = s.level >= sel.unlockLevel && sel.ingredients.every(ing => (s.inventory.get(ing.goodId)?.qty || 0) >= ing.qty);
-    drawText(ctx, `${sel.name} (${sel.cookSec}s · +${sel.xp} XP)`, 24, 54, { size: 9, color: '#3a1f08', bold: true, maxWidth: 192 });
-    sel.ingredients.slice(0, 2).forEach((ing, i) => {
-      const have = s.inventory.get(ing.goodId)?.qty || 0;
-      const ok = have >= ing.qty;
-      const bx = 24 + i * 96;
-      ctx.fillStyle = ok ? '#dff5d8' : '#f5ddd8';
-      ctx.fillRect(bx, 62, 92, 26);
-      ctx.strokeStyle = ok ? '#3d8b3d' : '#b35440';
-      ctx.strokeRect(bx + 0.5, 62.5, 91, 25);
-      drawText(ctx, ing.name, bx + 46, 73, { align: 'center', size: 7, color: '#3a1f08', bold: true, maxWidth: 86 });
-      drawText(ctx, `Có ${have}/${ing.qty}`, bx + 46, 84, { align: 'center', size: 8, color: ok ? '#1c6b1c' : '#b3281d', bold: true });
-    });
-    // Prominent NẤU NGAY button inside workbench
-    ctx.fillStyle = canCook ? '#2e7d32' : '#9e8b70';
-    ctx.fillRect(58, 94, 124, 24);
-    ctx.strokeStyle = canCook ? '#ffd84d' : '#6e5c45';
-    ctx.strokeRect(58.5, 94.5, 123, 23);
-    const btnTxt = s.level < sel.unlockLevel ? `Mở khóa Cấp ${sel.unlockLevel}` : canCook ? 'NẤU MÓN NÀY' : 'THIẾU NGUYÊN LIỆU';
-    drawText(ctx, btnTxt, 120, 109, { align: 'center', size: 8, color: '#ffffff', bold: true });
-  }
-
-  // Middle 4 Stove Slots (y = 130..168)
-  for (let i = 0; i < 4; i += 1) {
-    const sx = 18 + i * 52;
-    const job = s.kitchenQueue?.[i];
-    ctx.fillStyle = job?.ready ? '#d7f7c8' : '#edd5a4';
-    ctx.fillRect(sx, 130, 48, 36);
-    ctx.strokeStyle = job?.ready ? '#2e7d32' : '#9c6e3b';
-    ctx.strokeRect(sx + 0.5, 130.5, 47, 35);
-    if (job) {
-      drawText(ctx, job.name, sx + 24, 144, { align: 'center', size: 7, color: '#3a1f08', bold: true, maxWidth: 44 });
-      drawText(ctx, job.ready ? 'NHẬN!' : `${Math.ceil((job.cookMs - job.progressMs) / 1000)}s`, sx + 24, 158, {
-        align: 'center', size: 8, color: job.ready ? '#1c6b1c' : '#8c4b18', bold: true,
-      });
-    } else {
-      drawText(ctx, `Lò ${i + 1}`, sx + 24, 151, { align: 'center', size: 7, color: '#8a7356' });
-    }
-  }
-
-  // Bottom Recipe Picker List (4 visible rows cleanly inside y = 172..276)
-  const visible = 4;
-  const start = Math.max(0, Math.min(Math.max(0, recipes.length - visible), selIdx - 1));
-  for (let i = 0; i < visible && start + i < recipes.length; i += 1) {
+  for (let i = 0; i < perPage && start + i < recipes.length; i += 1) {
     const idx = start + i;
     const r = recipes[idx];
-    const y = 172 + i * 25;
-    const isSel = idx === selIdx;
+    const cx = colsX[i % 3];
+    const cy = rowsY[Math.floor(i / 3)];
+    const sel = idx === s.panelCursor;
     const canCook = s.level >= r.unlockLevel && r.ingredients.every(ing => (s.inventory.get(ing.goodId)?.qty || 0) >= ing.qty);
-    ctx.fillStyle = isSel ? '#fff1b8' : '#f7e6c0';
-    ctx.fillRect(18, y, 204, 22);
-    ctx.strokeStyle = isSel ? '#c46210' : '#9c6e3b';
-    ctx.strokeRect(18.5, y + 0.5, 203, 21);
-    drawText(ctx, r.name, 24, y + 14, { size: 8, color: '#3a1f08', bold: isSel, maxWidth: 132 });
-    drawText(ctx, canCook ? 'Đủ NL' : `Lv.${r.unlockLevel}`, 216, y + 14, { align: 'right', size: 8, color: canCook ? '#1c6b1c' : '#8a7356', bold: true });
+
+    ctx.fillStyle = sel ? '#fff1b8' : '#f7e6c0';
+    ctx.fillRect(cx, cy, 62, 78);
+    ctx.strokeStyle = sel ? '#c46210' : '#9c6e3b';
+    ctx.lineWidth = sel ? 2 : 1;
+    ctx.strokeRect(cx + 0.5, cy + 0.5, 61, 77);
+    ctx.lineWidth = 1;
+    drawText(ctx, r.name, cx + 31, cy + 14, { align: 'center', size: 7, color: '#3a1f08', bold: true, maxWidth: 56 });
+    const ing0 = r.ingredients[0];
+    if (ing0) {
+      const have = s.inventory.get(ing0.goodId)?.qty || 0;
+      drawText(ctx, `${ing0.name.slice(0, 8)} ${have}/${ing0.qty}`, cx + 31, cy + 44, {
+        align: 'center', size: 6, color: have >= ing0.qty ? '#1c6b1c' : '#9c2c1c', bold: true, maxWidth: 56,
+      });
+    }
+    ctx.fillStyle = canCook ? '#2e7d32' : '#d6be8a';
+    ctx.fillRect(cx + 6, cy + 56, 50, 16);
+    const st = s.level < r.unlockLevel ? `Lv.${r.unlockLevel}` : canCook ? 'NẤU' : 'Thiếu';
+    drawText(ctx, st, cx + 31, cy + 67, { align: 'center', size: 7, color: canCook ? '#ffffff' : '#5c3314', bold: true });
   }
-  drawText(ctx, 'Chạm lò chín để nhận', SCREEN_W / 2, 306, { align: 'center', size: 8, color: '#fff7d1', bold: true });
+
+  const softkeys = getUiSpriteBlock(12);
+  if (softkeys) {
+    drawBSpriteBlockFrame(ctx, softkeys.sprite, softkeys.moduleImages, 2, 4, 289, 0);
+    drawBSpriteBlockFrame(ctx, softkeys.sprite, softkeys.moduleImages, 0, 208, 289, 0);
+  }
+  drawText(ctx, `◀ Trang ${page + 1}/${totalPages} ▶`, SCREEN_W / 2, 306, { align: 'center', size: 8, color: '#fff7d1', bold: true });
 }
 
 // --- SCREEN C: AUTHENTIC QUESTS WITH CINDY LOU PORTRAIT (/6[9] + /7[7]) & 10 NEIGHBORS ---
@@ -821,45 +898,142 @@ function renderSeedPicker(ctx) {
   renderCleanParchmentList(ctx, 22, 'CHỌN HẠT GIỐNG', `Xu: ${s.coins}  ·  Cấp: ${s.level}`, rows, s.panelCursor, 'Chạm hạt giống để gieo');
 }
 
+// --- 1:1 ORIGINAL GAMELOFT /6[8] BARN (TOP TABS + 3x2 ITEM GRID + LEFT/RIGHT ARROWS [207,206]!) ---
 function renderBarn(ctx) {
   const s = app.session;
+  ctx.fillStyle = '#3c2512';
+  ctx.fillRect(0, 0, SCREEN_W, SCREEN_H);
+
+  const w8 = getUIScreen(8);
+  drawOriginalUIScreen(ctx, w8, getAnySpriteBlock, { filterWidget: (w) => w.type === 205 });
+
+  // Live Coins & Cash inside /6[8] top bars (x=138, y=27 & y=57)
+  drawText(ctx, `${s.coins}`, 176, 38, { align: 'center', size: 8, color: '#4a2508', bold: true });
+  drawText(ctx, `${s.cash}`, 176, 68, { align: 'center', size: 8, color: '#1c6b1c', bold: true });
+
   const items = [...s.inventory.values()];
   const totalQty = items.reduce((a, b) => a + b.qty, 0);
   const upCost = 150 + Math.floor((s.barnCapacity - 40) * 10);
-  const rows = [
-    { left: 'Nâng cấp Kho thóc (+20 chỗ)', right: `${upCost} Xu`, rightColor: s.coins >= upCost ? 'green' : 'red', spriteBlock: 82, spriteFrame: 0 },
-    ...(items.length > 0
-      ? items.map(it => ({ left: `${it.name} x${it.qty}`, right: `+${it.sellPrice * it.qty}G`, uiBlock: 2, uiFrame: 0 }))
-      : [{ left: 'Kho trống — thu hoạch cây/thú nhé!', right: '0G' }]),
+  drawText(ctx, `KHO THÓC ${totalQty}/${s.barnCapacity}`, 68, 22, { align: 'center', size: 8, color: '#fff7d1', bold: true });
+
+  const allSlots = [
+    { isUpgrade: true, name: '+20 Chỗ Kho', qty: 0, price: upCost },
+    ...items.map(it => ({ isUpgrade: false, id: it.id, name: it.name, qty: it.qty, price: it.sellPrice * it.qty })),
   ];
-  renderCleanParchmentList(ctx, 8, `KHO THÓC (${totalQty}/${s.barnCapacity})`, `Xu: ${s.coins}  ·  Nông sản & thành phẩm`, rows, s.barnCursor, 'Q: Bán hết · Chạm bán lẻ');
+  const perPage = 6;
+  const page = Math.floor(s.barnCursor / perPage);
+  const start = page * perPage;
+
+  // 3x2 grid cleanly centered inside /6[8]'s lower parchment panel (between Left arrow x=13 and Right arrow x=211)
+  for (let i = 0; i < perPage && start + i < allSlots.length; i += 1) {
+    const idx = start + i;
+    const it = allSlots[idx];
+    const col = i % 3;
+    const row = Math.floor(i / 3);
+    const cx = 30 + col * 60;
+    const cy = 112 + row * 78;
+    const sel = idx === s.barnCursor;
+    ctx.fillStyle = sel ? '#fff1b8' : '#f7e6c0';
+    ctx.fillRect(cx, cy, 56, 70);
+    ctx.strokeStyle = sel ? '#c46210' : '#9c6e3b';
+    ctx.lineWidth = sel ? 2 : 1;
+    ctx.strokeRect(cx + 0.5, cy + 0.5, 55, 69);
+    ctx.lineWidth = 1;
+
+    if (it.isUpgrade) {
+      const sp82 = getSpriteBlock(82, 0);
+      if (sp82) drawBSpriteBlockFrameScaled(ctx, sp82.sprite, sp82.moduleImages, 0, cx + 28, cy + 24, 34, 30);
+    } else {
+      const ui2 = getUiSpriteBlock(2);
+      if (ui2) drawBSpriteBlockFrameScaled(ctx, ui2.sprite, ui2.moduleImages, idx % ui2.sprite.frames.length, cx + 28, cy + 24, 30, 28);
+    }
+    drawText(ctx, it.name, cx + 28, cy + 50, { align: 'center', size: 6, color: '#3a1f08', bold: true, maxWidth: 52 });
+    drawText(ctx, it.isUpgrade ? `${it.price}G` : `x${it.qty} · +${it.price}G`, cx + 28, cy + 63, {
+      align: 'center', size: 6, color: it.isUpgrade ? '#8c4b18' : '#1c6b1c', bold: true, maxWidth: 52,
+    });
+  }
+  drawText(ctx, 'Q: Bán hết · Chạm ô bán', SCREEN_W / 2, 306, { align: 'center', size: 8, color: '#fff7d1', bold: true });
 }
 
+function getManorCards(s) {
+  const rooms = (s.catalog.buildings || []).filter(b => b.isManorRoom);
+  return [
+    { kind: 'tool_plow', title: 'Cuốc cày đất', desc: 'Chạm bãi cỏ để cày ô đất trồng cây mới (10 Xu/ô).', btn: s.activeTool === 'plow' ? 'TẮT CUỐC' : 'DÙNG CUỐC', spriteBlock: 6, frame: 0 },
+    { kind: 'tool_clear', title: 'Rìu dọn cỏ & đá', desc: 'Dọn sạch bụi cây và tảng đá lấy đất trống (+15 Xu, cổ vật).', btn: s.activeTool === 'clear' ? 'TẮT RÌU' : 'DÙNG RÌU', spriteBlock: 14, frame: 16 },
+    { kind: 'open_kitchen', title: 'Nhà bếp (83 món)', desc: 'Chế biến nông sản thành bánh, súp, bột bán giá cao.', btn: 'VÀO BẾP', spriteBlock: 132, frame: 0 },
+    { kind: 'open_barn', title: 'Kho thóc', desc: `Lưu trữ & bán nông sản (Sức chứa: ${s.barnCapacity} chỗ).`, btn: 'MỞ KHO', spriteBlock: 82, frame: 0 },
+    { kind: 'open_neighbors', title: '10 Hàng xóm', desc: 'Sang thăm trực tiếp 10 trang trại bạn bè và giúp việc.', btn: 'ĐI THĂM', spriteBlock: 86, frame: 0 },
+    { kind: 'open_collections', title: 'Phòng sưu tập', desc: 'Trưng bày & bán 15 cổ vật quý tìm được khi làm vườn.', btn: 'XEM TỦ ĐỒ', spriteBlock: 129, frame: 0 },
+    { kind: 'open_mailbox', title: 'Hòm thư', desc: 'Nhận quà khởi nghiệp & giao đơn hàng cho hàng xóm.', btn: 'ĐỌC THƯ', spriteBlock: 83, frame: 0 },
+    { kind: 'open_land', title: 'Mở rộng đất', desc: `Đã mở ${s.unlockedZones?.length || 1}/6 khu đất trang trại.`, btn: 'MUA ĐẤT', spriteBlock: 6, frame: 0 },
+    ...rooms.map((r) => {
+      const done = !!s.unlockedRooms?.[r.entityId];
+      const cost = Math.max(150, Math.min(5000, r.repairCost || 300));
+      return {
+        kind: 'repair_room',
+        entityId: r.entityId,
+        title: `Phòng: ${r.name}`,
+        desc: done ? 'Phòng này đã được sửa chữa hoàn chỉnh!' : `Sửa chữa để khôi phục Dinh thự chú để lại.`,
+        btn: done ? 'ĐÃ SỬA' : `SỬA ${cost}G`,
+        spriteBlock: r.worldBlock,
+        frame: r.frame || 0,
+      };
+    }),
+  ];
+}
+
+// --- 1:1 ORIGINAL GAMELOFT /6[14] MANOR SHOWCASE SCREEN (CLEAN BANNER + CARD + ACTION BUTTON!) ---
 function renderManor(ctx) {
   const s = app.session;
-  const rooms = (s.catalog.buildings || []).filter(b => b.isManorRoom);
-  const quickLinks = [
-    { left: 'Cuốc cày ô đất mới (10 Xu)', right: s.activeTool === 'plow' ? 'ĐANG BẬT' : 'CHỌN', rightColor: 'green', spriteBlock: 6, spriteFrame: 0 },
-    { left: 'Dọn cỏ & đá (2 Năng lượng)', right: s.activeTool === 'clear' ? 'ĐANG BẬT' : 'CHỌN', rightColor: 'green', spriteBlock: 14, spriteFrame: 16 },
-    { left: 'Kho thóc (Bán & Nâng cấp)', right: 'MỞ', rightColor: 'green', spriteBlock: 82, spriteFrame: 0 },
-    { left: 'Nhà bếp (83 công thức nấu)', right: 'MỞ', rightColor: 'green', spriteBlock: 132, spriteFrame: 0 },
-    { left: 'Phòng sưu tập (15 cổ vật)', right: 'MỞ', rightColor: 'green', spriteBlock: 129, spriteFrame: 0 },
-    { left: 'Hòm thư & Đơn hàng', right: 'MỞ', rightColor: 'green', spriteBlock: 83, spriteFrame: 0 },
-    { left: 'Thăm 10 trang trại Hàng xóm', right: 'ĐI THĂM', rightColor: 'green', spriteBlock: 86, spriteFrame: 0 },
-    { left: 'Mua đất mở rộng trang trại', right: `${s.unlockedZones?.length || 1}/6`, spriteBlock: 6, spriteFrame: 0 },
-  ];
-  const roomRows = rooms.map((r) => {
-    const done = !!s.unlockedRooms?.[r.entityId];
-    const cost = Math.max(150, Math.min(5000, r.repairCost || 300));
-    return {
-      left: `Phòng: ${r.name}`,
-      right: done ? 'ĐÃ SỬA' : `Sửa ${cost}G`,
-      rightColor: done ? 'green' : (s.coins >= cost ? 'gold' : 'red'),
-      spriteBlock: r.worldBlock,
-      spriteFrame: r.frame || 0,
-    };
+  ctx.fillStyle = '#3c2512';
+  ctx.fillRect(0, 0, SCREEN_W, SCREEN_H);
+
+  // Render clean structural /6[14] widgets (parchment backdrop 22, ribbon 33, Manor banner 15, back button 12)
+  const w14 = getUIScreen(14);
+  drawOriginalUIScreen(ctx, w14, getAnySpriteBlock, {
+    filterWidget: (w) => w.type === 205 && (w.spriteId === 22 || w.spriteId === 33 || w.spriteId === 15 || w.spriteId === 12),
   });
-  renderCleanParchmentList(ctx, 14, 'MENU TRANG TRẠI & DINH THỰ', `Xu: ${s.coins}  ·  Công cụ, Nhà & 9 Phòng`, [...quickLinks, ...roomRows], s.panelCursor, 'Chạm mục để mở hoặc sửa');
+
+  const cards = getManorCards(s);
+  const idx = ((s.panelCursor % cards.length) + cards.length) % cards.length;
+  const cur = cards[idx];
+
+  // Clean wooden title plate
+  ctx.fillStyle = '#5c3314';
+  ctx.fillRect(16, 6, 208, 26);
+  ctx.strokeStyle = '#d4a259';
+  ctx.strokeRect(16.5, 6.5, 207, 25);
+  drawText(ctx, `DINH THỰ & CÔNG CỤ (${idx + 1}/${cards.length})`, SCREEN_W / 2, 22, { align: 'center', size: 8, color: '#fff7d1', bold: true });
+
+  // Clean parchment showcase card strictly inside x=24..216, y=94..256
+  ctx.fillStyle = '#faebc8';
+  ctx.fillRect(24, 94, 192, 162);
+  ctx.strokeStyle = '#9c6e3b';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(24.5, 94.5, 191, 161);
+  ctx.lineWidth = 1;
+
+  drawText(ctx, cur.title, 120, 114, { align: 'center', size: 10, color: '#3a1f08', bold: true, maxWidth: 165 });
+
+  // Original BSprite centered cleanly in showcase frame
+  const sp = getSpriteBlock(cur.spriteBlock, 0);
+  if (sp) drawBSpriteBlockFrameScaled(ctx, sp.sprite, sp.moduleImages, cur.frame, 120, 152, 72, 52);
+
+  wrapLines(cur.desc, 28).slice(0, 2).forEach((ln, i) => {
+    drawText(ctx, ln, 120, 192 + i * 11, { align: 'center', size: 7, color: '#4a290c', bold: true });
+  });
+
+  // Clean wooden Action / Repair button at (66, 218, 108x26)
+  ctx.fillStyle = '#2e7d32';
+  ctx.fillRect(66, 218, 108, 26);
+  ctx.strokeStyle = '#ffd84d';
+  ctx.strokeRect(66.5, 218.5, 107, 25);
+  drawText(ctx, cur.btn, 120, 234, { align: 'center', size: 8, color: '#fff7d1', bold: true });
+
+  // Left / Right switcher arrows on the sides of the card
+  drawText(ctx, '◀', 36, 158, { align: 'center', size: 14, color: '#8c4b18', bold: true });
+  drawText(ctx, '▶', 204, 158, { align: 'center', size: 14, color: '#8c4b18', bold: true });
+  drawText(ctx, '◀ ▶ Đổi mục · Chạm nút mở', SCREEN_W / 2, 306, { align: 'center', size: 7, color: '#fff7d1', bold: true });
 }
 
 function renderCoop(ctx) {
@@ -942,10 +1116,11 @@ function onPointerDown(event) {
   const y = (event.clientY - rect.top) * (SCREEN_H / rect.height);
   const s = app.session;
   if (s.view === SOURCE_VIEW.WORLD_LAYER) {
+    const onSeedCarousel = !!s.seedCarousel && y >= 236;
     const onHudTop = (x >= 198 && y <= 58);
     const onBottomLeft = (x <= 68 && y >= 274);
     const onBottomRight = (x >= 152 && y >= 274);
-    if (!onHudTop && !onBottomLeft && !onBottomRight && y >= 48) {
+    if (!onSeedCarousel && !onHudTop && !onBottomLeft && !onBottomRight && y >= 48) {
       dragState = { pointerId: event.pointerId, startX: x, startY: y, camX: s.cameraX, camY: s.cameraY, dragged: false };
       try { canvasEl.setPointerCapture(event.pointerId); } catch { /* ignore */ }
       event.preventDefault();
@@ -1040,25 +1215,24 @@ function handlePanelAction(s, idx) {
     const recipe = (s.catalog.recipes || [])[idx];
     if (recipe) { startKitchenRecipe(s, recipe.id); saveSession(); }
   } else if (v === SOURCE_VIEW.MANOR) {
-    if (idx === 0) {
+    const cards = getManorCards(s);
+    const cur = cards[((idx % cards.length) + cards.length) % cards.length];
+    if (!cur) return;
+    if (cur.kind === 'tool_plow') {
       s.activeTool = s.activeTool === 'plow' ? 'auto' : 'plow';
       s.placementItem = null;
       s.view = SOURCE_VIEW.WORLD_LAYER;
-    } else if (idx === 1) {
+    } else if (cur.kind === 'tool_clear') {
       s.activeTool = s.activeTool === 'clear' ? 'auto' : 'clear';
       s.placementItem = null;
       s.view = SOURCE_VIEW.WORLD_LAYER;
-    } else if (idx === 2) { s.barnCursor = 0; s.view = SOURCE_VIEW.BARN; }
-    else if (idx === 3) { s.panelCursor = 0; s.view = SOURCE_VIEW.KITCHEN; }
-    else if (idx === 4) { s.panelCursor = 0; s.view = SOURCE_VIEW.COLLECTIONS; }
-    else if (idx === 5) { s.panelCursor = 0; s.view = SOURCE_VIEW.MAILBOX; }
-    else if (idx === 6) { s.panelCursor = 0; s.view = SOURCE_VIEW.NEIGHBORS; }
-    else if (idx === 7) { s.shopTab = 'land'; s.shopCursor = 0; s.view = SOURCE_VIEW.SHOP; }
-    else {
-      const rooms = (s.catalog.buildings || []).filter(b => b.isManorRoom);
-      const room = rooms[idx - 8];
-      if (room) { repairManorRoom(s, room.entityId); saveSession(); }
-    }
+    } else if (cur.kind === 'open_barn') { s.barnCursor = 0; s.view = SOURCE_VIEW.BARN; }
+    else if (cur.kind === 'open_kitchen') { s.panelCursor = 0; s.view = SOURCE_VIEW.KITCHEN; }
+    else if (cur.kind === 'open_collections') { s.panelCursor = 0; s.view = SOURCE_VIEW.COLLECTIONS; }
+    else if (cur.kind === 'open_mailbox') { s.panelCursor = 0; s.view = SOURCE_VIEW.MAILBOX; }
+    else if (cur.kind === 'open_neighbors') { s.panelCursor = 0; s.view = SOURCE_VIEW.NEIGHBORS; }
+    else if (cur.kind === 'open_land') { s.shopTab = 'land'; s.shopCursor = 0; s.view = SOURCE_VIEW.SHOP; }
+    else if (cur.kind === 'repair_room') { repairManorRoom(s, cur.entityId); saveSession(); }
   } else if (v === SOURCE_VIEW.COOP) {
     if (idx === 0) { s.shopTab = 'animals'; s.shopCursor = 0; s.view = SOURCE_VIEW.SHOP; }
     else {
@@ -1114,33 +1288,33 @@ function handleTap(x, y, event) {
     }
 
     if (s.view === SOURCE_VIEW.SHOP) {
-      if (y >= 36 && y <= 55) {
-        const tabIds = ['crops', 'trees', 'animals', 'land', 'decor'];
-        const tIdx = Math.max(0, Math.min(4, Math.floor((x - 16) / (208 / 5))));
+      // 4 real /6[2] Shop Tabs (x=31, 76, 121, 166; y=48..82)
+      if (y >= 46 && y <= 82 && x >= 26 && x <= 212) {
+        const tabIds = ['crops', 'trees', 'animals', 'decor'];
+        const tIdx = Math.max(0, Math.min(3, Math.floor((x - 28) / 45)));
         s.shopTab = tabIds[tIdx];
         s.shopCursor = 0;
         event.preventDefault();
         return;
       }
-      // Page arrows in footer center
       if (y >= 284 && x > 44 && x < 196) {
         const list = getShopItems(s);
-        const pages = Math.max(1, Math.ceil(list.length / 6));
-        const curPage = Math.floor(s.shopCursor / 6);
+        const pages = Math.max(1, Math.ceil(list.length / 4));
+        const curPage = Math.floor(s.shopCursor / 4);
         const nextPage = x < SCREEN_W / 2 ? (curPage - 1 + pages) % pages : (curPage + 1) % pages;
-        s.shopCursor = nextPage * 6;
+        s.shopCursor = nextPage * 4;
         event.preventDefault();
         return;
       }
-      // 2x3 Card Grid click
-      if (y >= 58 && y <= 270 && x >= 18 && x <= 222) {
-        const col = x < 120 ? 0 : 1;
-        const row = Math.floor((y - 58) / 71);
-        const page = Math.floor(s.shopCursor / 6);
-        const targetIdx = page * 6 + row * 2 + col;
+      // 2x2 real /6[2] Card Grid click ((31,85), (126,85), (31,182), (126,182))
+      if (y >= 84 && y <= 278 && x >= 24 && x <= 220) {
+        const col = x < 122 ? 0 : 1;
+        const row = y < 180 ? 0 : 1;
+        const page = Math.floor(s.shopCursor / 4);
+        const targetIdx = page * 4 + row * 2 + col;
         if (targetIdx < getShopItems(s).length) {
-          if (s.shopCursor === targetIdx) handlePanelAction(s, targetIdx);
-          else { s.shopCursor = targetIdx; handlePanelAction(s, targetIdx); }
+          s.shopCursor = targetIdx;
+          handlePanelAction(s, targetIdx);
         }
       }
       event.preventDefault();
@@ -1148,26 +1322,80 @@ function handleTap(x, y, event) {
     }
 
     if (s.view === SOURCE_VIEW.KITCHEN) {
-      // NẤU NGAY button inside top workbench
-      if (y >= 92 && y <= 120 && x >= 56 && x <= 184) {
+      // Tap top header to collect any ready dish!
+      if (y <= 48) {
+        const readyJob = (s.kitchenQueue || []).find(j => j.ready);
+        if (readyJob) { collectKitchenDish(s, readyJob.uid); saveSession(); }
+        event.preventDefault();
+        return;
+      }
+      if (y >= 284 && x > 44 && x < 196) {
+        const recipes = s.catalog.recipes || [];
+        const pages = Math.max(1, Math.ceil(recipes.length / 6));
+        const curPage = Math.floor(s.panelCursor / 6);
+        const nextPage = x < SCREEN_W / 2 ? (curPage - 1 + pages) % pages : (curPage + 1) % pages;
+        s.panelCursor = nextPage * 6;
+        event.preventDefault();
+        return;
+      }
+      // 3x2 real /6[3] Kitchen Card Grid (x = 20, 88, 155; y = 92, 182)
+      if (y >= 88 && y <= 272 && x >= 16 && x <= 224) {
+        const col = Math.max(0, Math.min(2, Math.floor((x - 16) / 68)));
+        const row = y < 178 ? 0 : 1;
+        const page = Math.floor(s.panelCursor / 6);
+        const targetIdx = page * 6 + row * 3 + col;
+        if (targetIdx < (s.catalog.recipes || []).length) {
+          s.panelCursor = targetIdx;
+          handlePanelAction(s, targetIdx);
+        }
+      }
+      event.preventDefault();
+      return;
+    }
+
+    if (s.view === SOURCE_VIEW.BARN) {
+      const totalItems = s.inventory.size + 1;
+      const pages = Math.max(1, Math.ceil(totalItems / 6));
+      const curPage = Math.floor(s.barnCursor / 6);
+      if (y >= 140 && y <= 220 && x <= 28) {
+        s.barnCursor = ((curPage - 1 + pages) % pages) * 6;
+        event.preventDefault();
+        return;
+      }
+      if (y >= 140 && y <= 220 && x >= 210) {
+        s.barnCursor = ((curPage + 1) % pages) * 6;
+        event.preventDefault();
+        return;
+      }
+      if (y >= 110 && y <= 268 && x >= 28 && x <= 210) {
+        const col = Math.max(0, Math.min(2, Math.floor((x - 30) / 60)));
+        const row = y < 188 ? 0 : 1;
+        const targetIdx = curPage * 6 + row * 3 + col;
+        if (targetIdx < totalItems) {
+          s.barnCursor = targetIdx;
+          handlePanelAction(s, targetIdx);
+        }
+      }
+      event.preventDefault();
+      return;
+    }
+
+    if (s.view === SOURCE_VIEW.MANOR) {
+      const cards = getManorCards(s);
+      if (x <= 48 && y >= 100 && y <= 220) {
+        s.panelCursor = (s.panelCursor - 1 + cards.length) % cards.length;
+        event.preventDefault();
+        return;
+      }
+      if (x >= 192 && y >= 100 && y <= 220) {
+        s.panelCursor = (s.panelCursor + 1) % cards.length;
+        event.preventDefault();
+        return;
+      }
+      if (y >= 205 && y <= 255 && x >= 76 && x <= 190) {
         handlePanelAction(s, s.panelCursor);
         event.preventDefault();
         return;
-      }
-      // 4 Stove slots (y = 130..168) -> collect ready dish!
-      if (y >= 130 && y <= 168 && x >= 18 && x <= 224) {
-        const slot = Math.floor((x - 18) / 52);
-        const job = s.kitchenQueue?.[slot];
-        if (job?.ready) { collectKitchenDish(s, job.uid); saveSession(); }
-        event.preventDefault();
-        return;
-      }
-      // Bottom 4 recipe rows (y = 172..276)
-      if (y >= 172 && y <= 276) {
-        const recipes = s.catalog.recipes || [];
-        const start = Math.max(0, Math.min(Math.max(0, recipes.length - 4), s.panelCursor - 1));
-        const rIdx = start + Math.floor((y - 172) / 25);
-        if (rIdx >= 0 && rIdx < recipes.length) s.panelCursor = rIdx;
       }
       event.preventDefault();
       return;
@@ -1209,6 +1437,42 @@ function handleTap(x, y, event) {
     }
     event.preventDefault();
     return;
+  }
+
+  // --- ON-WORLD SEED CAROUSEL TAP (/6[1] widgets 73, 75..78, 82 — a.java:3804-3936) ---
+  if (s.seedCarousel && !s.visitingNeighbor) {
+    const fieldCrops = (s.catalog?.crops || []).filter(c => c.id !== 3000 && !c.isTree);
+    const count = fieldCrops.length;
+    if (x >= 198 && y >= 278) {
+      s.seedCarousel = null;
+      event.preventDefault();
+      return;
+    }
+    if (y >= 254 && x >= 44 && x < 198 && count > 0) {
+      if (x < 102) {
+        s.seedCarousel.index = (s.seedCarousel.index - 1 + count) % count;
+      } else if (x > 148) {
+        s.seedCarousel.index = (s.seedCarousel.index + 1) % count;
+      } else {
+        const chosen = fieldCrops[s.seedCarousel.index];
+        const sc = s.seedCarousel;
+        if (chosen && s.level >= (chosen.unlockLevel || 1)) {
+          s.selectedCropId = chosen.id;
+          s.seedCarousel = null;
+          setFarmerWalkTarget(s, sc.worldX, sc.worldY + 4, {
+            type: 'plant_seed', row: sc.row, col: sc.col, cropId: chosen.id,
+          });
+          saveSession();
+        } else if (chosen) {
+          s.toast = `${chosen.name} mở khóa ở Cấp ${chosen.unlockLevel}!`;
+          s.toastMs = 2000;
+        }
+      }
+      event.preventDefault();
+      return;
+    }
+    // Tapping outside the carousel closes it
+    s.seedCarousel = null;
   }
 
   // --- WORLD HUD BUTTONS ---
@@ -1439,6 +1703,41 @@ function onKeyDown(event) {
   }
 
   const tm = sourceWorld?.tileMap;
+  // On-world Seed Carousel keyboard controls (Left/Right scroll, Enter plants, Esc closes!)
+  if (s.seedCarousel && !s.visitingNeighbor) {
+    const fieldCrops = (s.catalog?.crops || []).filter(c => c.id !== 3000 && !c.isTree);
+    const count = fieldCrops.length;
+    if (code === KEY.LEFT && count > 0) {
+      s.seedCarousel.index = (s.seedCarousel.index - 1 + count) % count;
+      event.preventDefault();
+      return;
+    }
+    if (code === KEY.RIGHT && count > 0) {
+      s.seedCarousel.index = (s.seedCarousel.index + 1) % count;
+      event.preventDefault();
+      return;
+    }
+    if ((code === KEY.FIRE || code === 5) && count > 0) {
+      const chosen = fieldCrops[s.seedCarousel.index];
+      const sc = s.seedCarousel;
+      if (chosen && s.level >= (chosen.unlockLevel || 1)) {
+        s.selectedCropId = chosen.id;
+        s.seedCarousel = null;
+        setFarmerWalkTarget(s, sc.worldX, sc.worldY + 4, {
+          type: 'plant_seed', row: sc.row, col: sc.col, cropId: chosen.id,
+        });
+        saveSession();
+      }
+      event.preventDefault();
+      return;
+    }
+    if (code === KEY.SK_RIGHT) {
+      s.seedCarousel = null;
+      event.preventDefault();
+      return;
+    }
+  }
+
   if (code === KEY.UP || code === KEY.DOWN || code === KEY.LEFT || code === KEY.RIGHT) {
     const { vx, vy } = getHeldMoveVector();
     moveFarmerByVector(s, vx, vy, 55, tm);

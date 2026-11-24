@@ -276,11 +276,11 @@ export function moduleToCanvasImage(module) {
   canvas.height = module.height;
   const context = canvas.getContext('2d');
   context.imageSmoothingEnabled = false;
-  // Port of f.java:1713-1715: the GLLib display helper treats RGB 0xFF00FF
-  // and black as transparent pixels when expanding the source module.
+  // Port of f.java:1713-1715 & d.java:835-836: treat both 24-bit 0xFF00FF and 16-bit RGB565/555
+  // quantized magenta (248, 0, 248) plus black key as transparent pixels.
   const rgba = new Uint8ClampedArray(module.pixels);
   for (let i = 0; i < rgba.length; i += 4) {
-    if ((rgba[i] === 255 && rgba[i + 1] === 0 && rgba[i + 2] === 255)
+    if ((rgba[i] >= 248 && rgba[i + 1] <= 4 && rgba[i + 2] >= 248)
       || (rgba[i] === 0 && rgba[i + 1] === 0 && rgba[i + 2] === 0)) rgba[i + 3] = 0;
   }
   context.putImageData(new ImageData(rgba, module.width, module.height), 0, 0);
