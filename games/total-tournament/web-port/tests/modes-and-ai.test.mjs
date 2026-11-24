@@ -86,3 +86,39 @@ test('Deathmatch, Survival, and Last Hero modes enforce their respective win con
   assert.equal(lh.finished, true);
   assert.equal(lh.finishReason, 'rounds');
 });
+
+test('dead actor animation clamps on final fallen frame instead of looping stand-up', () => {
+  const tables = loadTablesSync();
+  const match = createSourceMatch(tables, { mode: MODE.DEATHMATCH, levelIndex: 0, character: 0, settings: { I: 2 } });
+  const victim = match.actors[1];
+  victim.status = 0;
+  victim.action = 4;
+  victim.animation = 5;
+  victim.animationFrame = 0;
+  victim.respawnTimer = 15;
+
+  const frames = [];
+  for (let i = 0; i < 8; i++) {
+    tickSourceMatch(match, {}, tables);
+    frames.push(victim.animationFrame);
+  }
+  const maxFrame = Math.max(...frames);
+  assert.equal(frames.at(-1), maxFrame, 'death animation should stay clamped on final frame');
+  assert.ok(frames.slice(-3).every((f) => f === maxFrame), 'death animation must not loop back to 0');
+});
+
+test('two opposing AI bots jumping simultaneously still fire and deal damage without deadlocking', () => {
+  const tables = loadTablesSync();
+  const match = createSourceMatch(tables, { mode: MODE.TEAM_DEATHMATCH, levelIndex: 0, character: 0, settings: { I: 4, balance: [2, 2], F: 20 } });
+  const allyBot = match.actors[1]; // team 0 AI
+  const enemyBot = match.actors[2]; // team 1 AI
+  allyBot.x = 140; allyBot.y = 140; allyBot.inAir = 1; allyBot.vy = -8;
+  enemyBot.x = 165; enemyBot.y = 140; enemyBot.inAir = 1; enemyBot.vy = -8;
+
+  let firedCount = 0;
+  for (let t = 0; t < 25; t++) {
+    tickSourceMatch(match, {}, tables);
+    if (match.projectiles.length > 0) firedCount += 1;
+  }
+  assert.ok(firedCount > 0, 'opposing jumping AI bots should fire ranged weapons instead of deadlocking');
+});

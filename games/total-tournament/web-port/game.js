@@ -188,27 +188,90 @@ function drawHudBox(ctx2d, x, y, borderHex, fillHex, digits, alignRight) {
   return { x: drawX, y, w: boxW, h: digitH + 6 };
 }
 
-// Port of c.java:618-677, c.java:1330-1436.
+function drawFittedText(ctx2d, text, centerX, y, maxWidth, color = '#ffffff') {
+  const str = String(text ?? '');
+  if (!str) return;
+  let fontSize = 9;
+  ctx2d.save();
+  ctx2d.font = `bold ${fontSize}px "DejaVu Sans", "Liberation Sans", Arial, sans-serif`;
+  while (fontSize > 6.5 && ctx2d.measureText(str).width > maxWidth) {
+    fontSize -= 0.5;
+    ctx2d.font = `bold ${fontSize}px "DejaVu Sans", "Liberation Sans", Arial, sans-serif`;
+  }
+  const measured = Math.ceil(ctx2d.measureText(str).width);
+  const drawX = Math.round(centerX - (measured >> 1));
+  const drawY = Math.round(y + ((9 - fontSize) * 0.5));
+  ctx2d.textBaseline = 'top';
+  ctx2d.textAlign = 'left';
+  ctx2d.fillStyle = '#000000';
+  ctx2d.fillText(str, drawX + 1, drawY + 1);
+  ctx2d.fillText(str, drawX - 1, drawY);
+  ctx2d.fillText(str, drawX + 1, drawY);
+  ctx2d.fillText(str, drawX, drawY - 1);
+  ctx2d.fillText(str, drawX, drawY + 1);
+  ctx2d.fillStyle = color;
+  ctx2d.fillText(str, drawX, drawY);
+  ctx2d.restore();
+}
+
+// Port of c.java:618-677, c.java:1330-1436 using exact curs.png (32x27) geometry.
 function getChoiceGeometry(labels, state) {
   const sourceCursor = app.images.curs;
-  const sourceCursorWidth = sourceCursor?.width ?? 36;
-  const sourceCursorHeight = sourceCursor?.height ?? 20;
+  const sourceCursorWidth = sourceCursor?.width ?? 32;
+  const sourceCursorHeight = sourceCursor?.height ?? 27;
+  const capW = sourceCursorWidth >> 1; // 16px per side bracket
+  const halfH = sourceCursorHeight >> 1; // 13px
   const modeSelection = state === 5;
   const characterSelection = state === 19 || state === 4;
-  const rowHeight = characterSelection ? 22 : sourceCursorHeight + (sourceCursorHeight >> 3);
+  const rowHeight = characterSelection ? 28 : (modeSelection ? 28 : 30);
   const rows = labels.length;
   const visibleRows = Math.min(rows, 5);
   const Q = WIDTH >> 1;
-  const m = sourceCursorWidth >> 1;
-  const n = m >> 1;
-  const P = Math.trunc(WIDTH / 13);
-  const S = Q - (Q >> 1) - P - (Q >> 3);
-  const R = Q + (Q >> 1) + (Q >> 3);
+  const S = 22; // Left bracket X
+  const R = WIDTH - 22 - capW; // Right bracket X (202)
   let listTop = (HEIGHT >> 1) - ((visibleRows * rowHeight) >> 1);
-  if (modeSelection) listTop = 44;
-  if (characterSelection) listTop = (HEIGHT >> 1) - (rowHeight >> 1) + (HEIGHT >> 2);
+  if (modeSelection) listTop = 24;
+  if (characterSelection) listTop = (HEIGHT >> 1) + (HEIGHT >> 2) - (rowHeight >> 1);
   const firstVisible = Math.max(0, Math.min(app.selection - 4, Math.max(0, rows - 5)));
-  return { sourceCursor, sourceCursorWidth, sourceCursorHeight, modeSelection, characterSelection, rowHeight, rows, visibleRows, Q, m, n, P, S, R, listTop, firstVisible };
+  return { sourceCursor, sourceCursorWidth, sourceCursorHeight, capW, halfH, modeSelection, characterSelection, rowHeight, rows, visibleRows, Q, S, R, listTop, firstVisible };
+}
+
+function drawChoiceBar(ctx2d, g, y, fillStyle, inset, label) {
+  const { sourceCursor, sourceCursorHeight, capW, halfH, Q, S, R } = g;
+  const leftX = S - inset;
+  const rightX = R + inset;
+  const barTop = y - halfH;
+  const innerLeft = leftX + capW - 2;
+  const innerRight = rightX + 2;
+  const innerW = Math.max(20, innerRight - innerLeft);
+
+  ctx2d.fillStyle = fillStyle;
+  ctx2d.fillRect(innerLeft, barTop + 3, innerW, sourceCursorHeight - 6);
+
+  if (sourceCursor) {
+    withMIDPClip(ctx2d, leftX, barTop, capW, sourceCursorHeight, () =>
+      ctx2d.drawImage(sourceCursor, leftX, barTop));
+    withMIDPClip(ctx2d, rightX, barTop, capW, sourceCursorHeight, () =>
+      ctx2d.drawImage(sourceCursor, rightX - capW, barTop));
+  }
+
+  // Top & bottom metallic rails aligned strictly between left & right brackets (c.java:1413-1420)
+  ctx2d.strokeStyle = '#000000';
+  for (const offset of [2, 4, sourceCursorHeight - 4, sourceCursorHeight - 2]) {
+    ctx2d.beginPath();
+    ctx2d.moveTo(innerLeft, barTop + offset);
+    ctx2d.lineTo(innerRight, barTop + offset);
+    ctx2d.stroke();
+  }
+  ctx2d.strokeStyle = '#bbb800';
+  for (const offset of [3, sourceCursorHeight - 3]) {
+    ctx2d.beginPath();
+    ctx2d.moveTo(innerLeft, barTop + offset);
+    ctx2d.lineTo(innerRight, barTop + offset);
+    ctx2d.stroke();
+  }
+
+  drawFittedText(ctx2d, label, Q, y - 5, innerW - 8);
 }
 
 function drawChoicePage(ctx2d, labels, state) {
@@ -216,7 +279,7 @@ function drawChoicePage(ctx2d, labels, state) {
   const fontHeight = UI_LINE_HEIGHT;
   const g = getChoiceGeometry(labels, state);
   const confirmation = state === 0;
-  const { sourceCursor, sourceCursorHeight, modeSelection, characterSelection, rowHeight, Q, n, P, S, R, listTop, firstVisible } = g;
+  const { modeSelection, characterSelection, rowHeight, Q, listTop, firstVisible } = g;
 
   if (characterSelection) {
     app.character = app.selection === 1 ? 1 : 0;
@@ -246,16 +309,8 @@ function drawChoicePage(ctx2d, labels, state) {
       ctx2d.drawImage(f2, rightX, portraitY);
     }
 
-    // Selected faction banner (c.java:1330-1356)
-    const y = listTop;
-    ctx2d.fillStyle = app.selection === 0 ? '#cc0000' : '#0033cc';
-    ctx2d.fillRect(Q - ((R - S + P) >> 1) + 5, y - ((sourceCursorHeight - 4) >> 1), R - S + P - 10, sourceCursorHeight - 4);
-    if (sourceCursor) {
-      withMIDPClip(ctx2d, R, y - n, P, sourceCursorHeight, () => ctx2d.drawImage(sourceCursor, R - P, y - n));
-      withMIDPClip(ctx2d, S, y - n, P, sourceCursorHeight, () => ctx2d.drawImage(sourceCursor, S, y - n));
-    }
     const label = labels[app.selection] || labels[0] || '';
-    drawText(ctx2d, label, Q, y - (fontHeight >> 1), 21);
+    drawChoiceBar(ctx2d, g, listTop, app.selection === 0 ? '#cc0000' : '#0033cc', 0, label);
     drawSoftkeys(ctx2d);
     return;
   }
@@ -274,26 +329,7 @@ function drawChoicePage(ctx2d, labels, state) {
       if (absoluteIndex === 1) label = `${label}${app.soundEnabled ? tr.on : tr.off}`;
       if (absoluteIndex === 2) label = `${label}${tr.label}`;
     }
-    const inset = selected ? P >> 2 : 0;
-    const panelX = Q - ((R - S + P) >> 1) + 5 - inset;
-    const panelY = y - ((sourceCursorHeight - 4) >> 1);
-    const panelWidth = R - S + P - 10 + (inset << 1);
-    ctx2d.fillStyle = selected ? '#cb0000' : '#2d4700';
-    ctx2d.fillRect(panelX, panelY, panelWidth, sourceCursorHeight - 4);
-    if (sourceCursor) {
-      withMIDPClip(ctx2d, R + inset, y - n, P, sourceCursorHeight, () =>
-        ctx2d.drawImage(sourceCursor, R + inset - P, y - n));
-      withMIDPClip(ctx2d, S - inset, y - n, P, sourceCursorHeight, () =>
-        ctx2d.drawImage(sourceCursor, S - inset, y - n));
-    }
-    ctx2d.strokeStyle = '#000000';
-    for (const offset of [2, 4, sourceCursorHeight - 4, sourceCursorHeight - 2]) {
-      ctx2d.beginPath();
-      ctx2d.moveTo(S + P - inset, y - n + offset);
-      ctx2d.lineTo(R + (inset << 1), y - n + offset);
-      ctx2d.stroke();
-    }
-    drawText(ctx2d, label, Q, y - (fontHeight >> 1), 21);
+    drawChoiceBar(ctx2d, g, y, selected ? '#cb0000' : '#2d4700', selected ? 4 : 0, label);
   });
 
   // Scroll arrows if list > 5 (c.java:1424-1431)
@@ -314,17 +350,19 @@ function drawChoicePage(ctx2d, labels, state) {
   // Mode description box at bottom of K=5 (c.java:621-651)
   if (modeSelection && app.selection < 5) {
     const desc = tr.modeDesc[app.selection] || '';
-    const boxY = listTop + 5 * rowHeight + 16;
+    const boxX = 16;
+    const boxW = WIDTH - 32;
+    const boxY = listTop + 5 * rowHeight + 18;
     const boxH = HEIGHT - boxY - 22;
     if (boxH > 20) {
       ctx2d.fillStyle = '#172200';
-      ctx2d.fillRect(P, boxY, WIDTH - (P << 1), boxH);
+      ctx2d.fillRect(boxX, boxY, boxW, boxH);
       ctx2d.strokeStyle = '#884800';
-      ctx2d.strokeRect(P, boxY, WIDTH - (P << 1), boxH);
-      const wrapped = wrapUiText(ctx2d, desc, WIDTH - (P << 1) - 10);
+      ctx2d.strokeRect(boxX, boxY, boxW, boxH);
+      const wrapped = wrapUiText(ctx2d, desc, boxW - 10);
       const maxLines = Math.max(1, Math.floor((boxH - 6) / fontHeight));
       wrapped.slice(0, maxLines).forEach((line, idx) => {
-        drawText(ctx2d, line, P + 5, boxY + 4 + idx * fontHeight, 20);
+        drawText(ctx2d, line, boxX + 5, boxY + 4 + idx * fontHeight, 20);
       });
     }
   }

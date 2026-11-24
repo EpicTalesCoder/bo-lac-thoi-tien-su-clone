@@ -335,6 +335,7 @@ export function createSourceMatch(tables, options = {}) {
       aiGoalX: 0,
       aiGoalY: 0,
       aiRand: 0,
+      jumpCooldown: 0,
     };
   });
 
@@ -526,6 +527,8 @@ function handleActorDeath(match, victimIndex, killerIndex, damageSourceWeapon, k
   victim.jumpPending = -1;
   victim.health = 0;
   victim.status = 0;
+  victim.animation = victim.action === 5 ? 6 : 5;
+  victim.animationFrame = 0;
   victim.respawnTimer = RESPAWN_TICKS;
   victim.deaths += 1;
   updateHealthBar(victim);
@@ -659,6 +662,8 @@ function stepBotAI(match, actorIndex, tables) {
     }
   }
 
+  if (bot.jumpCooldown > 0) bot.jumpCooldown -= 1;
+
   // State timer transitions (e.java:467-516)
   bot.aiTimer -= 1;
   if (bot.aiTimer <= 0) {
@@ -704,11 +709,13 @@ function stepBotAI(match, actorIndex, tables) {
   // Resolve goal coordinates based on AI state
   let goalX = bot.x + bot.facing * 80;
   let goalY = bot.y;
+  let targetGrounded = true;
   if (bot.aiState === 1) {
     const target = match.actors[bot.aiTargetId];
     if (target && target.status === 1) {
       goalX = target.x;
       goalY = target.y;
+      targetGrounded = target.inAir === 0;
     } else {
       bot.aiState = 0;
     }
@@ -728,7 +735,8 @@ function stepBotAI(match, actorIndex, tables) {
     goalX = bot.facing > 0 ? match.level.worldWidth - 32 : 32;
   }
 
-  // Line-of-sight combat check (e.java:605-638)
+  // Line-of-sight combat check (e.java:605-638).
+  // Keep ranged weapon when airborne so two jumping bots never deadlock with chainsaw!
   const attackRange = bot.weapon === 0 ? 22 : VIEWPORT_WIDTH - 48;
   for (let i = 0; i < match.actors.length; i++) {
     const enemy = match.actors[i];
@@ -736,9 +744,11 @@ function stepBotAI(match, actorIndex, tables) {
     const dx = enemy.x - bot.x;
     const absDx = Math.abs(dx);
     const dy = Math.abs(enemy.y - bot.y);
-    if (absDx < attackRange && dy < bot.height) {
+    if (absDx < attackRange && dy < bot.height + 14) {
       bot.facing = dx >= 0 ? 1 : -1;
-      if (absDx < bot.width) bot.weapon = 0;
+      if (absDx < bot.width && bot.inAir === 0 && enemy.inAir === 0) {
+        bot.weapon = 0;
+      }
       fireWeapon(match, actorIndex, tables);
       break;
     }
@@ -750,18 +760,27 @@ function stepBotAI(match, actorIndex, tables) {
   } else if (bot.x > match.level.worldWidth - 32) {
     applyLeft(bot);
   } else {
-    if (goalX > bot.x + 20) applyRight(bot);
-    else if (goalX < bot.x - 20) applyLeft(bot);
+    // If very close horizontally to target, create spacing instead of bouncing on the same tile
+    if (bot.aiState === 1 && Math.abs(goalX - bot.x) < 18 && bot.weapon > 0) {
+      if (goalX >= bot.x) applyLeft(bot);
+      else applyRight(bot);
+    } else if (goalX > bot.x + 20) {
+      applyRight(bot);
+    } else if (goalX < bot.x - 20) {
+      applyLeft(bot);
+    }
 
-    // Jump if goal is higher, wall ahead, or pit ahead
+    // Jump only when cooldown elapsed and target is actually on a higher platform (not mid-air!)
     const tx = clamp(bot.x >> 4, 1, match.level.width - 2);
     const ty = clamp(bot.y >> 4, 1, match.level.height - 2);
     const aheadX = clamp(tx + bot.facing, 1, match.level.width - 2);
     const wallAhead = getTileFloorOffset(tables, getTileAt(match.level, aheadX, Math.max(0, ty - 1))) === 2;
     const floorAhead = getTileFloorOffset(tables, getTileAt(match.level, aheadX, ty)) > 0
       || getTileFloorOffset(tables, getTileAt(match.level, aheadX, Math.min(match.level.height - 1, ty + 1))) > 0;
-    if (bot.inAir === 0 && (goalY < bot.y - 24 || wallAhead || !floorAhead)) {
+    const wantHigherPlatform = targetGrounded && goalY < bot.y - 28;
+    if (bot.inAir === 0 && bot.jumpCooldown <= 0 && (wantHigherPlatform || wallAhead || !floorAhead)) {
       applyJump(bot);
+      bot.jumpCooldown = 14 + match.rng(10);
     } else if (bot.inAir === 0 && goalY > bot.y + 32 && match.rng(10) === 0) {
       applyDrop(bot, match.level, tables);
     }
@@ -908,10 +927,19 @@ export function tickSourceMatch(match, input = {}, tables = null) {
       }
     }
 
-    // Advance animation frame within mua bounds
+    // Advance animation frame within mua bounds.
+    // Death/gib animations (5 & 6) clamp on their final fallen frame (e.java:765-787) instead of looping!
     const muaRow = tables?.effects?.[actor.weapon] || tables?.mua?.[actor.weapon];
     const animLen = Math.max(1, muaRow?.[8 + (actor.animation << 1)] ?? 1);
-    actor.animationFrame = (actor.animationFrame + 1) % animLen;
+    if (actor.status === 0 || actor.animation === 5 || actor.animation === 6) {
+      if (actor.animationFrame < animLen - 1) {
+        actor.animationFrame += 1;
+      } else {
+        actor.animationFrame = animLen - 1;
+      }
+    } else {
+      actor.animationFrame = (actor.animationFrame + 1) % animLen;
+    }
 
     // Pickups collection (e.java:821-885)
     if (actor.status === 1) {
