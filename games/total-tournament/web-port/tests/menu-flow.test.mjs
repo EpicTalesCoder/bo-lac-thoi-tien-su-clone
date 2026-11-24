@@ -109,9 +109,79 @@ test('full menu flow advances Startup -> Title -> K=0 -> K=3 -> K=5 -> K=6 -> K=
   toggleLanguage();
   assert.equal(app.lang, startLang);
   for (const code of ['vi', 'en']) {
-    assert.equal(LANG[code].mainMenu.length, 5);
+    assert.equal(LANG[code].mainMenu.length, 6);
     assert.equal(LANG[code].modes.length, 6);
     assert.equal(LANG[code].configRows.length, 5);
     assert.equal(LANG[code].characters.length, 2);
   }
+  assert.equal(LANG.vi.mainMenu[1], 'CHƠI ONLINE');
+  assert.equal(LANG.en.mainMenu[1], 'MULTIPLAYER');
+});
+
+test('CTF level selection locks arenas 6..11 and skips directly between index 4 and Back (11)', () => {
+  app.data = loadTablesSync();
+  app.screen = 'menu';
+  app.mode = MODE.CAPTURE_FLAG;
+  app.K = 13;
+  app.selection = 4;
+
+  handleSourceInput({ type: 'key-down', code: 56 }); // Down skips 5..10 to Back (11)
+  assert.equal(app.selection, 11);
+
+  handleSourceInput({ type: 'key-down', code: 50 }); // Up from Back skips 5..10 to Map 5 (4)
+  assert.equal(app.selection, 4);
+
+  handleSourceInput({ type: 'key-down', code: 56 }); // Down to 11
+  handleSourceInput({ type: 'key-down', code: 56 }); // Down wraps 11 -> 0
+  assert.equal(app.selection, 0);
+
+  app.selection = 7; // Locked map cannot be entered
+  handleSourceInput({ type: 'key-down', code: 53 });
+  assert.equal(app.K, 13);
+});
+
+test('Options -> Key Settings (K=21) remaps switchWeapon from Q to custom key, resets, and ASDW works in K=19', () => {
+  app.data = loadTablesSync();
+  app.screen = 'menu';
+  app.K = 2; // Options
+  app.selection = 3; // CÀI ĐẶT PHÍM
+  app.rebindingAction = null;
+
+  handleSourceInput({ type: 'key-down', code: 53 });
+  assert.equal(app.K, 21, 'Options index 3 should open K=21 Key Settings');
+
+  // Navigate to switchWeapon (row 5), start listening, rebind to KeyE
+  app.selection = 5;
+  handleSourceInput({ type: 'key-down', code: 53 });
+  assert.equal(app.rebindingAction, 'switchWeapon');
+
+  handleSourceInput({ type: 'key-down', code: 0, rawKey: 'e', rawCode: 'KeyE' });
+  assert.equal(app.rebindingAction, null);
+  assert.equal(app.keyBindings.switchWeapon, 'KeyE');
+
+  // Verify gameplay respects new KeyE binding and no longer triggers on 0 or Q
+  app.screen = 'game';
+  app.input = Object.create(null);
+  handleSourceInput({ type: 'key-down', code: 48, rawKey: '0', rawCode: 'Digit0' });
+  assert.equal(Boolean(app.input.switchWeapon), false);
+  handleSourceInput({ type: 'key-down', code: 81, rawKey: 'q', rawCode: 'KeyQ' });
+  assert.equal(Boolean(app.input.switchWeapon), false);
+  handleSourceInput({ type: 'key-down', code: 0, rawKey: 'e', rawCode: 'KeyE' });
+  assert.equal(app.input.switchWeapon, true);
+
+  // Reset to default restores KeyQ cleanly
+  app.screen = 'menu';
+  app.K = 21;
+  app.selection = 6; // Reset
+  handleSourceInput({ type: 'key-down', code: 53 });
+  assert.equal(app.keyBindings.switchWeapon, 'KeyQ');
+
+  // ASDW physical keys (even under IME characters) switch characters Soldier <-> Mutant in K=19
+  app.K = 19;
+  app.selection = 0;
+  app.character = 0;
+  handleSourceInput({ type: 'key-down', code: 54, rawKey: 'đ', rawCode: 'KeyD' });
+  assert.equal(app.character, 1);
+  handleSourceInput({ type: 'key-down', code: 52, rawKey: 'ă', rawCode: 'KeyA' });
+  assert.equal(app.character, 0);
 });

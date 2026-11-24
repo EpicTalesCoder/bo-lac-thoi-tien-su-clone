@@ -109,3 +109,34 @@ test('team bases and spawns stay on their own side in TDM and CTF', () => {
     }
   }
 });
+
+test('pressing Down drops cleanly through upper platforms with lower floors, while staying safe on bottom floor', () => {
+  const tables = loadTablesSync();
+  const match = createSourceMatch(tables, { mode: MODE.DEATHMATCH, levelIndex: 0, character: 0, settings: { I: 2 } });
+  const player = match.player;
+
+  // Stand on Level 0 catwalk at col 20, row 12 (tile 42, surfaceY=196) where row 15/17 exists below
+  player.x = 20 * 16 + 8;
+  player.y = 12 * 16 + 4;
+  player.inAir = 0;
+  player.vy = 0;
+  player.status = 1;
+
+  tickSourceMatch(match, { drop: true }, tables);
+  assert.equal(player.inAir, 1, 'pressing Down on upper platform must initiate drop through surface');
+  for (let t = 0; t < 12 && player.inAir === 1; t++) {
+    tickSourceMatch(match, {}, tables);
+  }
+  assert.equal(player.inAir, 0, 'player should land cleanly on the lower platform below');
+  assert.ok(player.y > 14 * 16, 'player Y should end up strictly below dropped row 12');
+
+  // Stand on bottom floor (row 17) where NO floor exists below: pressing Down must NOT plunge into void
+  player.x = 20 * 16 + 8;
+  player.y = 17 * 16 + 5;
+  player.inAir = 0;
+  player.vy = 0;
+  player.dropCooldown = 0;
+  tickSourceMatch(match, { drop: true }, tables);
+  assert.equal(player.status, 1);
+  assert.equal(player.inAir, 0, 'pressing Down on lowest floor must safely look down instead of falling into pit');
+});

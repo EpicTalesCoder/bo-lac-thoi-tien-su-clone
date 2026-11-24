@@ -82,3 +82,48 @@ test('pickups heal HP/armor, grant new weapons, and switchWeapon cycles owned we
   const next = switchWeapon(player, 1);
   assert.notEqual(next, 3);
 });
+
+test('Railgun beam truncates at hit target and Rocket splash deals ar=72 damage & self-kill penalty', () => {
+  const tables = loadTablesSync();
+  const match = createSourceMatch(tables, { mode: MODE.DEATHMATCH, levelIndex: 0, character: 0, settings: { I: 3, F: 10 } });
+  const p = match.actors[0];
+  const e1 = match.actors[1];
+  const e2 = match.actors[2];
+
+  // Railgun should hit e1 first, truncate width, and NOT pierce e2 behind e1
+  p.x = 100; p.y = 140; p.facing = 1; p.inAir = 0; p.fireCooldown = 0;
+  e1.x = 140; e1.y = 140; e1.health = 100; e1.armor = 0; e1.inAir = 0;
+  e2.x = 200; e2.y = 140; e2.health = 100; e2.armor = 0; e2.inAir = 0;
+  p.ownedWeapons[5] = 1; p.ammo[5] = 2; p.weapon = 5;
+
+  fireWeapon(match, 0, tables);
+  tickSourceMatch(match, {}, tables);
+  assert.ok(e1.health < 100, 'front target should take railgun damage');
+  assert.equal(e2.health, 100, 'rear target should not be hit after beam truncation');
+  assert.equal(match.projectiles.length, 1);
+  assert.ok(match.projectiles[0].width < 120, 'beam width should truncate to target distance');
+
+  // Tick 2: beam stays non-damaging on lingering visual frame and clears on tick 3
+  const e1AfterTick1 = e1.health;
+  tickSourceMatch(match, {}, tables);
+  assert.equal(e1.health, e1AfterTick1, 'lingering rail beam must not deal duplicate tick damage');
+
+  // Self-kill via Rocket splash within ar=72 subtracts 1 kill (O[self] -= 2 before +1)
+  p.status = 1; p.health = 10; p.armor = 0; p.kills = 2; p.fireCooldown = 0;
+  p.x = 120; p.y = 200; p.facing = 1;
+  e1.x = 260; e1.y = 200;
+  match.projectiles.push({
+    x: 165, y: 185, prevX: 165, prevY: 185, vx: 8, damage: 0,
+    owner: 0, life: 5, width: 14, height: 6, weapon: 3, facing: 1, hitOnce: false,
+  });
+  // Place rocket into wall tile x=8
+  p.x = 24; p.y = 140; p.facing = -1;
+  match.projectiles.length = 0;
+  match.projectiles.push({
+    x: 10, y: 130, prevX: 18, prevY: 130, vx: -8, damage: 0,
+    owner: 0, life: 5, width: 14, height: 6, weapon: 3, facing: -1, hitOnce: false,
+  });
+  tickSourceMatch(match, {}, tables);
+  assert.equal(p.status, 0, 'splash inside ar=72 should eliminate low-HP owner');
+  assert.equal(p.kills, 1, 'self-kill should net -1 kill (2 -> 1)');
+});

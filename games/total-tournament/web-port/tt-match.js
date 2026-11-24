@@ -131,17 +131,18 @@ function extractLevelPoints(level, tables) {
   const team0Spawns = team0.length ? team0 : dmSpawns.slice(0, Math.max(1, dmSpawns.length >> 1));
   const team1Spawns = team1.length ? team1 : dmSpawns.slice(Math.max(0, dmSpawns.length >> 1));
 
-  // Match each base to its own team side (`-5/-7` = LEFT Team 0, `-4/-6` = RIGHT Team 1).
+  // Match each base & initial flag to its team side (`-5/-7` = Team 0, `-4/-6` = Team 1, e.java:3847-3867).
   let baseLeft = null;
   let baseRight = null;
   for (const [xRaw, yRaw, marker] of level.baseAndFlags || []) {
     const px = (xRaw & 0xff) * 16;
-    const py = ((yRaw & 0xff) + 1) * 16;
-    if (marker === -5 || marker === -7) baseLeft = { x: px, y: py };
-    else if (marker === -4 || marker === -6) baseRight = { x: px, y: py };
+    const py = (yRaw & 0xff) * 16;
+    if (marker === -5) baseLeft = { x: px, y: py };
+    else if (marker === -4) baseRight = { x: px, y: py };
+    else if (marker === -7 && !baseLeft) baseLeft = { x: px, y: py };
+    else if (marker === -6 && !baseRight) baseRight = { x: px, y: py };
   }
   const avg0X = team0Spawns.reduce((s, p) => s + p.x, 0) / Math.max(1, team0Spawns.length);
-  const avg1X = team1Spawns.reduce((s, p) => s + p.x, 0) / Math.max(1, team1Spawns.length);
   let base0 = baseLeft;
   let base1 = baseRight;
   if (baseLeft && baseRight) {
@@ -152,16 +153,30 @@ function extractLevelPoints(level, tables) {
       base1 = baseLeft;
     }
   }
-  if (!base0) {
+  if (!base0 || (base0.x === 0 && base0.y === 0)) {
     const s0 = team0Spawns[0] || fallback[0];
     base0 = { x: s0.x * 16, y: s0.y * 16 };
   }
-  if (!base1) {
+  if (!base1 || (base1.x === 0 && base1.y === 0)) {
     const s1 = team1Spawns[team1Spawns.length - 1] || fallback[fallback.length - 1];
     base1 = { x: s1.x * 16, y: s1.y * 16 };
   }
 
   return { dmSpawns, team0Spawns, team1Spawns, base0, base1 };
+}
+
+// Build `cO[x][y]` bot navigation grid from `wpn` table (e.java:3972-4019).
+function buildNavGrid(level, tables, levelIndex) {
+  const grid = Array.from({ length: level.width }, () => new Uint8Array(level.height));
+  const records = tables?.weaponTable?.[levelIndex] || [];
+  for (const rec of records) {
+    const tx = rec.x & 0xff;
+    const ty = rec.y & 0xff;
+    if (tx >= 0 && tx < level.width && ty >= 0 && ty < level.height) {
+      grid[tx][ty] = rec.weaponId & 0xff;
+    }
+  }
+  return grid;
 }
 
 // Extract collectible pickups (`cd` array from `ll` propPlacements, e.java:821-885, 1645-1653).
@@ -239,6 +254,8 @@ export function respawnActor(match, index, tables) {
   actor.action = -1;
   actor.jumpPending = -1;
   actor.aiRand = 99;
+  actor.aiWaypointPending = 0;
+  actor.aiNavFlag = 0;
   actor.vx = 0;
   actor.vy = 0;
   actor.inAir = 1;
@@ -249,6 +266,11 @@ export function respawnActor(match, index, tables) {
   actor.burnFrame = 0;
   actor.bloodyTimer = 0;
   actor.shadowY = actor.y;
+  actor.shadowEdgeClip = 0;
+  actor.shadowClipSide = 0;
+  actor.shadowOverPit = false;
+  actor.dropIgnoreTy = -1;
+  actor.dropCooldown = 0;
 
   // Reset weapons & ammo (e.java:2562-2588): chainsaw (0) infinite, machinegun (1) 100 ammo.
   actor.ownedWeapons = [1, 1, 0, 0, 0, 0];
@@ -328,7 +350,11 @@ export function createSourceMatch(tables, options = {}) {
     ...DEFAULT_SETTINGS,
     ...(options.settings || {}),
   };
-  const actorCount = clamp(settings.I ?? 6, 2, MAX_ACTORS);
+  const humanConfigs = Array.isArray(options.humans) ? options.humans : null;
+  let actorCount = clamp(settings.I ?? 6, 2, MAX_ACTORS);
+  if (humanConfigs && humanConfigs.length > actorCount) {
+    actorCount = clamp(humanConfigs.length, 2, MAX_ACTORS);
+  }
   const rng = createRng(options.seed ?? ((levelIndex + 1) * 7919 + mode * 313 + character * 17));
   const spawns = extractLevelPoints(level, tables);
   const pickups = extractPickups(level, tables);
@@ -340,24 +366,51 @@ export function createSourceMatch(tables, options = {}) {
   const maxHealth = Math.max(50, mua0[5] || 100);
   const maxArmor = Math.max(50, mua0[6] || 100);
 
+  const humanSoldiers = humanConfigs ? humanConfigs.filter((h) => h.character !== 1) : [];
+  const humanMutants = humanConfigs ? humanConfigs.filter((h) => h.character === 1) : [];
+  const minSoldiers = humanConfigs ? humanSoldiers.length : (character === 0 ? 1 : 0);
+  const maxSoldiers = humanConfigs ? (actorCount - humanMutants.length) : (character === 1 ? actorCount - 1 : actorCount);
   const soldiersCount = clamp(
     settings.balance?.[0] ?? (actorCount >> 1),
-    character === 0 ? 1 : 0,
-    character === 1 ? actorCount - 1 : actorCount,
+    Math.min(minSoldiers, maxSoldiers),
+    Math.max(minSoldiers, maxSoldiers),
   );
-  const playerIndex = character === 0 ? 0 : actorCount - 1;
+
+  // Assign human players to Soldier (0..soldiersCount-1) or Mutant (soldiersCount..actorCount-1) slots
+  const humanByActor = new Map();
+  if (humanConfigs?.length) {
+    let sIdx = 0;
+    let mIdx = soldiersCount;
+    for (const h of humanSoldiers) {
+      if (sIdx < soldiersCount) humanByActor.set(sIdx++, h);
+    }
+    for (const h of humanMutants) {
+      if (mIdx < actorCount) humanByActor.set(mIdx++, h);
+    }
+  }
+  const localClientId = options.localClientId || null;
+  let playerIndex = character === 0 ? 0 : actorCount - 1;
+  if (humanConfigs?.length) {
+    const foundIdx = [...humanByActor.entries()].find(([, h]) => !localClientId || h.clientId === localClientId)?.[0];
+    if (typeof foundIdx === 'number') playerIndex = foundIdx;
+  }
 
   const actors = Array.from({ length: actorCount }, (_, index) => {
     const isSoldier = index < soldiersCount;
     const team = (mode === MODE.TEAM_DEATHMATCH || mode === MODE.CAPTURE_FLAG)
       ? (isSoldier ? 0 : 1)
       : index;
+    const assignedHuman = humanByActor.get(index) || null;
+    const isHuman = humanConfigs ? Boolean(assignedHuman) : index === playerIndex;
+    const isPlayer = index === playerIndex;
     return {
       id: index,
-      isPlayer: index === playerIndex,
-      name: index === playerIndex
-        ? (isSoldier ? 'P1' : 'P1')
-        : `${isSoldier ? 'S' : 'M'}${index + 1}`,
+      isHuman,
+      isPlayer,
+      clientId: assignedHuman?.clientId || null,
+      name: assignedHuman?.name
+        ? String(assignedHuman.name).slice(0, 12)
+        : (isPlayer ? 'P1' : `${isSoldier ? 'S' : 'M'}${index + 1}`),
       character: isSoldier ? 0 : 1,
       charOffset: isSoldier ? 110 : 0, // e.java:3889-3893
       team,
@@ -387,6 +440,11 @@ export function createSourceMatch(tables, options = {}) {
       burnFrame: 0,
       bloodyTimer: 0,
       shadowY: 64,
+      shadowEdgeClip: 0,
+      shadowClipSide: 0,
+      shadowOverPit: false,
+      dropIgnoreTy: -1,
+      dropCooldown: 0,
       inAir: 1,
       status: 1,
       respawnTimer: 0,
@@ -398,21 +456,33 @@ export function createSourceMatch(tables, options = {}) {
       kills: 0,
       deaths: 0,
       score: 0,
-      // AI fields (e.java:466-709)
+      // AI fields (e.java:525-785, 2066-2197)
       aiState: 0,
       aiTimer: 10 + (index * 3),
       aiTargetId: (index + 1) % actorCount,
       aiGoalX: 0,
       aiGoalY: 0,
+      aiWaypointPending: 0,
+      aiNavFlag: 0,
       aiRand: 0,
       jumpCooldown: 0,
     };
   });
 
+  const baseW = tables?.cu2?.[102]?.[2] ?? 24;
+  const baseH = tables?.cu2?.[102]?.[3] ?? 23;
+  const poleH = tables?.cu2?.[98]?.[3] ?? 19;
+  const makeFlag = (team, base) => {
+    const homeX = base.x + (baseW >> 1) - 3;
+    const homeY = base.y - poleH + (baseH >> 1) - 3;
+    return { team, baseX: base.x, baseY: base.y, homeX, homeY, x: homeX, y: homeY, carrier: -1 };
+  };
+
   const match = {
     mode,
     levelIndex,
     level,
+    navGrid: buildNavGrid(level, tables, levelIndex),
     tilesetName: levelIndex % 2 === 0 ? 'l0' : 'l1',
     backgroundName: levelIndex % 2 === 0 ? 'bg0' : 'bg1',
     settings,
@@ -422,18 +492,23 @@ export function createSourceMatch(tables, options = {}) {
     actors,
     playerIndex,
     player: actors[playerIndex],
+    remoteInputs: Object.create(null),
+    isMultiplayer: Boolean(humanConfigs && humanConfigs.length >= 2),
     projectiles: [],
     effects: [],
     teamScore: [0, 0], // TDM kills or CTF flag captures
     flags: [
-      { team: 0, baseX: spawns.base0.x, baseY: spawns.base0.y, x: spawns.base0.x, y: spawns.base0.y - 16, carrier: -1 },
-      { team: 1, baseX: spawns.base1.x, baseY: spawns.base1.y, x: spawns.base1.x, y: spawns.base1.y - 16, carrier: -1 },
+      makeFlag(0, spawns.base0),
+      makeFlag(1, spawns.base1),
     ],
     camera: { x: 0, y: 0, prevX: 0, prevY: 0 },
+    lookDown: false,
     interpValid: false,
     soundEvents: [],
     tickCount: 0,
     aiSlot: 0,
+    beOsc: 0,
+    beDir: 1,
     timeMs: Math.max(1, settings.H ?? 5) * 60 * 1000,
     minutes: Math.max(1, settings.H ?? 5),
     seconds: 0,
@@ -478,20 +553,34 @@ function applyRight(actor) {
   if (actor.inAir === 0) actor.action = 0;
 }
 
+// Drop through upper/catwalk one-way platforms whenever another solid floor exists below.
 function applyDrop(actor, level, tables) {
-  if (actor.inAir !== 0) return;
+  if (actor.inAir !== 0) return false;
   const tx = clamp(actor.x >> 4, 0, level.width - 1);
-  const ty = clamp(actor.y >> 4, 0, level.height - 1);
-  // Allow dropping through one-way platforms (not solid bottom floor)
-  if (ty < level.height - 2) {
-    const below = getTileAt(level, tx, ty + 1);
-    if (getTileFloorOffset(tables, below) === 0) {
-      actor.y += 4;
-      actor.inAir = 1;
-      actor.vy = 2;
-      actor.action = 2;
+  const rawTy = clamp(actor.y >> 4, 0, level.height - 1);
+  let standTy = rawTy;
+  if (!hasTileFloor(tables, getTileAt(level, tx, standTy))) {
+    if (standTy + 1 < level.height && hasTileFloor(tables, getTileAt(level, tx, standTy + 1))) {
+      standTy += 1;
+    } else {
+      return false;
     }
   }
+  if (standTy >= level.height - 2) return false;
+  let hasSafeFloorBelow = false;
+  for (let scanTy = standTy + 1; scanTy < level.height - 1; scanTy++) {
+    if (hasTileFloor(tables, getTileAt(level, tx, scanTy))) {
+      hasSafeFloorBelow = true;
+      break;
+    }
+  }
+  if (!hasSafeFloorBelow) return false;
+  actor.dropIgnoreTy = standTy;
+  actor.y += 6;
+  actor.inAir = 1;
+  actor.vy = 4;
+  actor.action = 2;
+  return true;
 }
 
 // Port of e.java `t()` — cycle to next owned weapon with ammo.
@@ -588,6 +677,7 @@ export function fireWeapon(match, actorIndex, tables) {
     weapon,
     animToggle: 0,
     facing: dir,
+    hitOnce: false,
   });
 
   if (actor.isPlayer && match.soundEvents) {
@@ -601,12 +691,13 @@ export function fireWeapon(match, actorIndex, tables) {
   return true;
 }
 
-function handleActorDeath(match, victimIndex, killerIndex, damageSourceWeapon, knockDir) {
+// Port of e.java:1143-1185, 1346-1385, 2263-2279 — actor death, Last Hero placement & flag drop.
+function handleActorDeath(match, victimIndex, killerIndex, damageSourceWeapon, knockDir, tables = null) {
   const victim = match.actors[victimIndex];
   if (!victim || victim.status === 0) return;
 
-  const knock = damageSourceWeapon === 5 ? 12 : 8;
-  if (victim.health > GIB_THRESHOLD) {
+  const knock = damageSourceWeapon === 0 ? 0 : damageSourceWeapon === 5 ? 12 : damageSourceWeapon === 3 ? 16 : 8;
+  if (victim.health > GIB_THRESHOLD && knock > 0) {
     victim.action = 4;
     victim.vx = knockDir >= 0 ? knock : -knock;
     victim.facing = knockDir >= 0 ? -1 : 1;
@@ -624,7 +715,11 @@ function handleActorDeath(match, victimIndex, killerIndex, damageSourceWeapon, k
   if (victim.isPlayer && match.soundEvents) match.soundEvents.push(4);
   updateHealthBar(victim);
 
-  if (killerIndex >= 0 && killerIndex !== victimIndex && match.actors[killerIndex]) {
+  // Self-kill penalty (e.java:1365-1367): O[self] -= 2 before +1 (net -1 in standard modes).
+  if (killerIndex === victimIndex) {
+    victim.kills -= match.mode === MODE.LAST_HERO ? 2 : 1;
+    victim.score = victim.kills;
+  } else if (killerIndex >= 0 && match.actors[killerIndex]) {
     const killer = match.actors[killerIndex];
     if (match.mode !== MODE.LAST_HERO) {
       killer.kills += 1;
@@ -635,31 +730,37 @@ function handleActorDeath(match, victimIndex, killerIndex, damageSourceWeapon, k
     }
   }
 
-  // Drop carried flag in CTF (e.java:1088-1093)
+  // Drop carried flag in CTF (e.java:1376-1382)
   for (const flag of match.flags) {
     if (flag.carrier === victimIndex) {
       flag.carrier = -1;
     }
   }
 
-  // Check Last Hero round end (e.java:1080-1082)
+  // Last Hero graduated placement scoring (e.java:2263-2279)
   if (match.mode === MODE.LAST_HERO) {
+    if (match.lastHeroOrder < match.actors.length - 1) {
+      victim.kills += match.lastHeroOrder;
+      victim.score = victim.kills;
+      match.lastHeroOrder += 1;
+    }
     const alive = match.actors.filter((a) => a.status === 1);
     if (alive.length <= 1) {
       if (alive.length === 1) {
-        alive[0].kills += 1;
-        alive[0].score += 1;
+        alive[0].kills += match.lastHeroOrder;
+        alive[0].score = alive[0].kills;
       }
-      advanceLastHeroRound(match);
+      match.lastHeroOrder = 0;
+      advanceLastHeroRound(match, tables);
     }
   }
 }
 
-function applyDamage(match, victimIndex, killerIndex, rawDamage, weapon, knockDir) {
+function applyDamage(match, victimIndex, killerIndex, rawDamage, weapon, knockDir, tables = null) {
   const victim = match.actors[victimIndex];
   if (!victim || victim.status !== 1 || rawDamage <= 0) return;
 
-  // Fire / plasma burn status overlay on hit (e.java:1000-1019, 1215-1222)
+  // Fire / plasma burn status overlay on hit (e.java:1098-1117)
   if ((weapon === 3 || weapon === 5) && match.rng(2) === 0) {
     victim.burnTimer = Math.min(200, (victim.burnTimer || 0) + 50);
     victim.burnSprite = 43;
@@ -671,7 +772,7 @@ function applyDamage(match, victimIndex, killerIndex, rawDamage, weapon, knockDi
     match.actors[killerIndex].bloodyTimer = 25;
   }
 
-  // Exact armor/HP split from e.java:1030-1039
+  // Exact armor/HP split from e.java:1130-1136
   victim.armor -= rawDamage >> 2;
   if (victim.armor < 0) {
     victim.health += victim.armor << 2;
@@ -682,40 +783,46 @@ function applyDamage(match, victimIndex, killerIndex, rawDamage, weapon, knockDi
   updateHealthBar(victim);
 
   if (victim.health <= 0) {
-    handleActorDeath(match, victimIndex, killerIndex, weapon, knockDir);
+    handleActorDeath(match, victimIndex, killerIndex, weapon, knockDir, tables);
   }
 }
 
-function triggerSplashExplosion(match, x, y, ownerIndex) {
+// Port of e.java:1315-1385 — splash radius ar = cu2[39][2] + cu2[39][3] (72).
+function triggerSplashExplosion(match, x, y, ownerIndex, tables = null) {
   spawnEffect(match, x, y, 3, ownerIndex);
   if (match.soundEvents) match.soundEvents.push(0);
-  const radius = 48;
+  const radius = (tables?.cu2?.[39]?.[2] ?? 38) + (tables?.cu2?.[39]?.[3] ?? 34);
   for (let i = 0; i < match.actors.length; i++) {
     const target = match.actors[i];
     if (target.status !== 1) continue;
     const dist = Math.abs(target.x - x) + Math.abs(target.y - (target.height >> 1) - y);
     if (dist < radius) {
       const dmg = Math.max(0, SPLASH_DAMAGE - dist);
-      const knockDir = target.x >= x ? 1 : -1;
-      target.vx = knockDir * 12;
-      applyDamage(match, i, ownerIndex, dmg, 3, knockDir);
+      const knockDir = target.x - x > 0 ? 1 : -1;
+      target.vx = knockDir * MAX_FALL_SPEED;
+      applyDamage(match, i, ownerIndex, dmg, 3, knockDir, tables);
     }
   }
 }
 
-function advanceLastHeroRound(match) {
+// Port of e.java:2545-2574 `s()` — advance to next Last Hero round cleanly with tables.
+function advanceLastHeroRound(match, tables = null) {
   if (match.round >= (match.settings.G ?? 20)) {
     finishMatch(match, 'rounds');
     return;
   }
   match.round += 1;
+  match.lastHeroOrder = 0;
   match.roundBannerTimer = 30;
   match.timeMs = Math.max(1, match.settings.H ?? 5) * 60 * 1000;
   match.projectiles.length = 0;
   match.effects.length = 0;
   for (const pickup of match.pickups) pickup.respawnTimer = 0;
+  const spawnCount = Math.max(1, match.spawns.dmSpawns.length);
+  const offset = match.rng(spawnCount);
   for (let i = 0; i < match.actors.length; i++) {
-    respawnActor(match, i);
+    match.actors[i].spawnCursor = (i + offset) % spawnCount;
+    respawnActor(match, i, tables);
   }
 }
 
@@ -752,12 +859,108 @@ function finishMatch(match, reason) {
   }
 }
 
-// Port of e.java:466-709 — Bot AI (20/150/300-tick state machine).
+// Port of e.java:2066-2197 `a(int[] targetRect)` — find nearest `wpn` jump-pad (5) or drop-ledge (3).
+function findNavWaypoint(match, actor, goalX, goalY, goalW, goalH, tables) {
+  const nav = match.navGrid;
+  const level = match.level;
+  if (!nav || !level) {
+    actor.aiGoalX = goalX;
+    actor.aiNavFlag = 4;
+    return;
+  }
+  if (actor.y - actor.height < goalY && actor.y > goalY - goalH) {
+    actor.aiGoalX = goalX;
+    actor.aiNavFlag = 4;
+    actor.aiWaypointPending = 1;
+    return;
+  }
+  if (actor.aiNavFlag === 4) actor.aiWaypointPending = 0;
+  if (actor.aiWaypointPending !== 0 || actor.inAir !== 0) return;
+
+  const needUp = actor.y > goalY;
+  actor.aiWaypointPending = 1;
+  let lx = clamp(actor.x >> 4, 0, level.width - 1);
+  let ly = clamp(actor.y >> 4, 0, level.height - 1);
+  let rx = lx;
+  let ry = ly;
+  let leftPad = -1;
+  let rightPad = -1;
+  const leftEdge = goalX - (goalW >> 1);
+  const rightEdge = goalX + (goalW >> 1);
+  const topEdge = goalY - goalH;
+
+  let stopLeft = false;
+  let steps = 0;
+  while (!stopLeft && steps++ < level.width) {
+    if ((lx << 4) < rightEdge && (lx << 4) + 16 > leftEdge && (ly << 4) - 16 < goalY && (ly << 4) > topEdge) {
+      actor.aiNavFlag = 4;
+      actor.aiGoalX = goalX;
+      return;
+    }
+    if (lx > level.width - 2) { lx = -1; break; }
+    const slopeRight = getTileSlope(tables, getTileAt(level, lx + 1, clamp(ly, 0, level.height - 1)));
+    if (slopeRight === -2 && ly + 1 < level.height) ly += 1;
+    else if (slopeRight === 2 && ly > 0) ly -= 1;
+    lx -= 1;
+    if (lx < 0 || !nav[lx] || nav[lx][ly] === 0) { lx = -1; break; }
+    if (nav[lx][ly] === 3) stopLeft = true;
+    if (needUp && nav[lx][ly] === 5 && leftPad === -1) leftPad = lx;
+  }
+
+  let stopRight = false;
+  steps = 0;
+  while (!stopRight && steps++ < level.width) {
+    if ((rx << 4) < rightEdge && (rx << 4) + 16 > leftEdge && (ry << 4) - 16 < goalY && (ry << 4) > topEdge) {
+      actor.aiNavFlag = 4;
+      return;
+    }
+    if (rx < 1) { rx = -1; break; }
+    const slopeLeft = getTileSlope(tables, getTileAt(level, rx - 1, clamp(ry, 0, level.height - 1)));
+    if (slopeLeft === 2 && ry + 1 < level.height) ry += 1;
+    else if (slopeLeft === -2 && ry > 0) ry -= 1;
+    rx += 1;
+    if (rx > level.width - 1 || !nav[rx] || nav[rx][ry] === 0) { rx = -1; break; }
+    if (nav[rx][ry] === 3) { stopRight = true; rx = Math.min(level.width - 1, rx + 1); }
+    if (needUp && nav[rx]?.[ry] === 5 && rightPad === -1) rightPad = rx;
+  }
+
+  if (needUp) {
+    if (leftPad === -1 && rightPad === -1) {
+      actor.aiNavFlag = 4;
+      actor.aiGoalX = goalX;
+      return;
+    }
+    actor.aiNavFlag = 5;
+    if (leftPad >= 0 && rightPad >= 0) {
+      const lxPx = leftPad << 4;
+      const rxPx = rightPad << 4;
+      actor.aiGoalX = Math.abs(goalX - lxPx) <= Math.abs(goalX - rxPx) ? lxPx : rxPx;
+    } else {
+      actor.aiGoalX = (leftPad >= 0 ? leftPad : rightPad) << 4;
+    }
+    return;
+  }
+
+  actor.aiNavFlag = 3;
+  const leftDist = lx > 0 ? Math.abs(goalX - (lx << 4)) + Math.abs(goalY - (ly << 4)) : Infinity;
+  const rightDist = rx > 0 ? Math.abs(goalX - (rx << 4)) + Math.abs(goalY - (ry << 4)) : Infinity;
+  if (leftDist < rightDist) {
+    actor.aiGoalX = lx << 4;
+    actor.aiGoalY = ly << 4;
+  } else if (rightDist < Infinity) {
+    actor.aiGoalX = rx << 4;
+    actor.aiGoalY = ry << 4;
+  } else {
+    actor.aiGoalX = goalX;
+  }
+}
+
+// Port of e.java:525-785 — Bot AI using cO (wpn) nav grid + cP (wlg) rules.
 function stepBotAI(match, actorIndex, tables) {
   const bot = match.actors[actorIndex];
   if (!bot || bot.status !== 1 || bot.isPlayer) return;
 
-  // Select strongest owned weapon with ammo (e.java:598-603)
+  // Select strongest owned weapon with ammo (e.java:663-671)
   for (let w = 5; w >= 0; w--) {
     if (bot.ownedWeapons[w] && bot.ammo[w] > 0) {
       bot.weapon = w;
@@ -768,13 +971,12 @@ function stepBotAI(match, actorIndex, tables) {
 
   if (bot.jumpCooldown > 0) bot.jumpCooldown -= 1;
 
-  // State timer transitions (e.java:467-516)
+  // State timer transitions (e.java:528-578)
   bot.aiTimer -= 1;
   if (bot.aiTimer <= 0) {
     bot.aiTimer = 20;
     bot.aiRand = match.rng(100);
 
-    // Check if carrying flag in CTF -> run home (state 5/3)
     const carryingEnemyFlag = match.mode === MODE.CAPTURE_FLAG
       && match.flags[bot.team === 0 ? 1 : 0]?.carrier === actorIndex;
 
@@ -787,8 +989,10 @@ function stepBotAI(match, actorIndex, tables) {
     } else if (match.mode === MODE.CAPTURE_FLAG && bot.aiRand < 45) {
       bot.aiState = 5; // Go capture enemy flag
       bot.aiTimer = 150;
+    } else if (bot.aiState === 2) {
+      bot.aiState = 4;
+      bot.aiTimer = 150;
     } else {
-      // Find nearest living enemy
       let nearest = -1;
       let bestDist = Infinity;
       for (let i = 0; i < match.actors.length; i++) {
@@ -810,94 +1014,193 @@ function stepBotAI(match, actorIndex, tables) {
     }
   }
 
-  // Resolve goal coordinates based on AI state
-  let goalX = bot.x + bot.facing * 80;
-  let goalY = bot.y;
+  // Resolve waypoint/goal coordinates via wpn pathfinder (e.java:580-651)
+  let rawGoalX = bot.x + bot.facing * 80;
+  let rawGoalY = bot.y;
   let targetGrounded = true;
   if (bot.aiState === 1) {
     const target = match.actors[bot.aiTargetId];
     if (target && target.status === 1) {
-      goalX = target.x;
-      goalY = target.y;
+      rawGoalX = target.x;
+      rawGoalY = target.y;
       targetGrounded = target.inAir === 0;
+      findNavWaypoint(match, bot, target.x, target.y, target.width, target.height, tables);
     } else {
       bot.aiState = 0;
     }
   } else if (bot.aiState === 3) {
     const home = match.flags[bot.team];
-    if (home) { goalX = home.baseX; goalY = home.baseY; }
-  } else if (bot.aiState === 4) {
-    const med = match.pickups.find((p) => p.type === 0 && p.respawnTimer === 0);
-    if (med) { goalX = med.x; goalY = med.y; }
-    else bot.aiState = 1;
+    if (home) {
+      rawGoalX = home.baseX;
+      rawGoalY = home.baseY;
+      findNavWaypoint(match, bot, home.baseX, home.baseY, 16, 16, tables);
+    }
+  } else if (bot.aiState === 4 || bot.aiState === 2) {
+    const med = match.pickups.find((p) => (bot.aiState === 4 ? p.type === 0 : p.type > 1) && p.respawnTimer === 0)
+      || match.pickups.find((p) => p.respawnTimer === 0);
+    if (med) {
+      rawGoalX = med.x;
+      rawGoalY = med.y;
+      findNavWaypoint(match, bot, med.x, med.y, 16, 16, tables);
+    } else {
+      bot.aiState = 1;
+    }
   } else if (bot.aiState === 5) {
     const enemyFlag = match.flags[bot.team === 0 ? 1 : 0];
-    if (enemyFlag) { goalX = enemyFlag.x; goalY = enemyFlag.y; }
+    if (enemyFlag) {
+      rawGoalX = enemyFlag.x;
+      rawGoalY = enemyFlag.y;
+      findNavWaypoint(match, bot, enemyFlag.x, enemyFlag.y, 16, 16, tables);
+    }
   } else {
     if (bot.x < 40) bot.facing = 1;
     if (bot.x > match.level.worldWidth - 40) bot.facing = -1;
-    goalX = bot.facing > 0 ? match.level.worldWidth - 32 : 32;
+    rawGoalX = bot.facing > 0 ? match.level.worldWidth - 32 : 32;
+    bot.aiGoalX = rawGoalX;
+    bot.aiWaypointPending = 1;
   }
 
-  // Line-of-sight combat check (e.java:605-638).
-  // Keep ranged weapon when airborne so two jumping bots never deadlock with chainsaw!
-  const attackRange = bot.weapon === 0 ? 22 : VIEWPORT_WIDTH - 48;
+  // Line-of-sight combat check (e.java:657-714).
+  // Keep ranged weapon when airborne so jumping bots never deadlock with chainsaw.
+  const attackRange = bot.weapon === 0 ? 22 : VIEWPORT_WIDTH - 60;
   for (let i = 0; i < match.actors.length; i++) {
     const enemy = match.actors[i];
     if (i === actorIndex || enemy.status !== 1 || enemy.team === bot.team) continue;
     const dx = enemy.x - bot.x;
     const absDx = Math.abs(dx);
-    const dy = Math.abs(enemy.y - bot.y);
-    if (absDx < attackRange && dy < bot.height + 14) {
+    const midY = bot.y - (bot.height >> 1);
+    if (absDx < attackRange && midY < enemy.y - 4 && midY > enemy.y - enemy.height - 10) {
       bot.facing = dx >= 0 ? 1 : -1;
       if (absDx < bot.width && bot.inAir === 0 && enemy.inAir === 0) {
         bot.weapon = 0;
       }
       fireWeapon(match, actorIndex, tables);
+      if (bot.inAir === 0 && bot.jumpCooldown <= 0 && bot.aiState === 1 && match.rng(20) === 1) {
+        applyJump(bot);
+        bot.jumpCooldown = 14 + match.rng(8);
+      }
       break;
     }
   }
 
-  // Movement & obstacle/pit navigation
+  // Movement & wlg (cP[navCode]) steering (e.java:716-785)
+  const goalX = bot.aiGoalX || rawGoalX;
   if (bot.x < 32) {
     applyRight(bot);
   } else if (bot.x > match.level.worldWidth - 32) {
     applyLeft(bot);
   } else {
-    // If very close horizontally to target, create spacing instead of bouncing on the same tile
-    if (bot.aiState === 1 && Math.abs(goalX - bot.x) < 18 && bot.weapon > 0) {
-      if (goalX >= bot.x) applyLeft(bot);
-      else applyRight(bot);
-    } else if (goalX > bot.x + 20) {
-      applyRight(bot);
-    } else if (goalX < bot.x - 20) {
-      applyLeft(bot);
+    const actions = [0, 0, 0];
+    if (bot.aiState === 1 && Math.abs(rawGoalX - bot.x) < 18 && bot.weapon > 0) {
+      if (rawGoalX >= bot.x) actions[0] = 1;
+      else actions[1] = 1;
+    } else if (goalX - 32 > bot.x || goalX > bot.x + 16) {
+      actions[1] = 1;
+    } else if (goalX + 32 < bot.x || goalX < bot.x - 16) {
+      actions[0] = 1;
     }
 
-    // Jump only when cooldown elapsed and target is actually on a higher platform (not mid-air!)
-    const tx = clamp(bot.x >> 4, 1, match.level.width - 2);
-    const ty = clamp(bot.y >> 4, 1, match.level.height - 2);
+    const tx = clamp(bot.x >> 4, 0, match.level.width - 1);
+    const ty = clamp(bot.y >> 4, 0, match.level.height - 1);
+    const navCode = match.navGrid?.[tx]?.[ty] ?? 0;
+    const wlgRow = tables?.equipmentSets?.[navCode];
+    let forceMove = false;
+    if (wlgRow) {
+      const baseOff = bot.inAir === 0 ? 0 : 3;
+      for (let col = 0; col < 3; col++) {
+        const rule = wlgRow[baseOff + col];
+        if (rule === -1) {
+          actions[col] = 0;
+        } else if (rule === 2) {
+          actions[bot.facing > 0 ? 1 : 0] = 1;
+          actions[2] = 1;
+          forceMove = true;
+        } else if (rule === 3) {
+          actions[col] = 0;
+        } else if (rule === 4 && bot.aiNavFlag === 4) {
+          actions[col] = 1;
+        } else if (rule === 5 && bot.aiNavFlag === 5) {
+          actions[col] = 1;
+        }
+      }
+    }
+    if (actions[0] === 0 && actions[1] === 0) {
+      actions[bot.facing > 0 ? 1 : 0] = 1;
+    }
+
     const aheadX = clamp(tx + bot.facing, 1, match.level.width - 2);
     const wallAhead = getTileFloorOffset(tables, getTileAt(match.level, aheadX, Math.max(0, ty - 1))) === 2;
     const floorAhead = hasTileFloor(tables, getTileAt(match.level, aheadX, ty))
       || hasTileFloor(tables, getTileAt(match.level, aheadX, Math.min(match.level.height - 1, ty + 1)));
-    const wantHigherPlatform = targetGrounded && goalY < bot.y - 28;
-    if (bot.inAir === 0 && bot.jumpCooldown <= 0 && (wantHigherPlatform || wallAhead || !floorAhead)) {
+    const wantHigherPlatform = targetGrounded && rawGoalY < bot.y - 28;
+    const wantJump = (actions[2] === 1 && (bot.aiWaypointPending === 1 || forceMove))
+      || wantHigherPlatform || wallAhead || !floorAhead;
+    if (bot.inAir === 0 && bot.jumpCooldown <= 0 && wantJump) {
       applyJump(bot);
       bot.jumpCooldown = 14 + match.rng(10);
-    } else if (bot.inAir === 0 && goalY > bot.y + 32 && match.rng(10) === 0) {
+    } else if (bot.inAir === 0 && rawGoalY > bot.y + 32 && bot.aiNavFlag === 3 && match.rng(10) === 0) {
       applyDrop(bot, match.level, tables);
     }
+
+    if (actions[0] === 1) applyLeft(bot);
+    else if (actions[1] === 1) applyRight(bot);
   }
 }
 
-// Port of e.java:348-1367 `i()` — 1 complete 77ms simulation tick.
-export function tickSourceMatch(match, input = {}, tables = null) {
+// Shared human input applicator for local player & remote multiplayer peers (e.java:3269-3298).
+function applyHumanControls(match, actor, ctrl, level, tables, isLocalPlayer) {
+  if (!actor || !ctrl) return false;
+  if (!ctrl.drop) actor.dropCooldown = 0;
+  else if (actor.dropCooldown > 0) actor.dropCooldown -= 1;
+
+  if (actor.status === 1) {
+    if (ctrl.left) applyLeft(actor);
+    if (ctrl.right) applyRight(actor);
+    if (typeof ctrl.facingOverride === 'number' && !ctrl.left && !ctrl.right) {
+      actor.facing = ctrl.facingOverride >= 0 ? 1 : -1;
+    }
+    if (ctrl.jump) applyJump(actor);
+    if (ctrl.drop) {
+      if (isLocalPlayer) match.lookDown = true;
+      if (actor.inAir === 0 && actor.dropCooldown === 0 && applyDrop(actor, level, tables)) {
+        actor.dropCooldown = 5;
+      } else if (actor.inAir === 0) {
+        actor.action = 3;
+      }
+    }
+    if (ctrl.fire) fireWeapon(match, actor.id, tables);
+    if (ctrl.switchWeapon) {
+      switchWeapon(actor, 1);
+      ctrl.switchWeapon = false;
+    }
+    if (typeof ctrl.selectWeapon === 'number') {
+      selectWeapon(actor, ctrl.selectWeapon);
+      ctrl.selectWeapon = null;
+    }
+  } else if (actor.status === 0 && match.mode === MODE.LAST_HERO && ctrl.fire) {
+    for (const a of match.actors) {
+      if (a.status === 1) {
+        a.kills += match.lastHeroOrder;
+        a.score = a.kills;
+        match.lastHeroOrder += 1;
+      }
+    }
+    match.lastHeroOrder = 0;
+    advanceLastHeroRound(match, tables);
+    return true;
+  }
+  return false;
+}
+
+// Port of e.java:348-1367 `i()` — 1 complete 77ms simulation tick (multiplayer-capable).
+export function tickSourceMatch(match, input = {}, tables = null, remoteInputs = null) {
   if (!match || match.finished) return match;
 
   const level = match.level;
   match.tickCount += 1;
-  match.flagAnimFrame = (match.tickCount >> 1) & 3;
+  match.flagAnimFrame = (match.flagAnimFrame + 1) % 3; // e.java:1436-1439 cycles 0..2
+  if (match.beOsc > 1 || match.beOsc < -1) match.beDir = -match.beDir;
+  match.beOsc += match.beDir;
   match.soundEvents.length = 0;
 
   // Snapshot previous positions for zero-ghosting 60fps synchronized interpolation
@@ -922,21 +1225,21 @@ export function tickSourceMatch(match, input = {}, tables = null) {
   match.minutes = Math.floor(match.timeMs / 60000);
   match.seconds = Math.floor((match.timeMs % 60000) / 1000);
 
-  // Player controls (e.java:2958-2981)
+  // Local + remote human player controls
   const player = match.actors[match.playerIndex];
-  if (player && player.status === 1) {
-    if (input.left) applyLeft(player);
-    if (input.right) applyRight(player);
-    if (input.jump) applyJump(player);
-    if (input.drop) applyDrop(player, level, tables);
-    if (input.fire) fireWeapon(match, match.playerIndex, tables);
-    if (input.switchWeapon) {
-      switchWeapon(player, 1);
-      input.switchWeapon = false;
-    }
-    if (typeof input.selectWeapon === 'number') {
-      selectWeapon(player, input.selectWeapon);
-      input.selectWeapon = null;
+  if (applyHumanControls(match, player, input, level, tables, true)) {
+    return match;
+  }
+  const remMap = remoteInputs || match.remoteInputs;
+  if (remMap) {
+    for (let idx = 0; idx < match.actors.length; idx++) {
+      if (idx === match.playerIndex) continue;
+      const actor = match.actors[idx];
+      if (!actor.isHuman) continue;
+      const rInput = remMap[actor.id] || remMap[actor.clientId];
+      if (rInput && applyHumanControls(match, actor, rInput, level, tables, false)) {
+        return match;
+      }
     }
   }
 
@@ -963,19 +1266,21 @@ export function tickSourceMatch(match, input = {}, tables = null) {
       const nextY = prevY + actor.vy;
       let landed = false;
 
-      if (actor.vy > 0 && actor.status === 1) {
+      if (actor.vy > 0) {
         const tx = clamp(actor.x >> 4, 0, level.width - 1);
         const startTy = clamp(Math.floor(prevY / 16), 0, level.height - 1);
         const endTy = clamp(Math.floor(nextY / 16), 0, level.height - 1);
         for (let ty = startTy; ty <= endTy; ty++) {
+          if (ty === actor.dropIgnoreTy) continue;
           const tile = getTileAt(level, tx, ty);
           if (!hasTileFloor(tables, tile)) continue;
           const surfaceY = tileSurfaceY(tables, tile, tx, ty, actor.x);
           if (prevY <= surfaceY + 6 && nextY >= surfaceY - 2) {
-            actor.action = 3;
+            if (actor.status === 1) actor.action = 3;
             actor.y = surfaceY;
             actor.inAir = 0;
             actor.vy = 0;
+            actor.dropIgnoreTy = -1;
             landed = true;
             break;
           }
@@ -983,6 +1288,9 @@ export function tickSourceMatch(match, input = {}, tables = null) {
       }
       if (!landed) {
         actor.y = nextY;
+        if (actor.dropIgnoreTy >= 0 && Math.floor(nextY / 16) > actor.dropIgnoreTy) {
+          actor.dropIgnoreTy = -1;
+        }
       }
     } else {
       const tx = clamp(actor.x >> 4, 0, level.width - 1);
@@ -1029,7 +1337,7 @@ export function tickSourceMatch(match, input = {}, tables = null) {
     actor.x = clamp(actor.x, 16, Math.max(16, level.worldWidth - 16));
     if ((actor.y >> 4) >= level.height - 1) {
       if (actor.status === 1) {
-        handleActorDeath(match, idx, -1, 0, 1);
+        handleActorDeath(match, idx, -1, 0, 1, tables);
         actor.inAir = 1;
         actor.vy = 8;
       }
@@ -1039,12 +1347,12 @@ export function tickSourceMatch(match, input = {}, tables = null) {
       }
     }
 
-    // Bot AI (e.java:466-709)
-    if (!actor.isPlayer && actor.status === 1) {
+    // Bot AI (e.java:525-785) — skip all human slots in singleplayer & multiplayer
+    if (!actor.isHuman && actor.status === 1) {
       stepBotAI(match, idx, tables);
     }
 
-    // Compute ground shadow Y directly below actor (e.java:712-716)
+    // Compute ground shadow Y & ledge overhang clip cU (e.java:788-803)
     {
       const stx = clamp(actor.x >> 4, 0, level.width - 1);
       let sty = clamp(actor.y >> 4, 0, level.height - 1);
@@ -1052,7 +1360,22 @@ export function tickSourceMatch(match, input = {}, tables = null) {
         sty += 1;
       }
       const sTile = getTileAt(level, stx, sty);
-      actor.shadowY = hasTileFloor(tables, sTile) ? tileSurfaceY(tables, sTile, stx, sty, actor.x) : (level.height - 1) << 4;
+      const hasFloor = hasTileFloor(tables, sTile);
+      actor.shadowOverPit = !hasFloor;
+      actor.shadowY = hasFloor ? tileSurfaceY(tables, sTile, stx, sty, actor.x) : (level.height - 1) << 4;
+      actor.shadowEdgeClip = 0;
+      actor.shadowClipSide = 0;
+      if (hasFloor) {
+        const rightTile = stx + 1 < level.width ? getTileAt(level, stx + 1, sty) : 0;
+        const leftTile = stx > 0 ? getTileAt(level, stx - 1, sty) : 0;
+        if (!hasTileFloor(tables, rightTile) || getTileSlope(tables, rightTile) !== 0) {
+          actor.shadowEdgeClip = actor.x - (stx << 4) + (actor.width >> 1);
+          actor.shadowClipSide = 1;
+        } else if (!hasTileFloor(tables, leftTile) || getTileSlope(tables, leftTile) !== 0) {
+          actor.shadowEdgeClip = -actor.x + (stx << 4) + 16 + (actor.width >> 1);
+          actor.shadowClipSide = -1;
+        }
+      }
     }
 
     // Pending jump impulse & animation state machine (e.java:731-819)
@@ -1159,7 +1482,7 @@ export function tickSourceMatch(match, input = {}, tables = null) {
       continue;
     }
     if (proj.weapon === 4) proj.animToggle = proj.animToggle ? 0 : 1;
-    if (proj.weapon === 3) spawnEffect(match, proj.x - proj.vx, proj.y, 7, proj.owner);
+    if (proj.weapon === 3) spawnEffect(match, proj.x - proj.vx, proj.y + match.beOsc, 7, proj.owner);
     proj.x += proj.vx;
 
     // Wall hit check for non-beam projectiles
@@ -1167,51 +1490,74 @@ export function tickSourceMatch(match, input = {}, tables = null) {
       const ptx = clamp(proj.x >> 4, 0, level.width - 1);
       const pty = clamp(proj.y >> 4, 0, level.height - 1);
       if (proj.x <= 8 || proj.x >= level.worldWidth - 8 || getTileFloorOffset(tables, getTileAt(level, ptx, pty)) === 2) {
-        if (proj.weapon === 3) triggerSplashExplosion(match, proj.x, proj.y, proj.owner);
+        if (proj.weapon === 3) triggerSplashExplosion(match, proj.x, proj.y, proj.owner, tables);
         else spawnEffect(match, proj.x, proj.y, 0, proj.owner);
         match.projectiles.splice(i, 1);
         continue;
       }
     }
 
-    // Actor hit check (e.java:977-1100)
+    // Actor hit check (e.java:1060-1185)
+    if (proj.hitOnce) continue;
     const owner = match.actors[proj.owner];
     const left = proj.x - (proj.width >> 1);
     const right = proj.x + (proj.width >> 1);
     const top = proj.y - (proj.height >> 1);
     const bottom = proj.y + (proj.height >> 1);
     let hitIndex = -1;
+    let bestHitDist = Infinity;
     for (let a = 0; a < match.actors.length; a++) {
       const target = match.actors[a];
       if (target.status !== 1 || a === proj.owner) continue;
       if (owner && target.team === owner.team) continue;
       const halfW = target.width >> 1;
       if (left < target.x + halfW && right > target.x - halfW && top < target.y && bottom > target.y - target.height) {
-        hitIndex = a;
-        break;
+        const d = owner ? Math.abs(target.x - owner.x) : a;
+        if (d < bestHitDist) {
+          bestHitDist = d;
+          hitIndex = a;
+        }
       }
     }
     if (hitIndex >= 0) {
       const target = match.actors[hitIndex];
+      if ((proj.weapon === 3 || proj.weapon === 5) && proj.owner === match.playerIndex && match.soundEvents) {
+        match.soundEvents.push(0);
+      }
       if (proj.weapon === 3) {
-        triggerSplashExplosion(match, target.x, target.y - (target.height >> 1), proj.owner);
+        triggerSplashExplosion(match, target.x, target.y - (target.height >> 1), proj.owner, tables);
       } else {
-        spawnEffect(match, target.x, target.y - (target.height >> 1), proj.weapon < 3 ? 0 : proj.weapon, proj.owner);
-        applyDamage(match, hitIndex, proj.owner, proj.damage, proj.weapon, proj.facing);
+        const fxX = proj.weapon < 3 ? proj.x : target.x;
+        const fxY = proj.weapon < 3 ? proj.y : target.y;
+        spawnEffect(match, fxX, fxY, proj.weapon < 3 ? 0 : proj.weapon, proj.owner);
+        applyDamage(match, hitIndex, proj.owner, proj.damage, proj.weapon, proj.facing, tables);
       }
       if (proj.weapon !== 5) {
         match.projectiles.splice(i, 1);
+      } else {
+        // e.java:1122-1128: truncate Railgun beam to struck target and mark hitOnce
+        proj.hitOnce = true;
+        if (proj.facing > 0) {
+          proj.width = Math.max(4, Math.abs((proj.x - (proj.width >> 1)) - target.x));
+          proj.x = target.x - (proj.width >> 1);
+        } else {
+          proj.width = Math.max(4, Math.abs((proj.x + (proj.width >> 1)) - target.x));
+          proj.x = target.x + (proj.width >> 1);
+        }
       }
     }
   }
 
-  // Update pickup respawn timers (e.java:1108-1114)
+  // Update pickup respawn timers (e.java:1209-1212)
   for (const pickup of match.pickups) {
     if (pickup.respawnTimer > 0) pickup.respawnTimer -= 1;
   }
 
-  // CTF flag logic (e.java:1115-1196)
+  // CTF flag logic (e.java:1214-1301)
   if (match.mode === MODE.CAPTURE_FLAG) {
+    const poleHalfH = (tables?.cu2?.[98]?.[3] ?? 19) >> 1;
+    const poleH = tables?.cu2?.[98]?.[3] ?? 19;
+    const playerTeam = match.player?.team ?? 0;
     for (let f = 0; f < 2; f++) {
       const flag = match.flags[f];
       const otherFlag = match.flags[1 - f];
@@ -1221,7 +1567,7 @@ export function tickSourceMatch(match, input = {}, tables = null) {
           flag.carrier = -1;
         } else {
           flag.x = carrier.x;
-          flag.y = carrier.y - carrier.height - 8;
+          flag.y = carrier.y - carrier.height - poleHalfH;
         }
       } else {
         // Check actors touching flag
@@ -1230,24 +1576,40 @@ export function tickSourceMatch(match, input = {}, tables = null) {
           if (actor.status !== 1) continue;
           if (Math.abs(actor.x - flag.x) < 18 && Math.abs(actor.y - flag.y) < 28) {
             if (actor.team === flag.team) {
-              // Own flag: if away from base, return it; if at base and carrying enemy flag, SCORE!
-              const atBase = Math.abs(flag.x - flag.baseX) < 16 && Math.abs(flag.y - (flag.baseY - 16)) < 24;
+              const atBase = Math.abs(flag.x - flag.homeX) <= 6 && Math.abs(flag.y - flag.homeY) <= 6;
               if (!atBase) {
-                flag.x = flag.baseX;
-                flag.y = flag.baseY - 16;
+                flag.x = flag.homeX;
+                flag.y = flag.homeY;
               } else if (otherFlag.carrier === a) {
                 match.teamScore[actor.team] += 1;
                 match.hudFlash[actor.team] = 10;
                 otherFlag.carrier = -1;
-                otherFlag.x = otherFlag.baseX;
-                otherFlag.y = otherFlag.baseY - 16;
+                otherFlag.x = otherFlag.homeX;
+                otherFlag.y = otherFlag.homeY;
+                actor.aiState = 0;
                 if (match.teamScore[actor.team] >= (match.settings.E ?? 10)) {
                   finishMatch(match, 'flags');
                 }
               }
             } else if (flag.carrier === -1) {
-              // Steal enemy flag!
+              // Steal enemy flag! (e.java:1244-1285)
               flag.carrier = a;
+              actor.aiState = 3;
+              if (match.soundEvents) {
+                match.soundEvents.push(actor.team === playerTeam ? 3 : 2);
+              }
+            }
+          }
+        }
+        if (flag.carrier === -1) {
+          if (((flag.y + poleH) >> 4) > level.height - 3) {
+            flag.x = flag.homeX;
+            flag.y = flag.homeY;
+          } else {
+            const ftx = clamp(flag.x >> 4, 0, level.width - 1);
+            const fty = clamp((flag.y + poleH) >> 4, 0, level.height - 1);
+            if (!hasTileFloor(tables, getTileAt(level, ftx, fty))) {
+              flag.y += 2;
             }
           }
         }
@@ -1255,7 +1617,7 @@ export function tickSourceMatch(match, input = {}, tables = null) {
     }
   }
 
-  // Update visual effects (e.java:1197-1210)
+  // Update visual effects (e.java:1303-1315)
   for (let i = match.effects.length - 1; i >= 0; i--) {
     match.effects[i].timer -= 1;
     if (match.effects[i].timer <= 0) match.effects.splice(i, 1);
@@ -1263,19 +1625,243 @@ export function tickSourceMatch(match, input = {}, tables = null) {
 
   // Match timer expiry (e.java:910-916)
   if (match.timeMs <= 0 && !match.finished) {
-    if (match.mode === MODE.LAST_HERO) advanceLastHeroRound(match);
+    if (match.mode === MODE.LAST_HERO) advanceLastHeroRound(match, tables);
     else finishMatch(match, 'time');
   }
 
-  // Smooth camera tracking on player (e.java:2619-2622)
-  if (player) {
-    const targetX = clamp(player.x - (VIEWPORT_WIDTH >> 1), 0, Math.max(0, level.worldWidth - VIEWPORT_WIDTH));
-    const targetY = clamp(player.y - (VIEWPORT_HEIGHT >> 1) - 16, 0, Math.max(0, level.worldHeight - VIEWPORT_HEIGHT));
-    match.camera.x += Math.round((targetX - match.camera.x) * 0.35);
-    match.camera.y += Math.round((targetY - match.camera.y) * 0.35);
-    match.camera.x = clamp(match.camera.x, 0, Math.max(0, level.worldWidth - VIEWPORT_WIDTH));
-    match.camera.y = clamp(match.camera.y, 0, Math.max(0, level.worldHeight - VIEWPORT_HEIGHT));
-  }
+  // Smooth look-ahead & look-down camera tracking (e.java:1395-1431)
+  updateCameraForActor(match, player);
 
   return match;
+}
+
+export function updateCameraForActor(match, actor) {
+  if (!match || !actor || !match.level) return;
+  const level = match.level;
+  const lookAhead = 60; // av = 60
+  const step = MAX_FALL_SPEED; // bR = 16
+  const targetX = actor.facing === 1
+    ? actor.x - lookAhead
+    : actor.x - VIEWPORT_WIDTH + lookAhead;
+  if (actor.facing === 1) {
+    match.camera.x = match.camera.x + step < targetX ? match.camera.x + step : targetX;
+  } else {
+    match.camera.x = match.camera.x - step > targetX ? match.camera.x - step : targetX;
+  }
+
+  if (match.lookDown) {
+    if (match.camera.y + step < actor.y - actor.height) {
+      match.camera.y += step;
+    }
+  } else {
+    const targetY = actor.y - (VIEWPORT_HEIGHT - actor.height);
+    if (match.camera.y - step > targetY) {
+      match.camera.y -= step;
+    } else {
+      match.camera.y = targetY;
+    }
+  }
+  match.lookDown = false;
+  match.camera.x = clamp(match.camera.x, 0, Math.max(0, level.worldWidth - VIEWPORT_WIDTH));
+  match.camera.y = clamp(match.camera.y, 0, Math.max(0, level.worldHeight - VIEWPORT_HEIGHT));
+}
+
+// Compact authoritative world snapshot for Host -> Guest synchronization.
+export function packMatchSnapshot(match) {
+  if (!match) return null;
+  return {
+    t: match.tickCount,
+    tm: match.timeMs,
+    m: match.minutes,
+    s: match.seconds,
+    r: match.round,
+    rb: match.roundBannerTimer,
+    fa: match.flagAnimFrame,
+    bo: match.beOsc,
+    ts: [...match.teamScore],
+    hf: [...match.hudFlash],
+    fin: match.finished ? 1 : 0,
+    fr: match.finishReason || null,
+    win: match.winner || null,
+    rk: match.finished ? match.rankings : null,
+    ac: match.actors.map((a) => [
+      a.id,
+      Math.round(a.x),
+      Math.round(a.y),
+      a.vx,
+      a.vy,
+      a.facing,
+      a.health,
+      a.armor,
+      a.weapon,
+      a.ammo[a.weapon] ?? 0,
+      a.status,
+      a.animation,
+      a.animationFrame,
+      a.kills,
+      a.deaths,
+      a.inAir,
+      a.quadTimer,
+      a.burnTimer,
+      a.burnSprite,
+      a.burnFrame,
+      a.bloodyTimer,
+      Math.round(a.shadowY),
+      a.shadowEdgeClip,
+      a.shadowClipSide,
+      a.shadowOverPit ? 1 : 0,
+      a.character,
+      a.team,
+      a.isHuman ? 1 : 0,
+      a.name,
+      a.ownedWeapons.join(''),
+    ]),
+    pr: match.projectiles.map((p) => [
+      Math.round(p.x),
+      Math.round(p.y),
+      p.vx,
+      p.width,
+      p.height,
+      p.weapon,
+      p.animToggle ? 1 : 0,
+      p.facing,
+    ]),
+    fx: match.effects.map((f) => [Math.round(f.x), Math.round(f.y), f.type, f.timer]),
+    pk: match.pickups.map((p) => (p.respawnTimer > 0 ? p.respawnTimer : 0)),
+    fl: match.flags.map((fl) => [Math.round(fl.x), Math.round(fl.y), fl.carrier]),
+  };
+}
+
+// Apply Host authoritative snapshot on Guest client with crisp prevX/prevY 60fps lerp.
+export function applyMatchSnapshot(match, snap, lookDown = false) {
+  if (!match || !snap) return;
+  match.camera.prevX = match.camera.x;
+  match.camera.prevY = match.camera.y;
+
+  const prevActorProjCount = match.projectiles.length;
+  match.tickCount = snap.t ?? match.tickCount;
+  match.timeMs = snap.tm ?? match.timeMs;
+  match.minutes = snap.m ?? match.minutes;
+  match.seconds = snap.s ?? match.seconds;
+  match.round = snap.r ?? match.round;
+  match.roundBannerTimer = snap.rb ?? 0;
+  match.flagAnimFrame = snap.fa ?? 0;
+  match.beOsc = snap.bo ?? 0;
+  if (Array.isArray(snap.ts)) match.teamScore = [snap.ts[0] ?? 0, snap.ts[1] ?? 0];
+  if (Array.isArray(snap.hf)) match.hudFlash = [...snap.hf];
+  match.finished = Boolean(snap.fin);
+  match.finishReason = snap.fr ?? null;
+  match.winner = snap.win ?? null;
+  if (Array.isArray(snap.rk)) {
+    match.rankings = snap.rk.map((row) => ({ ...row, isPlayer: row.id === match.playerIndex }));
+  }
+
+  const sfx = [];
+  for (const row of snap.ac || []) {
+    const [
+      id, x, y, vx, vy, facing, health, armor, weapon, ammoVal, status, anim, animFrame,
+      kills, deaths, inAir, quadTimer, burnTimer, burnSprite, burnFrame, bloodyTimer,
+      shadowY, shadowEdgeClip, shadowClipSide, shadowOverPit, character, team, isHuman, name, ownedStr,
+    ] = row;
+    const actor = match.actors[id];
+    if (!actor) continue;
+    const isMe = id === match.playerIndex;
+    if (isMe) {
+      if (actor.status === 1 && status === 0) sfx.push(4);
+      if (health > actor.health || armor > actor.armor) sfx.push(6);
+      if (weapon === actor.weapon && ammoVal < (actor.ammo[weapon] ?? 0)) {
+        sfx.push(weapon === 0 ? 8 : weapon === 3 ? 1 : weapon === 5 ? 5 : 10);
+      }
+    }
+    const teleported = Math.abs(x - actor.x) > 48 || Math.abs(y - actor.y) > 48 || actor.status === 0;
+    actor.prevX = teleported ? x : actor.x;
+    actor.prevY = teleported ? y : actor.y;
+    actor.x = x;
+    actor.y = y;
+    actor.vx = vx;
+    actor.vy = vy;
+    actor.facing = facing;
+    actor.health = health;
+    actor.armor = armor;
+    actor.weapon = weapon;
+    actor.weaponSlot = weapon;
+    actor.ammo[weapon] = ammoVal;
+    actor.status = status;
+    actor.animation = anim;
+    actor.animationFrame = animFrame;
+    actor.kills = kills;
+    actor.deaths = deaths;
+    actor.score = kills;
+    actor.inAir = inAir;
+    actor.quadTimer = quadTimer;
+    actor.burnTimer = burnTimer;
+    actor.burnSprite = burnSprite;
+    actor.burnFrame = burnFrame;
+    actor.bloodyTimer = bloodyTimer;
+    actor.shadowY = shadowY;
+    actor.shadowEdgeClip = shadowEdgeClip;
+    actor.shadowClipSide = shadowClipSide;
+    actor.shadowOverPit = Boolean(shadowOverPit);
+    actor.character = character;
+    actor.charOffset = character === 0 ? 110 : 0;
+    actor.team = team;
+    actor.isHuman = Boolean(isHuman);
+    actor.isPlayer = isMe;
+    if (name) actor.name = name;
+    if (typeof ownedStr === 'string' && ownedStr.length === 6) {
+      actor.ownedWeapons = ownedStr.split('').map((c) => (c === '1' ? 1 : 0));
+    }
+    updateHealthBar(actor);
+  }
+
+  match.projectiles = (snap.pr || []).map(([x, y, vx, width, height, weapon, animToggle, facing]) => ({
+    x,
+    y,
+    prevX: weapon === 5 || weapon === 0 ? x : x - vx,
+    prevY: y,
+    vx,
+    width,
+    height,
+    weapon,
+    animToggle,
+    facing,
+  }));
+  if ((snap.fx?.length || 0) > match.effects.length && snap.fx.some((f) => f[2] === 3)) {
+    sfx.push(0);
+  } else if (prevActorProjCount > match.projectiles.length && sfx.length === 0 && snap.fx?.length) {
+    // quiet visual hit spark
+  }
+  match.effects = (snap.fx || []).map(([x, y, type, timer]) => ({ x, y, type, timer }));
+  if (Array.isArray(snap.pk)) {
+    for (let i = 0; i < match.pickups.length && i < snap.pk.length; i++) {
+      match.pickups[i].respawnTimer = snap.pk[i] || 0;
+    }
+  }
+  if (Array.isArray(snap.fl)) {
+    for (let i = 0; i < 2 && i < snap.fl.length; i++) {
+      const [fx, fy, carrier] = snap.fl[i];
+      if (match.flags[i].carrier === -1 && carrier >= 0) {
+        const myTeam = match.player?.team ?? 0;
+        sfx.push(match.actors[carrier]?.team === myTeam ? 3 : 2);
+      }
+      match.flags[i].x = fx;
+      match.flags[i].y = fy;
+      match.flags[i].carrier = carrier;
+    }
+  }
+  match.soundEvents = sfx;
+  if (match.finished) {
+    if (match.mode === MODE.TEAM_DEATHMATCH || match.mode === MODE.CAPTURE_FLAG) {
+      const myTeam = match.player?.team ?? 0;
+      const enemyTeam = myTeam === 0 ? 1 : 0;
+      if (match.teamScore[myTeam] > match.teamScore[enemyTeam]) match.winner = 'player';
+      else if (match.teamScore[myTeam] < match.teamScore[enemyTeam]) match.winner = 'enemy';
+      else match.winner = 'draw';
+    } else if (match.rankings?.length) {
+      match.winner = match.rankings[0]?.id === match.playerIndex ? 'player' : 'enemy';
+    }
+  }
+  match.interpValid = true;
+  match.lookDown = Boolean(lookDown);
+  updateCameraForActor(match, match.player);
 }

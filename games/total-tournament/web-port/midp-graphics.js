@@ -38,3 +38,50 @@ export function withMIDPClip(ctx, x, y, width, height, draw) {
   ctx.clip();
   try { draw(); } finally { ctx.restore(); }
 }
+
+// MIDP Graphics.drawRect fills a crisp 1px border spanning (width+1)x(height+1) pixels.
+export function drawRectMIDP(ctx, x, y, width, height, color) {
+  const rx = Math.round(x);
+  const ry = Math.round(y);
+  const rw = Math.round(width);
+  const rh = Math.round(height);
+  if (rw < 0 || rh < 0) return;
+  if (color) ctx.fillStyle = color;
+  if (rw === 0 || rh === 0) {
+    ctx.fillRect(rx, ry, rw + 1, rh + 1);
+    return;
+  }
+  ctx.fillRect(rx, ry, rw + 1, 1);
+  ctx.fillRect(rx, ry + rh, rw + 1, 1);
+  ctx.fillRect(rx, ry + 1, 1, Math.max(0, rh - 1));
+  ctx.fillRect(rx + rw, ry + 1, 1, Math.max(0, rh - 1));
+}
+
+// MIDP Graphics.drawLine draws crisp integer 1px pixels without Canvas stroke blur.
+export function drawLineMIDP(ctx, x1, y1, x2, y2, color) {
+  let px = Math.round(x1);
+  let py = Math.round(y1);
+  const tx = Math.round(x2);
+  const ty = Math.round(y2);
+  if (color) ctx.fillStyle = color;
+  if (px === tx) {
+    ctx.fillRect(px, Math.min(py, ty), 1, Math.abs(ty - py) + 1);
+    return;
+  }
+  if (py === ty) {
+    ctx.fillRect(Math.min(px, tx), py, Math.abs(tx - px) + 1, 1);
+    return;
+  }
+  const dx = Math.abs(tx - px);
+  const dy = Math.abs(ty - py);
+  const sx = px < tx ? 1 : -1;
+  const sy = py < ty ? 1 : -1;
+  let err = dx - dy;
+  while (true) {
+    ctx.fillRect(px, py, 1, 1);
+    if (px === tx && py === ty) break;
+    const e2 = 2 * err;
+    if (e2 > -dy) { err -= dy; px += sx; }
+    if (e2 < dx) { err += dx; py += sy; }
+  }
+}

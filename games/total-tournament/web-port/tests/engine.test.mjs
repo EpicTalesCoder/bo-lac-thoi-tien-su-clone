@@ -1,14 +1,34 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createEngineLoop, decodeGameplayKey, getUiSpriteRect, lerpCoordRound, MODE, normalizeKey } from '../tt-core.js';
+import {
+  createEngineLoop,
+  decodeGameplayKey,
+  DEFAULT_KEY_BINDINGS,
+  formatKeyLabel,
+  getUiSpriteRect,
+  lerpCoordRound,
+  MODE,
+  normalizeKey,
+} from '../tt-core.js';
 
-test('browser keyboard aliases map to the J2ME numeric keypad contract', () => {
+test('browser keyboard aliases map to the J2ME numeric keypad contract and IME-safe physical WASD/Q', () => {
   for (const [key, code] of [
     ['ArrowUp', 50], ['ArrowDown', 56], ['ArrowLeft', 52], ['ArrowRight', 54],
     ['Enter', 53], [' ', 53], ['2', 50], ['4', 52], ['5', 53], ['6', 54], ['8', 56],
-    ['*', 42], ['#', 35],
+    ['q', 81], ['Q', 81], ['*', 42], ['#', 35],
   ]) assert.equal(normalizeKey(key), code);
-  assert.deepEqual([50, 52, 53, 54, 56].map(decodeGameplayKey), ['jump', 'left', 'fire', 'right', 'drop']);
+  // Vietnamese Telex/Unikey IME letters still map via physical event.code
+  assert.equal(normalizeKey('ư', 'KeyW'), 50);
+  assert.equal(normalizeKey('ă', 'KeyA'), 52);
+  assert.equal(normalizeKey('đ', 'KeyD'), 54);
+  assert.equal(normalizeKey('á', 'KeyS'), 56);
+  assert.equal(normalizeKey('q', 'KeyQ'), 81);
+
+  assert.deepEqual([50, 52, 53, 54, 56, 81].map((c) => decodeGameplayKey(c)), ['jump', 'left', 'fire', 'right', 'drop', 'switchWeapon']);
+  assert.equal(decodeGameplayKey(48), null, 'numeric 0 should no longer switch weapons by default');
+  assert.equal(DEFAULT_KEY_BINDINGS.switchWeapon, 'KeyQ');
+  assert.equal(formatKeyLabel('KeyQ'), 'Q');
+  assert.equal(formatKeyLabel('Space'), 'SPACE');
   assert.equal(MODE.CAPTURE_FLAG, 3);
 });
 

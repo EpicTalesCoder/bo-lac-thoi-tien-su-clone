@@ -122,3 +122,40 @@ test('two opposing AI bots jumping simultaneously still fire and deal damage wit
   }
   assert.ok(firedCount > 0, 'opposing jumping AI bots should fire ranged weapons instead of deadlocking');
 });
+
+test('Last Hero graduated placement scoring and Fire-skip-to-next-round keep grounded spawns', () => {
+  const tables = loadTablesSync();
+  const lh = createSourceMatch(tables, { mode: MODE.LAST_HERO, levelIndex: 0, character: 0, settings: { I: 3, G: 3 } });
+  const p = lh.actors[0];
+  const a1 = lh.actors[1];
+  const a2 = lh.actors[2];
+
+  // Eliminate player (1st out -> +0), then skip round via Fire (alive get +1, +2)
+  p.status = 0; p.health = 0; lh.lastHeroOrder = 1;
+  a1.status = 1; a2.status = 1;
+  tickSourceMatch(lh, { fire: true }, tables);
+  assert.equal(lh.round, 2, 'pressing Fire while dead in Last Hero skips to next round');
+  assert.ok(a1.kills >= 1 && a2.kills >= 2, 'remaining survivors receive placement points');
+  assert.equal(p.status, 1, 'all actors respawn for round 2');
+  assert.equal(p.inAir, 0, 'advanceLastHeroRound must pass tables so spawns land grounded');
+});
+
+test('CTF flag steal emits SFX and dropped flag in pit returns to base podium', () => {
+  const tables = loadTablesSync();
+  const ctf = createSourceMatch(tables, { mode: MODE.CAPTURE_FLAG, levelIndex: 0, character: 0, settings: { I: 2, E: 3 } });
+  const player = ctf.actors[0];
+  const enemyFlag = ctf.flags[1];
+  player.x = enemyFlag.x;
+  player.y = enemyFlag.y;
+  tickSourceMatch(ctf, {}, tables);
+  assert.equal(enemyFlag.carrier, 0);
+  assert.ok(ctf.soundEvents.includes(3), 'player team stealing enemy flag must push SFX 3');
+
+  // Move carrier away so dropped flag in bottom pit does not immediately get re-touched
+  player.x = 120; player.y = 140;
+  enemyFlag.carrier = -1;
+  enemyFlag.y = ctf.level.worldHeight - 32;
+  tickSourceMatch(ctf, {}, tables);
+  assert.equal(enemyFlag.x, enemyFlag.homeX);
+  assert.equal(enemyFlag.y, enemyFlag.homeY);
+});

@@ -2,6 +2,47 @@
 export const TICK_TARGET_MS = 77;
 export const MODE = Object.freeze({ DEATHMATCH: 0, TEAM_DEATHMATCH: 1, SURVIVAL: 2, CAPTURE_FLAG: 3, LAST_HERO: 4 });
 
+export const KEY_ACTIONS = Object.freeze(['left', 'right', 'jump', 'drop', 'fire', 'switchWeapon']);
+export const DEFAULT_KEY_BINDINGS = Object.freeze({
+  left: 'KeyA',
+  right: 'KeyD',
+  jump: 'KeyW',
+  drop: 'KeyS',
+  fire: 'Space',
+  switchWeapon: 'KeyQ',
+});
+
+export function formatKeyLabel(keyToken) {
+  const code = String(keyToken || '').trim();
+  if (!code) return '-';
+  if (code.startsWith('Key') && code.length === 4) return code.slice(3).toUpperCase();
+  if (code.startsWith('Digit') && code.length === 6) return code.slice(5);
+  if (code.startsWith('Numpad')) return `NUM${code.slice(6).toUpperCase()}`;
+  if (code === 'Space' || code === ' ') return 'SPACE';
+  if (code === 'Enter') return 'ENTER';
+  if (code === 'Tab') return 'TAB';
+  if (code === 'ArrowLeft') return 'LEFT';
+  if (code === 'ArrowRight') return 'RIGHT';
+  if (code === 'ArrowUp') return 'UP';
+  if (code === 'ArrowDown') return 'DOWN';
+  if (code === 'ShiftLeft' || code === 'ShiftRight') return 'SHIFT';
+  if (code === 'ControlLeft' || code === 'ControlRight') return 'CTRL';
+  if (code === 'AltLeft' || code === 'AltRight') return 'ALT';
+  return code.toUpperCase().replace(/[^0-9A-Z]/g, '').slice(0, 6) || '?';
+}
+
+export function normalizePhysicalKey(key = '', eventCode = '') {
+  if (eventCode) return String(eventCode);
+  const k = String(key || '');
+  if (!k) return '';
+  if (k === ' ') return 'Space';
+  if (k === 'Enter' || k === 'Tab' || k === 'Escape' || k === 'Backspace') return k;
+  if (k.startsWith('Arrow')) return k;
+  if (/^[a-zA-Z]$/.test(k)) return `Key${k.toUpperCase()}`;
+  if (/^[0-9]$/.test(k)) return `Digit${k}`;
+  return k;
+}
+
 // Port of e.java:3053-3057. ccs rows are loaded from the original table in tt-loader.js.
 export function getUiSpriteRect(ccs, spriteId, bankColumn = 6) {
   return {
@@ -13,8 +54,14 @@ export function getUiSpriteRect(ccs, spriteId, bankColumn = 6) {
 }
 
 // Port of e.java:2217-2253. Device arrows/softkeys are normalized to the
-// numeric keypad codes consumed by run(); WASD are only web aliases.
-export function normalizeKey(key) {
+// numeric keypad codes consumed by run(); physical eventCode handles WASD/Q regardless of IME.
+export function normalizeKey(key, eventCode = '') {
+  if (eventCode === 'KeyW') return 50;
+  if (eventCode === 'KeyS') return 56;
+  if (eventCode === 'KeyA') return 52;
+  if (eventCode === 'KeyD') return 54;
+  if (eventCode === 'KeyQ') return 81;
+  if (eventCode === 'Space') return 53;
   if (key === 'ArrowUp' || key === 'w' || key === 'W') return 50;
   if (key === 'ArrowDown' || key === 's' || key === 'S') return 56;
   if (key === 'ArrowLeft' || key === 'a' || key === 'A') return 52;
@@ -23,19 +70,35 @@ export function normalizeKey(key) {
   if (/^[0-9]$/.test(key)) return key.charCodeAt(0);
   if (key === '*') return 42;
   if (key === '#' || key === 'Escape' || key === 'p' || key === 'P') return 35;
-  if (key === 'q' || key === 'Q' || key === 'Tab') return 48;
+  if (key === 'q' || key === 'Q' || key === 'Tab') return 81;
   if (key === 'Backspace') return -7;
   return 0;
 }
 
-// Port of e.java:3221-3242. Numeric keypad 2/4/5/6/8/0 have source meanings.
-export function decodeGameplayKey(keyCode) {
+// Port of e.java:3221-3242 with customizable key bindings (default switchWeapon = Q).
+export function decodeGameplayKey(keyOrEvent, bindings = DEFAULT_KEY_BINDINGS) {
+  if (typeof keyOrEvent === 'object' && keyOrEvent !== null) {
+    const phys = normalizePhysicalKey(keyOrEvent.rawKey, keyOrEvent.rawCode);
+    const activeBindings = { ...DEFAULT_KEY_BINDINGS, ...(bindings || {}) };
+    for (const action of KEY_ACTIONS) {
+      if (phys && activeBindings[action] === phys) return action;
+    }
+    if (phys === 'ArrowLeft' || phys === 'Numpad4') return 'left';
+    if (phys === 'ArrowRight' || phys === 'Numpad6') return 'right';
+    if (phys === 'ArrowUp' || phys === 'Numpad2') return 'jump';
+    if (phys === 'ArrowDown' || phys === 'Numpad8') return 'drop';
+    if (phys === 'Enter' || phys === 'Numpad5') return 'fire';
+    if (phys === 'Tab') return 'switchWeapon';
+    if (keyOrEvent.code && !phys) return decodeGameplayKey(keyOrEvent.code, bindings);
+    return null;
+  }
+  const keyCode = keyOrEvent;
   if (keyCode === 50) return 'jump';
   if (keyCode === 52) return 'left';
   if (keyCode === 53) return 'fire';
   if (keyCode === 54) return 'right';
   if (keyCode === 56) return 'drop';
-  if (keyCode === 48) return 'switchWeapon';
+  if (keyCode === 81) return 'switchWeapon';
   return null;
 }
 
@@ -58,22 +121,36 @@ export function createEngineLoop({ tick, render, now = () => performance.now(), 
     || key === ' ' || key === 'Tab'
   );
 
+  const isEditableTarget = (target) => {
+    if (!target) return false;
+    const tag = target.tagName;
+    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || Boolean(target.isContentEditable);
+  };
+
   const onDown = (event) => {
-    const code = normalizeKey(event.key);
-    if (!code) return;
-    if (shouldPreventDefault(event.key)) event.preventDefault?.();
+    if (isEditableTarget(event.target)) return;
+    const rawKey = event.key || '';
+    const rawCode = event.code || '';
+    const code = normalizeKey(rawKey, rawCode);
+    if (!code && !rawKey && !rawCode) return;
+    if (shouldPreventDefault(rawKey)) event.preventDefault?.();
     if (event.repeat) return;
-    if (event.code) scancodeOwner.set(event.code, code);
-    input.add(code);
-    tick({ type: 'key-down', code });
+    const ownerKey = rawCode || rawKey;
+    if (ownerKey) scancodeOwner.set(ownerKey, { code, rawKey, rawCode });
+    if (code) input.add(code);
+    tick({ type: 'key-down', code, rawKey, rawCode });
   };
   const onUp = (event) => {
-    const owned = event.code ? scancodeOwner.get(event.code) : 0;
-    const code = owned || normalizeKey(event.key);
-    if (event.code) scancodeOwner.delete(event.code);
-    if (!code) return;
-    input.delete(code);
-    tick({ type: 'key-up', code });
+    if (isEditableTarget(event.target)) return;
+    const ownerKey = event.code || event.key || '';
+    const owned = ownerKey ? scancodeOwner.get(ownerKey) : null;
+    if (ownerKey) scancodeOwner.delete(ownerKey);
+    const rawKey = owned?.rawKey ?? (event.key || '');
+    const rawCode = owned?.rawCode ?? (event.code || '');
+    const code = owned?.code ?? normalizeKey(rawKey, rawCode);
+    if (!code && !rawKey && !rawCode) return;
+    if (code) input.delete(code);
+    tick({ type: 'key-up', code, rawKey, rawCode });
   };
   const onBlur = () => {
     if (input.size === 0 && scancodeOwner.size === 0) return;
