@@ -17,8 +17,8 @@ import {
   restoreFarmSession,
 } from '../gf-core.js';
 
-const basePacksUrl = pathToFileURL('games/green-farm-3/web-port/assets/packs/').href;
-const textData = JSON.parse(fs.readFileSync('games/green-farm-3/web-port/assets/text/en.json', 'utf8'));
+const basePacksUrl = new URL('../assets/packs/', import.meta.url).href;
+const textData = JSON.parse(fs.readFileSync(new URL('../assets/text/en.json', import.meta.url), 'utf8'));
 const localFetcher = async (url) => {
   const fp = fileURLToPath(url);
   return {

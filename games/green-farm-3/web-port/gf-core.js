@@ -925,7 +925,13 @@ export function collectOrFeedAnimal(session, animalUid) {
   if (animal.ready) {
     const spec = session.catalog?.animals?.find(s => s.id === animal.animalId);
     const prodId = spec?.productGoodId ?? (animal.animalId + 2000);
-    const prodName = spec?.productName ?? `Sản phẩm ${animal.name}`;
+    const fallbackProd = /bò|cow/i.test(animal.name) ? 'Sữa tươi'
+      : /gà|chicken|hen/i.test(animal.name) ? 'Trứng gà'
+      : /cừu|sheep/i.test(animal.name) ? 'Len cừu'
+      : /lợn|heo|pig/i.test(animal.name) ? 'Nấm cục'
+      : /ngỗng|vịt|duck|goose/i.test(animal.name) ? 'Trứng vịt'
+      : `Nông sản ${animal.name}`;
+    const prodName = spec?.productName ?? fallbackProd;
     const existing = session.inventory.get(prodId) || { id: prodId, name: prodName, qty: 0, sellPrice: animal.sellPrice };
     existing.qty += 1;
     session.inventory.set(prodId, existing);

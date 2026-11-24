@@ -516,10 +516,18 @@ function renderFarmWorld(ctx) {
   };
   drawHudNum(`${s.level}`, 25, 19, '#fff8c8');
   drawHudNum(`${s.xp}/${xpNeed} XP`, 103, 17, '#ffffff');
-  // Crisp dark-brown numbers on the bright white Coins pill & green Cash bar
+  // Crisp dark-brown numbers on Coins pill & high-contrast pills for Cash & Energy
   drawText(ctx, `${s.coins}`, 57, 44, { align: 'center', size: 8, color: '#4a2508', bold: true });
+  ctx.fillStyle = 'rgba(26, 66, 26, 0.85)';
+  ctx.fillRect(138, 34, 38, 13);
+  ctx.strokeStyle = '#9be38a';
+  ctx.strokeRect(138.5, 34.5, 37, 12);
   drawHudNum(`${s.cash}`, 157, 44, '#eaffed');
-  drawText(ctx, `⚡${s.energy}/${s.maxEnergy}`, 15, 61, { size: 8, color: '#2b1505', bold: true });
+
+  ctx.fillStyle = 'rgba(46, 26, 9, 0.82)';
+  ctx.fillRect(10, 51, 56, 13);
+  ctx.strokeStyle = '#e8c47a';
+  ctx.strokeRect(10.5, 51.5, 55, 12);
   drawText(ctx, `⚡${s.energy}/${s.maxEnergy}`, 14, 60, { size: 8, color: '#ffe97d', bold: true });
 
   // Compact zoom badge at top-right below Pause icon
@@ -637,10 +645,10 @@ function renderShop(ctx) {
   const totalPages = Math.max(1, Math.ceil(list.length / perPage));
   const start = page * perPage;
   const cardCoords = [
-    { x: 31, y: 85, ix: 78, iy: 128, px: 76, py: 172 },
-    { x: 126, y: 85, ix: 173, iy: 128, px: 171, py: 172 },
-    { x: 31, y: 182, ix: 78, iy: 225, px: 76, py: 269 },
-    { x: 126, y: 182, ix: 173, iy: 225, px: 171, py: 269 },
+    { x: 31, y: 85, ix: 78, iy: 126, px: 75, py: 168 },
+    { x: 126, y: 85, ix: 173, iy: 126, px: 170, py: 168 },
+    { x: 31, y: 182, ix: 78, iy: 223, px: 75, py: 265 },
+    { x: 126, y: 182, ix: 173, iy: 223, px: 170, py: 265 },
   ];
 
   for (let i = 0; i < perPage && start + i < list.length; i += 1) {
@@ -689,7 +697,7 @@ function renderShop(ctx) {
     drawBSpriteBlockFrame(ctx, softkeys.sprite, softkeys.moduleImages, 2, 4, 289, 0);
     drawBSpriteBlockFrame(ctx, softkeys.sprite, softkeys.moduleImages, 0, 208, 289, 0);
   }
-  drawText(ctx, `◀ Trang ${page + 1}/${totalPages} ▶`, SCREEN_W / 2, 306, { align: 'center', size: 8, color: '#fff7d1', bold: true });
+  drawText(ctx, `◀ Trang ${page + 1}/${totalPages} ▶`, SCREEN_W / 2, 306, { align: 'center', size: 8, color: '#4a2508', bold: true });
 }
 
 // --- SCREEN B: 1:1 ORIGINAL GAMELOFT /6[3] KITCHEN (3x2 RECIPE CARDS AT x=20, 88, 155!) ---
@@ -765,7 +773,7 @@ function renderKitchen(ctx) {
     drawBSpriteBlockFrame(ctx, softkeys.sprite, softkeys.moduleImages, 2, 4, 289, 0);
     drawBSpriteBlockFrame(ctx, softkeys.sprite, softkeys.moduleImages, 0, 208, 289, 0);
   }
-  drawText(ctx, `◀ Trang ${page + 1}/${totalPages} ▶`, SCREEN_W / 2, 306, { align: 'center', size: 8, color: '#fff7d1', bold: true });
+  drawText(ctx, `◀ Trang ${page + 1}/${totalPages} ▶`, SCREEN_W / 2, 306, { align: 'center', size: 8, color: '#4a2508', bold: true });
 }
 
 // --- SCREEN C: AUTHENTIC QUESTS WITH CINDY LOU PORTRAIT (/6[9] + /7[7]) & 10 NEIGHBORS ---
@@ -804,7 +812,7 @@ function renderQuestsOrNeighbors(ctx) {
       drawText(ctx, `Trang trại ${nb.name}`, 48, y + 15, { size: 8, color: '#3a1f08', bold: sel, maxWidth: 112 });
       drawText(ctx, done ? 'ĐÃ GIÚP' : 'SANG THĂM ▶', 216, y + 15, { align: 'right', size: 8, color: done ? '#8a7356' : '#1c6b1c', bold: true });
     }
-    drawText(ctx, 'Chạm để qua trại bạn', SCREEN_W / 2, 306, { align: 'center', size: 8, color: '#fff7d1', bold: true });
+    drawText(ctx, `↑↓ Xem ${start + 1}-${Math.min(list.length, start + maxV)}/${list.length} · Chạm để thăm`, SCREEN_W / 2, 306, { align: 'center', size: 8, color: '#4a2508', bold: true });
     return;
   }
 
@@ -842,10 +850,10 @@ function renderQuestsOrNeighbors(ctx) {
     ctx.strokeStyle = sel ? '#c46210' : '#9c6e3b';
     ctx.strokeRect(18.5, y + 0.5, 203, 22);
     drawText(ctx, q.title, 24, y + 14, { size: 8, color: '#3a1f08', bold: sel, maxWidth: 132 });
-    const statusTxt = q.claimed ? 'XONG' : q.completed ? `NHẬN +${q.rewardCoins}G` : `${q.progress}/${q.targetCount}`;
+    const statusTxt = q.claimed ? 'XONG' : q.completed ? `NHẬN +${q.rewardCoins} Xu` : `${q.progress}/${q.targetCount}`;
     drawText(ctx, statusTxt, 216, y + 14, { align: 'right', size: 8, color: q.completed && !q.claimed ? '#1c6b1c' : '#8c4b18', bold: true });
   }
-  drawText(ctx, 'Chạm NV xong để nhận', SCREEN_W / 2, 306, { align: 'center', size: 8, color: '#fff7d1', bold: true });
+  drawText(ctx, 'Chạm NV xong để nhận', SCREEN_W / 2, 306, { align: 'center', size: 8, color: '#4a2508', bold: true });
 }
 
 // --- SCREEN D: CLEAN PARCHMENT LIST INSIDE /7[22] SAFE BOUNDS (x=18..222, y=42..276) ---
@@ -881,7 +889,7 @@ function renderCleanParchmentList(ctx, screenId, title, subtitle, rows, cursorId
     const col = item.rightColor === 'red' ? '#b3281d' : item.rightColor === 'green' ? '#1c6b1c' : '#8c4b18';
     drawText(ctx, item.right, 216, y + 14, { align: 'right', size: 8, color: col, bold: true });
   }
-  drawText(ctx, footer, SCREEN_W / 2, 306, { align: 'center', size: 8, color: '#fff7d1', bold: true });
+  drawText(ctx, footer, SCREEN_W / 2, 306, { align: 'center', size: 8, color: '#4a2508', bold: true });
 }
 
 function renderSeedPicker(ctx) {
@@ -914,6 +922,10 @@ function renderBarn(ctx) {
   const items = [...s.inventory.values()];
   const totalQty = items.reduce((a, b) => a + b.qty, 0);
   const upCost = 150 + Math.floor((s.barnCapacity - 40) * 10);
+  ctx.fillStyle = '#5c3314';
+  ctx.fillRect(14, 10, 108, 18);
+  ctx.strokeStyle = '#d4a259';
+  ctx.strokeRect(14.5, 10.5, 107, 17);
   drawText(ctx, `KHO THÓC ${totalQty}/${s.barnCapacity}`, 68, 22, { align: 'center', size: 8, color: '#fff7d1', bold: true });
 
   const allSlots = [
@@ -948,18 +960,18 @@ function renderBarn(ctx) {
       if (ui2) drawBSpriteBlockFrameScaled(ctx, ui2.sprite, ui2.moduleImages, idx % ui2.sprite.frames.length, cx + 28, cy + 24, 30, 28);
     }
     drawText(ctx, it.name, cx + 28, cy + 50, { align: 'center', size: 6, color: '#3a1f08', bold: true, maxWidth: 52 });
-    drawText(ctx, it.isUpgrade ? `${it.price}G` : `x${it.qty} · +${it.price}G`, cx + 28, cy + 63, {
+    drawText(ctx, it.isUpgrade ? `${it.price} Xu` : `x${it.qty} · +${it.price} Xu`, cx + 28, cy + 63, {
       align: 'center', size: 6, color: it.isUpgrade ? '#8c4b18' : '#1c6b1c', bold: true, maxWidth: 52,
     });
   }
-  drawText(ctx, 'Q: Bán hết · Chạm ô bán', SCREEN_W / 2, 306, { align: 'center', size: 8, color: '#fff7d1', bold: true });
+  drawText(ctx, 'Q: Bán hết · Chạm ô bán', SCREEN_W / 2, 306, { align: 'center', size: 8, color: '#4a2508', bold: true });
 }
 
 function getManorCards(s) {
   const rooms = (s.catalog.buildings || []).filter(b => b.isManorRoom);
   return [
     { kind: 'tool_plow', title: 'Cuốc cày đất', desc: 'Chạm bãi cỏ để cày ô đất trồng cây mới (10 Xu/ô).', btn: s.activeTool === 'plow' ? 'TẮT CUỐC' : 'DÙNG CUỐC', spriteBlock: 6, frame: 0 },
-    { kind: 'tool_clear', title: 'Rìu dọn cỏ & đá', desc: 'Dọn sạch bụi cây và tảng đá lấy đất trống (+15 Xu, cổ vật).', btn: s.activeTool === 'clear' ? 'TẮT RÌU' : 'DÙNG RÌU', spriteBlock: 14, frame: 16 },
+    { kind: 'tool_clear', title: 'Rìu dọn cỏ & đá', desc: 'Dọn bụi cây & đá lấy đất trống (+15 Xu).', btn: s.activeTool === 'clear' ? 'TẮT RÌU' : 'DÙNG RÌU', spriteBlock: 14, frame: 16 },
     { kind: 'open_kitchen', title: 'Nhà bếp (83 món)', desc: 'Chế biến nông sản thành bánh, súp, bột bán giá cao.', btn: 'VÀO BẾP', spriteBlock: 132, frame: 0 },
     { kind: 'open_barn', title: 'Kho thóc', desc: `Lưu trữ & bán nông sản (Sức chứa: ${s.barnCapacity} chỗ).`, btn: 'MỞ KHO', spriteBlock: 82, frame: 0 },
     { kind: 'open_neighbors', title: '10 Hàng xóm', desc: 'Sang thăm trực tiếp 10 trang trại bạn bè và giúp việc.', btn: 'ĐI THĂM', spriteBlock: 86, frame: 0 },
@@ -974,7 +986,7 @@ function getManorCards(s) {
         entityId: r.entityId,
         title: `Phòng: ${r.name}`,
         desc: done ? 'Phòng này đã được sửa chữa hoàn chỉnh!' : `Sửa chữa để khôi phục Dinh thự chú để lại.`,
-        btn: done ? 'ĐÃ SỬA' : `SỬA ${cost}G`,
+        btn: done ? 'ĐÃ SỬA' : `SỬA ${cost} Xu`,
         spriteBlock: r.worldBlock,
         frame: r.frame || 0,
       };
@@ -1033,7 +1045,7 @@ function renderManor(ctx) {
   // Left / Right switcher arrows on the sides of the card
   drawText(ctx, '◀', 36, 158, { align: 'center', size: 14, color: '#8c4b18', bold: true });
   drawText(ctx, '▶', 204, 158, { align: 'center', size: 14, color: '#8c4b18', bold: true });
-  drawText(ctx, '◀ ▶ Đổi mục · Chạm nút mở', SCREEN_W / 2, 306, { align: 'center', size: 7, color: '#fff7d1', bold: true });
+  drawText(ctx, '◀ ▶ Đổi mục · Chạm nút mở', SCREEN_W / 2, 306, { align: 'center', size: 7, color: '#4a2508', bold: true });
 }
 
 function renderCoop(ctx) {
@@ -1744,9 +1756,10 @@ function onKeyDown(event) {
     event.preventDefault();
     return;
   }
-  if (code === KEY.SK_RIGHT && s.activeTool !== 'auto') {
+  if (code === KEY.SK_RIGHT && (s.activeTool !== 'auto' || s.placementItem || s.toast)) {
     s.activeTool = 'auto';
     s.placementItem = null;
+    s.toast = '';
     event.preventDefault();
     return;
   }
