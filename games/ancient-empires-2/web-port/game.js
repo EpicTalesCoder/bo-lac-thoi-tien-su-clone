@@ -1,17 +1,22 @@
 import { decodeMap, decodeSprite, decodeTerrainProperties, decodeUnits, fetchBytes, transformPalettePixels } from './ancient-empires-loader.js';
 import {
   advancePlayerTurn,
+  attackModifierFor,
   buildingPaletteFromTile,
   calculateReachability,
   chooseAiUnitAction,
   computeUnitStats,
+  defenseModifierFor,
   encodeBuildingTile,
   executeCombat,
   getAttackableTargets,
   getTileActionForUnit,
+  traceRoute,
 } from './ancient-empires-core.js';
 import { drawRegionMIDP, renderOriginalBoard } from './render-original.js';
 import { playAe2Sfx } from './ae2-audio.js';
+import { BattleScene } from './ae2-battle.js';
+import { CAMPAIGN_STAGE_META, renderCutsceneScreen, renderStoryDialogOverlay, wrapText } from './ae2-story.js';
 
 const WIDTH = 240;
 const HEIGHT = 320;
@@ -59,7 +64,14 @@ async function loadAssets() {
   const map = decodeMap(await fetchBytes('assets/m0'), 'm0');
   const unitRecords = decodeUnits(unitBytes);
   const terrain = decodeTerrainProperties(propertyBytes);
-  const spriteNames = ['tiles0', 'buildings', 'unit_icons', 'king_head_icons', 'cursor', 'buttons', 'menu', 'hud_icons', 'hud_icons_2', 'action_icons', 'side_arrow', 'arrow', 'mini_icons', 'portraits'];
+  const spriteNames = [
+    'tiles0', 'buildings', 'unit_icons', 'king_head_icons', 'cursor', 'buttons', 'menu', 'menu_icons',
+    'hud_icons', 'hud_icons_2', 'action_icons', 'side_arrow', 'arrow', 'arrow_icons', 'mini_icons',
+    'portraits', 'alpha', 'status', 'levelup', 'king_heads', 'king_heads_back',
+    'road', 'grass', 'mountain', 'water', 'bridge', 'town', 'mountain_bg',
+    'slash', 'archer_arrow', 'kingwave', 'kingslash', 'spell', 'watermagic', 'fish', 'crater',
+    'b_smoke', 'big_circle', 'small_circle', 'smoke', 'spark', 'redspark',
+  ];
   const sprites = {};
   const images = {};
   const frameImages = {};
@@ -82,7 +94,11 @@ async function loadAssets() {
     }
   }));
 
-  await Promise.all(['splash', 'logo', 'tombstone', 'gameover'].map(async name => {
+  await Promise.all([
+    'splash', 'logo', 'tombstone', 'gameover',
+    'intro0', 'intro1', 'intro2', 'intro3', 'intro4', 'intro5',
+    'town_bg', 'woods_bg', 'hill_bg', 'bridge_bg',
+  ].map(async name => {
     const pngName = `${name}.png`;
     if (hasOriginalAsset(pngName)) {
       try { images[name] = await loadImage(`assets/${pngName}`); } catch { /* optional standalone PNG */ }
@@ -165,9 +181,15 @@ class AncientEmpiresWeb {
     this.ctx = canvas.getContext('2d', { alpha: false });
     this.assets = assets;
     this.status = status;
-    this.state = 'splash'; // splash | menu | levelSelect | pauseMenu | play | actionMenu | recruitMenu | dialog | victory | defeat
+    this.state = 'splash'; // splash | menu | levelSelect | skirmishSetup | settings | instructions | cutscene | stageBanner | storyDialog | pauseMenu | play | moveAnim | targetSelect | actionMenu | recruitMenu | battle | dialog | victory | defeat
     this.menuCursor = 0;
     this.pauseCursor = 0;
+    this.subMenuReturnState = 'menu';
+    this.settings = this.loadSettings();
+    this.skirmishConfig = { mapIdx: 0, gold: 350, players: [1, 0] };
+    this.skirmishCursor = 0;
+    this.settingsCursor = 0;
+    this.helpScroll = 0;
     this.mapList = [...CAMPAIGN_MAPS, ...SKIRMISH_MAPS];
     this.mapIndex = 0;
     this.currentMapId = 'm0';
@@ -175,7 +197,24 @@ class AncientEmpiresWeb {
     this.selected = null;
     this.moveOrigin = null;
     this.reachable = null;
+    this.previewPath = null;
     this.attackTargets = [];
+    this.targetCandidates = [];
+    this.targetCursor = 0;
+    this.targetKind = 'attack';
+    this.moveAnim = null;
+    this.battleScene = null;
+    this.battleOnDone = null;
+    this.cutsceneQueue = [];
+    this.cutsceneScroll = 0;
+    this.cutsceneMaxScroll = 360;
+    this.cutsceneOnDone = null;
+    this.storyQueue = [];
+    this.storyOnDone = null;
+    this.triggeredTurnDialogs = new Set();
+    this.stageBannerTitle = '';
+    this.stageBannerObjective = '';
+    this.stageBannerNext = null;
     this.turn = 0;
     this.playerIndex = 0;
     this.playerCount = 2;
@@ -197,6 +236,7 @@ class AncientEmpiresWeb {
     this.aiTimer = 0;
     this.animTick = 0;
     this.saveKey = 'ae2-local-state-v2';
+    this.settingsKey = 'ae2-settings-v1';
     this.lastTick = 0;
     this.accumulator = 0;
     this.boardCanvas = document.createElement('canvas');
@@ -207,6 +247,27 @@ class AncientEmpiresWeb {
     this.bindInput();
     requestAnimationFrame(time => this.loop(time));
     this.paint();
+  }
+
+  loadSettings() {
+    try {
+      const saved = JSON.parse(localStorage.getItem('ae2-settings-v1') || '{}');
+      return {
+        fightAnimation: saved.fightAnimation !== false,
+        sound: saved.sound !== false,
+        showStory: saved.showStory !== false,
+      };
+    } catch {
+      return { fightAnimation: true, sound: true, showStory: true };
+    }
+  }
+
+  saveSettings() {
+    try { localStorage.setItem(this.settingsKey, JSON.stringify(this.settings)); } catch { /* ignore */ }
+  }
+
+  sfx(kind) {
+    if (this.settings.sound) playAe2Sfx(kind);
   }
 
   getBoardGeometry() {
@@ -232,16 +293,27 @@ class AncientEmpiresWeb {
     return { list, rowHeight, headerHeight, cancelHeight, panelH, panelY };
   }
 
-  openMenu(state = 'menu') {
+  openMenu(state = 'menu', returnState = 'menu') {
+    this.subMenuReturnState = returnState;
     this.state = state;
     this.aiPending = false;
+    this.moveAnim = null;
+    this.battleScene = null;
     this.selected = null;
     this.moveOrigin = null;
     this.reachable = null;
+    this.previewPath = null;
     this.attackTargets = [];
+    this.targetCandidates = [];
     this.recruitCastle = null;
-    this.status.textContent = 'READY · OFFLINE';
+    if (state === 'menu' || state === 'levelSelect' || state === 'skirmishSetup') {
+      this.status.textContent = 'READY · OFFLINE';
+    }
     this.paint();
+  }
+
+  getPauseOptions() {
+    return ['RESUME GAME', 'OBJECTIVE', 'SETTINGS', 'INSTRUCTIONS', 'RESTART MAP', 'SELECT LEVEL', 'MAIN MENU'];
   }
 
   confirmPauseOption(idx) {
@@ -249,12 +321,41 @@ class AncientEmpiresWeb {
       this.state = 'play';
       this.paint();
     } else if (idx === 1) {
-      this.loadAndStartMap(this.currentMapId);
+      this.showObjective();
     } else if (idx === 2) {
-      this.openMenu('levelSelect');
+      this.settingsCursor = 0;
+      this.subMenuReturnState = 'pauseMenu';
+      this.state = 'settings';
+      this.paint();
+    } else if (idx === 3) {
+      this.helpScroll = 0;
+      this.subMenuReturnState = 'pauseMenu';
+      this.state = 'instructions';
+      this.paint();
+    } else if (idx === 4) {
+      this.loadAndStartMap(this.currentMapId, { includeIntro: false });
+    } else if (idx === 5) {
+      this.openMenu('levelSelect', 'menu');
     } else {
-      this.openMenu('menu');
+      this.openMenu('menu', 'menu');
     }
+  }
+
+  showObjective() {
+    const meta = CAMPAIGN_STAGE_META[this.currentMapId];
+    this.stageBannerTitle = meta
+      ? (this.assets.langStrings?.[meta.titleIdx] || this.currentMapId.toUpperCase())
+      : `SKIRMISH · ${this.currentMapId.toUpperCase()}`;
+    this.stageBannerObjective = meta
+      ? (this.assets.langStrings?.[meta.objectiveIdx] || 'Defeat all enemy troops!')
+      : 'Defeat all enemy forces and capture enemy castles!';
+    this.stageBannerPrompt = 'TAP OR ESC · BACK';
+    this.stageBannerNext = () => {
+      this.state = 'pauseMenu';
+      this.paint();
+    };
+    this.state = 'stageBanner';
+    this.paint();
   }
 
   unitName(type) {
@@ -263,7 +364,7 @@ class AncientEmpiresWeb {
     return str || `UNIT ${type}`;
   }
 
-  initMapState(mapData, mapId) {
+  initMapState(mapData, mapId, options = {}) {
     this.currentMapId = mapId;
     this.assets.map = {
       ...mapData,
@@ -271,13 +372,19 @@ class AncientEmpiresWeb {
     };
     const players = new Set(mapData.units.map(u => u.playerSelector));
     this.playerCount = Math.max(2, ...players);
-    this.playerModes = Array.from({ length: this.playerCount }, (_, i) => (i === 0 ? 1 : 0));
-    this.balances = Array.from({ length: this.playerCount }, () => 350);
+    this.playerModes = options.playerModes
+      ? [...options.playerModes]
+      : Array.from({ length: this.playerCount }, (_, i) => (i === 0 ? 1 : 0));
+    const startGold = options.startingGold ?? 350;
+    this.balances = Array.from({ length: this.playerCount }, () => startGold);
     this.playerPositions = Array.from({ length: this.playerCount }, () => [0, 0]);
     this.playerPalette = [0, 1, 2, 3, 4];
     this.turn = 0;
     this.playerIndex = 0;
     this.nextUnitId = 1;
+    this.triggeredTurnDialogs = new Set();
+    this.m0Reinforced = false;
+    this.stageBannerPrompt = 'TAP OR ENTER TO BEGIN';
     this.units = mapData.units.map(record => {
       const stats = computeUnitStats(this.assets.unitRecords[record.type], 0);
       return {
@@ -298,18 +405,122 @@ class AncientEmpiresWeb {
     this.cursor = { x: first?.x ?? 0, y: first?.y ?? 0 };
     this.centerCameraOn(this.cursor.x, this.cursor.y);
     this.selected = null;
+    this.moveOrigin = null;
     this.reachable = null;
+    this.previewPath = null;
     this.attackTargets = [];
+    this.targetCandidates = [];
+    this.moveAnim = null;
+    this.battleScene = null;
   }
 
-  async loadAndStartMap(mapId) {
+  playCutsceneSequence(cutsceneSpecs, onDone) {
+    if (!cutsceneSpecs || cutsceneSpecs.length === 0) {
+      onDone?.();
+      return;
+    }
+    this.cutsceneQueue = cutsceneSpecs.map(spec => (
+      typeof spec === 'number'
+        ? {
+            image: this.assets.images[`intro${spec}`] ?? null,
+            text: this.assets.langStrings?.[215 + spec] || '',
+          }
+        : spec
+    ));
+    this.cutsceneScroll = 0;
+    this.cutsceneOnDone = onDone;
+    this.state = 'cutscene';
+    this.paint();
+  }
+
+  advanceCutscene(skipAll = false) {
+    if (skipAll || this.cutsceneQueue.length <= 1) {
+      this.cutsceneQueue = [];
+      const fn = this.cutsceneOnDone;
+      this.cutsceneOnDone = null;
+      fn?.();
+      return;
+    }
+    this.cutsceneQueue.shift();
+    this.cutsceneScroll = 0;
+    this.paint();
+  }
+
+  playStoryDialogs(entries, onDone) {
+    if (!entries || entries.length === 0) {
+      onDone?.();
+      return;
+    }
+    this.storyQueue = entries.map(item => ({
+      portrait: item.portrait ?? -1,
+      focus: item.focus ?? null,
+      text: this.assets.langStrings?.[item.langIdx] || '',
+    }));
+    const first = this.storyQueue[0];
+    if (first?.focus) {
+      this.cursor = { x: first.focus[0], y: first.focus[1] };
+      this.centerCameraOn(this.cursor.x, this.cursor.y);
+    }
+    this.storyOnDone = onDone;
+    this.state = 'storyDialog';
+    this.paint();
+  }
+
+  advanceStoryDialog(skipAll = false) {
+    if (skipAll || this.storyQueue.length <= 1) {
+      this.storyQueue = [];
+      const fn = this.storyOnDone;
+      this.storyOnDone = null;
+      fn?.();
+      return;
+    }
+    this.storyQueue.shift();
+    const cur = this.storyQueue[0];
+    if (cur?.focus) {
+      this.cursor = { x: cur.focus[0], y: cur.focus[1] };
+      this.centerCameraOn(this.cursor.x, this.cursor.y);
+    }
+    this.paint();
+  }
+
+  async loadAndStartMap(mapId, options = {}) {
     try {
       this.status.textContent = `LOADING ${mapId.toUpperCase()}...`;
       const decoded = decodeMap(await fetchBytes(`assets/${mapId}`), mapId);
-      this.initMapState(decoded, mapId);
-      this.state = 'play';
+      this.initMapState(decoded, mapId, options);
       this.status.textContent = `${mapId.toUpperCase()} · READY`;
-      this.paint();
+
+      const meta = CAMPAIGN_STAGE_META[mapId];
+      const runStageIntroDialogs = () => {
+        const startPlay = () => {
+          const hero = this.units.find(u => u.playerSelector === 1 && u.action !== 3);
+          if (hero) {
+            this.cursor = { x: hero.x, y: hero.y };
+            this.centerCameraOn(hero.x, hero.y);
+          }
+          this.state = 'play';
+          this.paint();
+        };
+        if (meta && this.settings.showStory && meta.openingDialogs?.length > 0) {
+          this.stageBannerTitle = this.assets.langStrings?.[meta.titleIdx] || mapId.toUpperCase();
+          this.stageBannerObjective = this.assets.langStrings?.[meta.objectiveIdx] || '';
+          this.stageBannerPrompt = 'TAP OR ENTER TO BEGIN';
+          this.stageBannerNext = () => this.playStoryDialogs(meta.openingDialogs, startPlay);
+          this.state = 'stageBanner';
+          this.paint();
+        } else {
+          startPlay();
+        }
+      };
+
+      const cutscenes = options.includeIntro && this.settings.showStory && meta?.introCutscenes?.length
+        ? meta.introCutscenes
+        : [];
+      if (cutscenes.length > 0) {
+        this.playCutsceneSequence(cutscenes, runStageIntroDialogs);
+      } else {
+        runStageIntroDialogs();
+      }
     } catch (err) {
       this.dialogText = `CANNOT LOAD ${mapId}`;
       this.state = 'dialog';
@@ -326,11 +537,15 @@ class AncientEmpiresWeb {
       this.pointer(x, y);
     });
     this.canvas.addEventListener('wheel', event => {
-      if (this.state !== 'levelSelect') return;
       event.preventDefault();
       const step = event.deltaY > 0 ? 1 : -1;
-      this.mapIndex = Math.max(0, Math.min(this.mapList.length - 1, this.mapIndex + step));
-      this.paint();
+      if (this.state === 'levelSelect') {
+        this.mapIndex = Math.max(0, Math.min(this.mapList.length - 1, this.mapIndex + step));
+        this.paint();
+      } else if (this.state === 'instructions') {
+        this.helpScroll = Math.max(0, Math.min(28, this.helpScroll + step));
+        this.paint();
+      }
     }, { passive: false });
     window.addEventListener('blur', () => {
       this.lastTick = 0;
@@ -370,6 +585,43 @@ class AncientEmpiresWeb {
         if (u.action !== 3) u.frameIndex = (u.frameIndex + 1) % 2;
       }
     }
+    if (this.state === 'cutscene') {
+      if (this.cutsceneScroll < this.cutsceneMaxScroll) {
+        this.cutsceneScroll += 0.9;
+      }
+      return;
+    }
+    if (this.state === 'stageBanner') {
+      return;
+    }
+    if (this.state === 'battle' && this.battleScene) {
+      this.battleScene.tick(50);
+      if (this.battleScene.finished) {
+        this.finishBattleScene();
+      }
+      return;
+    }
+    if (this.state === 'moveAnim' && this.moveAnim) {
+      const anim = this.moveAnim;
+      const nextTile = anim.path[anim.stepIndex];
+      if (!nextTile) {
+        this.moveAnim = null;
+        this.state = 'play';
+        anim.onDone?.();
+        return;
+      }
+      anim.unit.x = nextTile[0];
+      anim.unit.y = nextTile[1];
+      this.cursor = { x: nextTile[0], y: nextTile[1] };
+      this.centerCameraOn(nextTile[0], nextTile[1]);
+      anim.stepIndex++;
+      if (anim.stepIndex >= anim.path.length) {
+        this.moveAnim = null;
+        this.state = 'play';
+        anim.onDone?.();
+      }
+      return;
+    }
     if (this.state === 'dialog' && this.dialogTimer > 0) {
       this.dialogTimer -= 50;
       if (this.dialogTimer <= 0) this.state = 'play';
@@ -380,13 +632,106 @@ class AncientEmpiresWeb {
     }
   }
 
+  finishBattleScene() {
+    this.battleScene = null;
+    const fn = this.battleOnDone;
+    this.battleOnDone = null;
+    this.state = 'play';
+    fn?.();
+    this.paint();
+  }
+
+  getMainMenuItems() {
+    return [
+      { label: this.assets.langStrings?.[2] || 'NEW GAME', icon: 0 },
+      { label: 'CONTINUE SAVED', icon: 8 },
+      { label: this.assets.langStrings?.[3] || 'SELECT LEVEL', icon: 1 },
+      { label: this.assets.langStrings?.[6] || 'SKIRMISH', icon: 3 },
+      { label: this.assets.langStrings?.[8] || 'SETTINGS', icon: 4 },
+      { label: this.assets.langStrings?.[9] || 'INSTRUCTIONS', icon: 6 },
+    ];
+  }
+
+  confirmMainMenuOption(idx) {
+    if (idx === 0) this.startCampaign();
+    else if (idx === 1) this.loadSavedGame();
+    else if (idx === 2) this.openMenu('levelSelect', 'menu');
+    else if (idx === 3) this.openMenu('skirmishSetup', 'menu');
+    else if (idx === 4) { this.settingsCursor = 0; this.openMenu('settings', 'menu'); }
+    else { this.helpScroll = 0; this.openMenu('instructions', 'menu'); }
+  }
+
   pointer(x, y) {
     if (this.state === 'splash') { this.openMenu('menu'); return; }
     if (this.state === 'menu') {
-      if (y >= 150 && y <= 176) this.startCampaign();
-      else if (y >= 180 && y <= 206) this.openMenu('levelSelect');
-      else if (y >= 210 && y <= 236) this.loadSavedGame();
-      else this.startCampaign();
+      const idx = Math.floor((y - 114) / 26);
+      if (x >= 26 && x <= 214 && idx >= 0 && idx < 6) {
+        this.menuCursor = idx;
+        this.confirmMainMenuOption(idx);
+      }
+      return;
+    }
+    if (this.state === 'cutscene') {
+      if (y >= HEIGHT - 26 && x >= WIDTH - 88) this.advanceCutscene(true);
+      else this.advanceCutscene(false);
+      return;
+    }
+    if (this.state === 'stageBanner') {
+      const fn = this.stageBannerNext;
+      this.stageBannerNext = null;
+      fn?.();
+      return;
+    }
+    if (this.state === 'storyDialog') {
+      if (x >= WIDTH - 90 && y >= HEIGHT - 50) this.advanceStoryDialog(true);
+      else this.advanceStoryDialog(false);
+      return;
+    }
+    if (this.state === 'battle' && this.battleScene) {
+      if (this.battleScene.elapsed >= 450) {
+        this.battleScene.skip();
+        this.finishBattleScene();
+      }
+      return;
+    }
+    if (this.state === 'skirmishSetup') {
+      if (y >= 280) {
+        if (x < WIDTH / 2) this.startConfiguredSkirmish();
+        else this.openMenu('menu');
+        return;
+      }
+      const row = Math.floor((y - 58) / 34);
+      if (row >= 0 && row < 4) {
+        this.skirmishCursor = row;
+        this.adjustSkirmishOption(row, x >= WIDTH / 2 ? 1 : -1);
+      }
+      return;
+    }
+    if (this.state === 'settings') {
+      if (y >= 280) {
+        this.saveSettings();
+        this.state = this.subMenuReturnState;
+        this.paint();
+        return;
+      }
+      const row = Math.floor((y - 76) / 36);
+      if (row >= 0 && row < 3) {
+        this.settingsCursor = row;
+        this.toggleSettingOption(row);
+      }
+      return;
+    }
+    if (this.state === 'instructions') {
+      if (y >= 280) {
+        this.state = this.subMenuReturnState;
+        this.paint();
+      } else if (y < 160) {
+        this.helpScroll = Math.max(0, this.helpScroll - 3);
+        this.paint();
+      } else {
+        this.helpScroll = Math.min(28, this.helpScroll + 3);
+        this.paint();
+      }
       return;
     }
     if (this.state === 'levelSelect') {
@@ -406,13 +751,16 @@ class AncientEmpiresWeb {
       if (row >= 0 && row < 11 && start + row < this.mapList.length) {
         const idx = start + row;
         this.mapIndex = idx;
-        this.loadAndStartMap(this.mapList[idx]);
+        this.loadAndStartMap(this.mapList[idx], { includeIntro: false });
       }
       return;
     }
     if (this.state === 'pauseMenu') {
-      const idx = Math.floor((y - 116) / 22);
-      if (x >= 36 && x <= 204 && idx >= 0 && idx < 4) {
+      const opts = this.getPauseOptions();
+      const panelH = 28 + opts.length * 22 + 8;
+      const panelY = (HEIGHT - panelH) >> 1;
+      const idx = Math.floor((y - panelY - 26) / 22);
+      if (x >= 32 && x <= 208 && idx >= 0 && idx < opts.length) {
         this.confirmPauseOption(idx);
       } else {
         this.state = 'play';
@@ -424,7 +772,7 @@ class AncientEmpiresWeb {
       if (this.state === 'victory') {
         const nextIdx = CAMPAIGN_MAPS.indexOf(this.currentMapId) + 1;
         if (nextIdx > 0 && nextIdx < CAMPAIGN_MAPS.length) {
-          this.loadAndStartMap(CAMPAIGN_MAPS[nextIdx]);
+          this.loadAndStartMap(CAMPAIGN_MAPS[nextIdx], { includeIntro: true });
           return;
         }
       }
@@ -432,9 +780,34 @@ class AncientEmpiresWeb {
       return;
     }
     if (this.state === 'dialog') { this.state = 'play'; this.paint(); return; }
+    if (this.state === 'targetSelect') {
+      if (y >= HEIGHT - 28) {
+        if (x >= WIDTH - 84) this.confirmTargetSelection();
+        else this.backFromTargetSelect();
+        return;
+      }
+      if (y >= 28) {
+        const { offsetX, offsetY } = this.getBoardGeometry();
+        const tileX = Math.floor((x - offsetX + this.cameraX) / 24);
+        const tileY = Math.floor((y - 28 - offsetY + this.cameraY) / 24);
+        const hitIdx = this.targetCandidates.findIndex(t => t.x === tileX && t.y === tileY);
+        if (hitIdx >= 0) {
+          if (hitIdx === this.targetCursor) this.confirmTargetSelection();
+          else {
+            this.targetCursor = hitIdx;
+            const t = this.targetCandidates[hitIdx];
+            this.cursor = { x: t.x, y: t.y };
+            this.paint();
+          }
+          return;
+        }
+      }
+      this.backFromTargetSelect();
+      return;
+    }
     if (this.state === 'actionMenu') {
-      const boxTop = 108;
-      const idx = Math.floor((y - boxTop - 8) / 20);
+      const boxTop = 98;
+      const idx = Math.floor((y - boxTop - 8) / 22);
       if (idx >= 0 && idx < this.actionOptions.length && x >= 44 && x <= 196) {
         this.confirmActionOption(idx);
       } else {
@@ -480,31 +853,122 @@ class AncientEmpiresWeb {
     }
   }
 
+  adjustSkirmishOption(row, dir) {
+    if (row === 0) {
+      this.skirmishConfig.mapIdx = (this.skirmishConfig.mapIdx + dir + SKIRMISH_MAPS.length) % SKIRMISH_MAPS.length;
+    } else if (row === 1) {
+      const presets = [200, 350, 500, 750, 1000];
+      const cur = Math.max(0, presets.indexOf(this.skirmishConfig.gold));
+      this.skirmishConfig.gold = presets[(cur + dir + presets.length) % presets.length];
+    } else if (row === 2) {
+      this.skirmishConfig.players[0] = this.skirmishConfig.players[0] === 1 ? 0 : 1;
+    } else if (row === 3) {
+      this.skirmishConfig.players[1] = this.skirmishConfig.players[1] === 1 ? 0 : 1;
+    }
+    this.paint();
+  }
+
+  startConfiguredSkirmish() {
+    const mapId = SKIRMISH_MAPS[this.skirmishConfig.mapIdx] || 's0';
+    this.loadAndStartMap(mapId, {
+      includeIntro: false,
+      startingGold: this.skirmishConfig.gold,
+      playerModes: [this.skirmishConfig.players[0], this.skirmishConfig.players[1], 0, 0],
+    });
+  }
+
+  toggleSettingOption(row) {
+    if (row === 0) this.settings.fightAnimation = !this.settings.fightAnimation;
+    else if (row === 1) this.settings.sound = !this.settings.sound;
+    else if (row === 2) this.settings.showStory = !this.settings.showStory;
+    this.saveSettings();
+    this.paint();
+  }
+
   key(event) {
     const code = event.code;
     if (this.state === 'splash') { this.openMenu('menu'); return; }
-    if (this.state === 'menu') {
-      if (code === 'ArrowUp' || code === 'KeyW') this.menuCursor = (this.menuCursor + 2) % 3;
-      else if (code === 'ArrowDown' || code === 'KeyS') this.menuCursor = (this.menuCursor + 1) % 3;
-      else if (code === 'Enter' || code === 'Space' || code === 'Digit5') {
-        if (this.menuCursor === 0) this.startCampaign();
-        else if (this.menuCursor === 1) this.openMenu('levelSelect');
-        else this.loadSavedGame();
+    if (this.state === 'cutscene') {
+      if (code === 'Escape') this.advanceCutscene(true);
+      else if (code === 'Enter' || code === 'Space' || code === 'Digit5') this.advanceCutscene(false);
+      return;
+    }
+    if (this.state === 'stageBanner') {
+      if (code === 'Enter' || code === 'Space' || code === 'Digit5' || code === 'Escape') {
+        const fn = this.stageBannerNext;
+        this.stageBannerNext = null;
+        fn?.();
       }
+      return;
+    }
+    if (this.state === 'storyDialog') {
+      if (code === 'Escape') this.advanceStoryDialog(true);
+      else if (code === 'Enter' || code === 'Space' || code === 'Digit5') this.advanceStoryDialog(false);
+      return;
+    }
+    if (this.state === 'battle' && this.battleScene) {
+      if ((code === 'Enter' || code === 'Space' || code === 'Escape') && this.battleScene.elapsed >= 450) {
+        this.battleScene.skip();
+        this.finishBattleScene();
+      }
+      return;
+    }
+    if (this.state === 'moveAnim') return;
+    if (this.state === 'menu') {
+      if (code === 'ArrowUp' || code === 'KeyW') this.menuCursor = (this.menuCursor + 5) % 6;
+      else if (code === 'ArrowDown' || code === 'KeyS') this.menuCursor = (this.menuCursor + 1) % 6;
+      else if (code === 'Enter' || code === 'Space' || code === 'Digit5') {
+        this.confirmMainMenuOption(this.menuCursor);
+        return;
+      }
+      this.paint();
+      return;
+    }
+    if (this.state === 'skirmishSetup') {
+      if (code === 'ArrowUp' || code === 'KeyW') this.skirmishCursor = (this.skirmishCursor + 4) % 5;
+      else if (code === 'ArrowDown' || code === 'KeyS') this.skirmishCursor = (this.skirmishCursor + 1) % 5;
+      else if (code === 'ArrowLeft' || code === 'KeyA') this.adjustSkirmishOption(this.skirmishCursor, -1);
+      else if (code === 'ArrowRight' || code === 'KeyD') this.adjustSkirmishOption(this.skirmishCursor, 1);
+      else if (code === 'Enter' || code === 'Space' || code === 'Digit5') {
+        if (this.skirmishCursor === 4) this.startConfiguredSkirmish();
+        else this.adjustSkirmishOption(this.skirmishCursor, 1);
+        return;
+      } else if (code === 'Escape') { this.openMenu('menu'); return; }
+      this.paint();
+      return;
+    }
+    if (this.state === 'settings') {
+      if (code === 'ArrowUp' || code === 'KeyW') this.settingsCursor = (this.settingsCursor + 2) % 3;
+      else if (code === 'ArrowDown' || code === 'KeyS') this.settingsCursor = (this.settingsCursor + 1) % 3;
+      else if (code === 'Enter' || code === 'Space' || code === 'ArrowLeft' || code === 'ArrowRight') {
+        this.toggleSettingOption(this.settingsCursor);
+        return;
+      } else if (code === 'Escape') {
+        this.saveSettings();
+        this.state = this.subMenuReturnState;
+      }
+      this.paint();
+      return;
+    }
+    if (this.state === 'instructions') {
+      if (code === 'ArrowUp' || code === 'KeyW') this.helpScroll = Math.max(0, this.helpScroll - 1);
+      else if (code === 'ArrowDown' || code === 'KeyS') this.helpScroll = Math.min(28, this.helpScroll + 1);
+      else if (code === 'Escape' || code === 'Enter') this.state = this.subMenuReturnState;
       this.paint();
       return;
     }
     if (this.state === 'levelSelect') {
       if (code === 'ArrowUp' || code === 'KeyW') this.mapIndex = (this.mapIndex + this.mapList.length - 1) % this.mapList.length;
       else if (code === 'ArrowDown' || code === 'KeyS') this.mapIndex = (this.mapIndex + 1) % this.mapList.length;
-      else if (code === 'Enter' || code === 'Space' || code === 'Digit5') this.loadAndStartMap(this.mapList[this.mapIndex]);
+      else if (code === 'Enter' || code === 'Space' || code === 'Digit5') this.loadAndStartMap(this.mapList[this.mapIndex], { includeIntro: false });
       else if (code === 'Escape') { this.openMenu('menu'); return; }
       this.paint();
       return;
     }
     if (this.state === 'pauseMenu') {
-      if (code === 'ArrowUp' || code === 'KeyW') this.pauseCursor = (this.pauseCursor + 3) % 4;
-      else if (code === 'ArrowDown' || code === 'KeyS') this.pauseCursor = (this.pauseCursor + 1) % 4;
+      const len = this.getPauseOptions().length;
+      if (code === 'ArrowUp' || code === 'KeyW') this.pauseCursor = (this.pauseCursor + len - 1) % len;
+      else if (code === 'ArrowDown' || code === 'KeyS') this.pauseCursor = (this.pauseCursor + 1) % len;
       else if (code === 'Enter' || code === 'Space' || code === 'Digit5') { this.confirmPauseOption(this.pauseCursor); return; }
       else if (code === 'Escape') this.state = 'play';
       this.paint();
@@ -512,6 +976,29 @@ class AncientEmpiresWeb {
     }
     if (this.state === 'victory' || this.state === 'defeat') { this.pointer(0, 0); return; }
     if (this.state === 'dialog') { this.state = 'play'; this.paint(); return; }
+    if (this.state === 'targetSelect') {
+      const n = this.targetCandidates.length;
+      if (n === 0) { this.backFromTargetSelect(); return; }
+      if (code === 'ArrowUp' || code === 'ArrowLeft' || code === 'KeyW' || code === 'KeyA') {
+        this.targetCursor = (this.targetCursor + n - 1) % n;
+        const t = this.targetCandidates[this.targetCursor];
+        this.cursor = { x: t.x, y: t.y };
+        this.centerCameraOn(t.x, t.y);
+      } else if (code === 'ArrowDown' || code === 'ArrowRight' || code === 'KeyS' || code === 'KeyD') {
+        this.targetCursor = (this.targetCursor + 1) % n;
+        const t = this.targetCandidates[this.targetCursor];
+        this.cursor = { x: t.x, y: t.y };
+        this.centerCameraOn(t.x, t.y);
+      } else if (code === 'Enter' || code === 'Space' || code === 'Digit5') {
+        this.confirmTargetSelection();
+        return;
+      } else if (code === 'Escape') {
+        this.backFromTargetSelect();
+        return;
+      }
+      this.paint();
+      return;
+    }
     if (this.state === 'actionMenu') {
       if (code === 'ArrowUp' || code === 'KeyW') this.actionCursor = (this.actionCursor + this.actionOptions.length - 1) % this.actionOptions.length;
       else if (code === 'ArrowDown' || code === 'KeyS') this.actionCursor = (this.actionCursor + 1) % this.actionOptions.length;
@@ -538,16 +1025,27 @@ class AncientEmpiresWeb {
     };
     if (movement[code]) { this.moveCursor(...movement[code]); return; }
     if (code === 'Enter' || code === 'Space' || code === 'Digit5') { this.selectTile(this.cursor.x, this.cursor.y); return; }
-    if (code === 'Escape') {
+    if (code === 'KeyK' || code === 'Digit9') { this.focusCommander(); return; }
+    if (code === 'Escape' || code === 'KeyQ' || code === 'Tab') {
       if (this.selected || this.reachable || this.attackTargets.length > 0) this.cancelSelection();
       else { this.persistState(); this.pauseCursor = 0; this.state = 'pauseMenu'; this.paint(); }
       return;
     }
-    if (code === 'KeyE') this.endTurn();
+    if (code === 'KeyE' || code === 'Backspace') this.endTurn();
+  }
+
+  focusCommander() {
+    const mySelector = 1 + this.playerIndex;
+    const cmd = this.units.find(u => u.type === 9 && u.playerSelector === mySelector && u.action !== 3);
+    if (cmd) {
+      this.cursor = { x: cmd.x, y: cmd.y };
+      this.centerCameraOn(cmd.x, cmd.y);
+      this.paint();
+    }
   }
 
   startCampaign() {
-    this.loadAndStartMap('m0');
+    this.loadAndStartMap('m0', { includeIntro: true });
   }
 
   tileProperty(x, y) {
@@ -600,12 +1098,17 @@ class AncientEmpiresWeb {
       this.selected.x = this.moveOrigin.x;
       this.selected.y = this.moveOrigin.y;
       this.selected.movedThisTurn = false;
+      this.cursor = { x: this.moveOrigin.x, y: this.moveOrigin.y };
+      this.centerCameraOn(this.cursor.x, this.cursor.y);
     }
     this.selected = null;
     this.moveOrigin = null;
     this.reachable = null;
+    this.previewPath = null;
     this.attackTargets = [];
+    this.targetCandidates = [];
     this.actionOptions = [];
+    this.moveAnim = null;
     this.state = 'play';
     this.paint();
   }
@@ -618,21 +1121,41 @@ class AncientEmpiresWeb {
     const target = this.unitAt(x, y);
 
     if (this.selected) {
-      // Attack an enemy directly if highlighted
+      // Attack an enemy directly when already in range (opens forecast target confirmation)
       if (target && target.playerSelector !== mySelector) {
         const valid = getAttackableTargets(this.selected, this.units, p => this.teamFor(p));
-        if (valid.some(t => t.id === target.id)) {
-          this.performAttack(this.selected, target);
+        const idx = valid.findIndex(t => t.id === target.id);
+        if (idx >= 0) {
+          this.openTargetSelect('attack', valid, idx);
           return;
         }
       }
-      // Confirm move to current tile or reachable tile -> open Action Menu
-      if ((x === this.selected.x && y === this.selected.y) || this.reachable?.costs.has(`${x},${y}`)) {
-        const moved = x !== this.moveOrigin.x || y !== this.moveOrigin.y;
-        this.selected.x = x;
-        this.selected.y = y;
-        this.selected.movedThisTurn = moved;
+      // Stay on current tile -> open Action Menu directly
+      if (x === this.selected.x && y === this.selected.y) {
+        this.previewPath = null;
         this.openActionMenu(this.selected);
+        return;
+      }
+      // Step-by-step walk along traceRoute to reachable destination
+      if (this.reachable?.costs.has(`${x},${y}`)) {
+        const path = traceRoute(this.reachable, this.selected.x, this.selected.y, x, y);
+        const unit = this.selected;
+        unit.movedThisTurn = true;
+        this.previewPath = null;
+        if (path.length <= 2) {
+          unit.x = x;
+          unit.y = y;
+          this.openActionMenu(unit);
+        } else {
+          this.moveAnim = {
+            unit,
+            path,
+            stepIndex: 1,
+            onDone: () => this.openActionMenu(unit),
+          };
+          this.state = 'moveAnim';
+          this.paint();
+        }
         return;
       }
       this.cancelSelection();
@@ -644,6 +1167,7 @@ class AncientEmpiresWeb {
       this.selected = target;
       this.moveOrigin = { x: target.x, y: target.y };
       this.reachable = this.showRange(target);
+      this.previewPath = null;
       this.attackTargets = getAttackableTargets(target, this.units, p => this.teamFor(p));
       this.paint();
       return;
@@ -661,31 +1185,91 @@ class AncientEmpiresWeb {
   openActionMenu(unit) {
     const opts = [];
     const targets = getAttackableTargets(unit, this.units, p => this.teamFor(p));
-    for (const target of targets) {
-      opts.push({
-        kind: 'attack',
-        label: targets.length > 1 ? `ATK ${this.unitName(target.type).slice(0, 8)} (${target.hp})` : `ATTACK (${target.hp} HP)`,
-        target,
-      });
+    if (targets.length > 0) {
+      opts.push({ kind: 'attack', icon: 2, label: this.assets.langStrings?.[62] || 'ATTACK', targets });
     }
     const myPal = this.playerPalette[unit.playerSelector] ?? unit.playerSelector;
     const tileAct = getTileActionForUnit(unit, this.rawTile(unit.x, unit.y), this.tileProperty(unit.x, unit.y), myPal);
-    if (tileAct === 'capture') opts.push({ kind: 'capture', label: 'CAPTURE' });
-    else if (tileAct === 'repair') opts.push({ kind: 'repair', label: 'REPAIR' });
+    if (tileAct === 'capture') opts.push({ kind: 'capture', icon: 1, label: this.assets.langStrings?.[67] || 'OCCUPY' });
+    else if (tileAct === 'repair') opts.push({ kind: 'repair', icon: 1, label: this.assets.langStrings?.[68] || 'REPAIR' });
 
     // Sorceress (type 3) can raise Skeleton from adjacent tombstone (i.java:2515-2530)
     if (unit.type === 3) {
-      const tomb = this.units.find(
+      const tombs = this.units.filter(
         u => u.action === 3 && Math.abs(u.x - unit.x) + Math.abs(u.y - unit.y) === 1 && !this.unitAt(u.x, u.y)
       );
-      if (tomb) opts.push({ kind: 'raise', label: 'RAISE SKELETON', tomb });
+      if (tombs.length > 0) opts.push({ kind: 'raise', icon: 3, label: this.assets.langStrings?.[69] || 'RAISE', tombs });
     }
 
-    opts.push({ kind: 'wait', label: 'WAIT' });
+    opts.push({ kind: 'wait', icon: 5, label: this.assets.langStrings?.[64] || 'END MOVE' });
+    opts.push({ kind: 'cancel', icon: 6, label: this.assets.langStrings?.[65] || 'CANCEL' });
     this.actionOptions = opts;
     this.actionCursor = 0;
     this.attackTargets = targets;
     this.state = 'actionMenu';
+    this.paint();
+  }
+
+  openTargetSelect(kind, candidates, startIdx = 0) {
+    this.targetKind = kind;
+    this.targetCandidates = candidates;
+    this.targetCursor = Math.max(0, Math.min(candidates.length - 1, startIdx));
+    const focused = candidates[this.targetCursor];
+    if (focused) {
+      this.cursor = { x: focused.x, y: focused.y };
+      this.centerCameraOn(focused.x, focused.y);
+    }
+    this.state = 'targetSelect';
+    this.paint();
+  }
+
+  backFromTargetSelect() {
+    if (this.selected) {
+      this.cursor = { x: this.selected.x, y: this.selected.y };
+      this.centerCameraOn(this.cursor.x, this.cursor.y);
+      this.targetCandidates = [];
+      this.openActionMenu(this.selected);
+    } else {
+      this.cancelSelection();
+    }
+  }
+
+  confirmTargetSelection() {
+    const unit = this.selected;
+    const chosen = this.targetCandidates[this.targetCursor];
+    if (!unit || !chosen) { this.cancelSelection(); return; }
+    if (this.targetKind === 'attack') {
+      this.performAttack(unit, chosen);
+    } else if (this.targetKind === 'raise') {
+      this.raiseSkeletonOn(unit, chosen);
+    }
+  }
+
+  raiseSkeletonOn(unit, tomb) {
+    const stats = computeUnitStats(this.assets.unitRecords[10], 0);
+    Object.assign(tomb, {
+      ...stats,
+      type: 10,
+      playerSelector: unit.playerSelector,
+      palette: unit.palette,
+      hp: 100,
+      xp: 0,
+      level: 0,
+      status: 0,
+      action: 1,
+      tombTimer: 0,
+    });
+    unit.action = 1;
+    this.sfx('raise');
+    this.selected = null;
+    this.moveOrigin = null;
+    this.reachable = null;
+    this.previewPath = null;
+    this.attackTargets = [];
+    this.targetCandidates = [];
+    this.showToast('RAISED SKELETON!', 900);
+    this.persistState();
+    this.checkMatchOutcome();
     this.paint();
   }
 
@@ -694,33 +1278,27 @@ class AncientEmpiresWeb {
     const unit = this.selected;
     if (!opt || !unit) { this.cancelSelection(); return; }
 
-    if (opt.kind === 'attack' && opt.target) {
-      this.performAttack(unit, opt.target);
+    if (opt.kind === 'cancel') {
+      this.cancelSelection();
+      return;
+    }
+    if (opt.kind === 'attack' && opt.targets?.length) {
+      this.openTargetSelect('attack', opt.targets, 0);
       return;
     }
     if (opt.kind === 'capture' || opt.kind === 'repair') {
       const myPal = this.playerPalette[unit.playerSelector] ?? unit.playerSelector;
       this.assets.map.tiles[unit.x][unit.y] = encodeBuildingTile(this.rawTile(unit.x, unit.y), myPal);
       unit.action = 1;
-      playAe2Sfx('capture');
-      this.showToast(opt.kind === 'capture' ? 'CAPTURED!' : 'REPAIRED!', 900);
-    } else if (opt.kind === 'raise' && opt.tomb) {
-      const stats = computeUnitStats(this.assets.unitRecords[10], 0);
-      Object.assign(opt.tomb, {
-        ...stats,
-        type: 10,
-        playerSelector: unit.playerSelector,
-        palette: unit.palette,
-        hp: 100,
-        xp: 0,
-        level: 0,
-        status: 0,
-        action: 1,
-        tombTimer: 0,
-      });
-      unit.action = 1;
-      playAe2Sfx('raise');
-      this.showToast('RAISED SKELETON!', 900);
+      this.sfx('capture');
+      this.showToast(opt.kind === 'capture' ? (this.assets.langStrings?.[73] || 'OCCUPIED!') : (this.assets.langStrings?.[74] || 'REPAIRED!'), 900);
+    } else if (opt.kind === 'raise' && opt.tombs?.length) {
+      if (opt.tombs.length === 1) {
+        this.raiseSkeletonOn(unit, opt.tombs[0]);
+      } else {
+        this.openTargetSelect('raise', opt.tombs, 0);
+      }
+      return;
     } else {
       unit.action = 1;
     }
@@ -728,14 +1306,18 @@ class AncientEmpiresWeb {
     this.selected = null;
     this.moveOrigin = null;
     this.reachable = null;
+    this.previewPath = null;
     this.attackTargets = [];
+    this.targetCandidates = [];
     this.state = this.state === 'dialog' ? 'dialog' : 'play';
     this.persistState();
     this.checkMatchOutcome();
     this.paint();
   }
 
-  performAttack(attacker, defender) {
+  performAttack(attacker, defender, onDone = null) {
+    const aTerrain = this.tileProperty(attacker.x, attacker.y) ?? 0;
+    const dTerrain = this.tileProperty(defender.x, defender.y) ?? 0;
     const res = executeCombat({
       attacker,
       defender,
@@ -746,14 +1328,45 @@ class AncientEmpiresWeb {
     this.selected = null;
     this.moveOrigin = null;
     this.reachable = null;
+    this.previewPath = null;
     this.attackTargets = [];
-    const msg = res.counterDamage > 0
-      ? `HIT -${res.damage} · COUNTER -${res.counterDamage}${res.attackerLeveled ? ' · LV UP!' : ''}`
-      : `HIT -${res.damage}${res.attackerLeveled ? ' · LV UP!' : ''}`;
-    playAe2Sfx(res.attackerLeveled ? 'levelup' : 'attack');
-    this.showToast(msg, 1200);
-    this.persistState();
-    this.checkMatchOutcome();
+    this.targetCandidates = [];
+
+    const finalize = () => {
+      const msg = res.attackerLeveled
+        ? `PROMOTED TO LV ${attacker.level + 1}!`
+        : (!this.settings.fightAnimation
+            ? (res.counterDamage > 0 ? `HIT -${res.damage} · COUNTER -${res.counterDamage}` : `HIT -${res.damage}`)
+            : null);
+      if (res.attackerLeveled) this.sfx('levelup');
+      else if (!this.settings.fightAnimation) this.sfx('attack');
+      this.persistState();
+      if (msg) this.showToast(msg, 1000);
+      this.checkMatchOutcome();
+      onDone?.();
+      this.paint();
+    };
+
+    if (this.settings.fightAnimation) {
+      this.battleScene = new BattleScene({
+        attacker,
+        attackerName: this.unitName(attacker.type),
+        attackerTerrain: aTerrain,
+        defender,
+        defenderName: this.unitName(defender.type),
+        defenderTerrain: dTerrain,
+        combatResult: res,
+        assets: this.assets,
+        width: WIDTH,
+        height: HEIGHT,
+        onSound: kind => this.sfx(kind),
+      });
+      this.battleOnDone = finalize;
+      this.state = 'battle';
+      this.paint();
+    } else {
+      finalize();
+    }
   }
 
   getRecruitList() {
@@ -791,7 +1404,7 @@ class AncientEmpiresWeb {
       action: 1,
       movedThisTurn: false,
     });
-    playAe2Sfx('recruit');
+    this.sfx('recruit');
     this.recruitCastle = null;
     this.state = 'play';
     this.persistState();
@@ -808,6 +1421,13 @@ class AncientEmpiresWeb {
     this.cursor.x = Math.max(0, Math.min(this.assets.map.width - 1, this.cursor.x + dx));
     this.cursor.y = Math.max(0, Math.min(this.assets.map.height - 1, this.cursor.y + dy));
     this.centerCameraOn(this.cursor.x, this.cursor.y);
+    if (this.selected && this.reachable) {
+      if (this.reachable.costs.has(`${this.cursor.x},${this.cursor.y}`)) {
+        this.previewPath = traceRoute(this.reachable, this.selected.x, this.selected.y, this.cursor.x, this.cursor.y);
+      } else {
+        this.previewPath = null;
+      }
+    }
     this.paint();
   }
 
@@ -822,7 +1442,9 @@ class AncientEmpiresWeb {
     this.selected = null;
     this.moveOrigin = null;
     this.reachable = null;
+    this.previewPath = null;
     this.attackTargets = [];
+    this.targetCandidates = [];
     const res = advancePlayerTurn({
       playerIndex: this.playerIndex,
       playerCount: this.playerCount,
@@ -850,12 +1472,24 @@ class AncientEmpiresWeb {
     } else {
       this.aiPending = false;
       this.status.textContent = `TURN ${this.turn + 1} · +${res.income}G`;
+      const meta = CAMPAIGN_STAGE_META[this.currentMapId];
+      const turnKey = this.turn + 1;
+      const turnScripts = meta?.turnDialogs?.[turnKey];
+      if (turnScripts && this.settings.showStory && !this.triggeredTurnDialogs.has(turnKey)) {
+        this.triggeredTurnDialogs.add(turnKey);
+        this.playStoryDialogs(turnScripts, () => {
+          this.showToast(`PLAYER ${this.playerIndex + 1} TURN (+${res.income}G)`, 900);
+          this.paint();
+        });
+        return;
+      }
       this.showToast(`PLAYER ${this.playerIndex + 1} TURN (+${res.income}G)`, 900);
     }
     this.paint();
   }
 
   runAiStep() {
+    if (this.state !== 'play') return;
     const mySelector = 1 + this.playerIndex;
     const myPal = this.playerPalette[mySelector] ?? mySelector;
     const idleUnit = this.units.find(u => u.playerSelector === mySelector && u.action === 0 && u.hp > 0);
@@ -873,7 +1507,7 @@ class AncientEmpiresWeb {
       idleUnit.y = act.y;
       if (act.kind === 'capture' || act.kind === 'repair') {
         this.assets.map.tiles[act.x][act.y] = encodeBuildingTile(this.rawTile(act.x, act.y), myPal);
-        playAe2Sfx('capture');
+        this.sfx('capture');
       } else if (act.kind === 'raise') {
         const tomb = this.units.find(u => u.id === act.tombId && u.action === 3);
         if (tomb) {
@@ -882,18 +1516,17 @@ class AncientEmpiresWeb {
             ...stats, type: 10, playerSelector: mySelector, palette: myPal,
             hp: 100, xp: 0, level: 0, status: 0, action: 1, tombTimer: 0,
           });
-          playAe2Sfx('raise');
+          this.sfx('raise');
         }
       } else if (act.kind === 'attack') {
         const target = this.units.find(u => u.id === act.targetId);
         if (target && target.hp > 0) {
-          executeCombat({
-            attacker: idleUnit,
-            defender: target,
-            terrainAt: (x, y) => this.tileProperty(x, y) ?? 0,
-            rawTileAt: (x, y) => this.rawTile(x, y),
+          this.aiTimer = 260;
+          this.performAttack(idleUnit, target, () => {
+            if (this.state === 'dialog') this.state = 'play';
+            this.centerCameraOn(idleUnit.x, idleUnit.y);
           });
-          playAe2Sfx('attack');
+          return;
         }
       }
       idleUnit.action = 1;
@@ -942,17 +1575,89 @@ class AncientEmpiresWeb {
     this.endTurn();
   }
 
+  spawnWaveUnit(type, playerSelector, x, y) {
+    const rec = this.assets.unitRecords[type];
+    if (!rec) return null;
+    const stats = computeUnitStats(rec, 0);
+    const unit = {
+      id: this.nextUnitId++,
+      type,
+      playerSelector,
+      palette: this.playerPalette[playerSelector] ?? playerSelector,
+      x,
+      y,
+      ...stats,
+      hp: 100,
+      xp: 0,
+      level: 0,
+      status: 0,
+      frameIndex: 0,
+      action: 0,
+      movedThisTurn: false,
+    };
+    this.units.push(unit);
+    return unit;
+  }
+
   checkMatchOutcome() {
+    const galamarStages = new Set(['m0', 'm2', 'm4', 'm6']);
+    const kingAlive = this.units.some(u => u.playerSelector === 1 && u.type === 9 && u.action !== 3 && u.hp > 0);
     const aliveHuman = this.units.some(u => u.playerSelector === 1 && u.action !== 3 && u.hp > 0);
     const aliveCpu = this.units.some(u => u.playerSelector !== 1 && u.action !== 3 && u.hp > 0);
-    if (!aliveCpu) {
+
+    // Port of i.java:4907-4919: King Galamar falling triggers immediate defeat on escort/story stages.
+    if (!aliveHuman || (galamarStages.has(this.currentMapId) && !kingAlive)) {
       this.aiPending = false;
-      this.state = 'victory';
-      this.status.textContent = 'VICTORY!';
-    } else if (!aliveHuman) {
-      this.aiPending = false;
+      this.sfx('defeat');
       this.state = 'defeat';
       this.status.textContent = 'DEFEAT!';
+      return;
+    }
+
+    // Port of i.java:5044-5085: M0 Temple Raiders Wave 2 reinforcement ambush once initial raiders fall.
+    if (!aliveCpu && this.currentMapId === 'm0' && this.settings.showStory && !this.m0Reinforced) {
+      this.m0Reinforced = true;
+      this.aiPending = false;
+      const p1 = !this.unitAt(1, 2) ? [1, 2] : [1, 1];
+      const p2 = !this.unitAt(10, 9) ? [10, 9] : [10, 10];
+      if (!this.unitAt(p1[0], p1[1])) this.spawnWaveUnit(1, 2, p1[0], p1[1]);
+      if (!this.unitAt(p2[0], p2[1])) this.spawnWaveUnit(0, 2, p2[0], p2[1]);
+      this.playStoryDialogs([
+        { langIdx: 225, portrait: 5, focus: p1 },
+        { langIdx: 226, portrait: 0, focus: p2 },
+      ], () => {
+        this.state = 'play';
+        this.persistState();
+        this.paint();
+      });
+      return;
+    }
+
+    if (!aliveCpu) {
+      this.aiPending = false;
+      this.sfx('victory');
+      const meta = CAMPAIGN_STAGE_META[this.currentMapId];
+      const showVic = () => {
+        this.state = 'victory';
+        this.status.textContent = 'VICTORY!';
+        this.paint();
+      };
+      const playEndCutscene = () => {
+        if (this.settings.showStory && meta?.victoryCutscenes?.length) {
+          const specs = meta.victoryCutscenes.map(idx => ({
+            image: this.assets.images[`intro${idx}`] ?? null,
+            text: `${this.assets.langStrings?.[215 + idx] || ''}\n\n${this.assets.langStrings?.[288] || ''}`,
+          }));
+          this.playCutsceneSequence(specs, showVic);
+        } else {
+          showVic();
+        }
+      };
+      if (this.settings.showStory && meta?.victoryDialogs?.length && this.state !== 'victory') {
+        this.playStoryDialogs(meta.victoryDialogs, playEndCutscene);
+      } else {
+        playEndCutscene();
+      }
     }
   }
 
@@ -964,6 +1669,8 @@ class AncientEmpiresWeb {
       balances: this.balances,
       cursor: this.cursor,
       units: this.units,
+      m0Reinforced: this.m0Reinforced,
+      triggeredTurnDialogs: [...this.triggeredTurnDialogs],
       tiles: Array.from(this.assets.map.tiles, col => Array.from(col)),
     };
     try { localStorage.setItem(this.saveKey, JSON.stringify(data)); } catch { /* ignore */ }
@@ -984,32 +1691,25 @@ class AncientEmpiresWeb {
       this.turn = saved.turn || 0;
       this.playerIndex = saved.playerIndex || 0;
       this.cursor = saved.cursor || this.cursor;
+      this.m0Reinforced = !!saved.m0Reinforced;
+      this.triggeredTurnDialogs = new Set(Array.isArray(saved.triggeredTurnDialogs) ? saved.triggeredTurnDialogs : []);
       this.state = 'play';
+      this.status.textContent = `${this.currentMapId.toUpperCase()} · RESUMED`;
       this.paint();
     } catch {
       this.startCampaign();
     }
   }
 
-  renderRange(ctx, offsetX = 0, offsetY = 0) {
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(0, 28, WIDTH, HEIGHT - 56);
-    ctx.clip();
-    if (this.state === 'play' && this.reachable) {
-      ctx.fillStyle = 'rgba(80,220,255,.32)';
-      for (const [x, y] of this.reachable.cells) {
-        ctx.fillRect(offsetX + x * 24 - this.cameraX, 28 + offsetY + y * 24 - this.cameraY, 24, 24);
-      }
+  mapLabel(id) {
+    if (id.startsWith('m')) {
+      const idx = CAMPAIGN_MAPS.indexOf(id);
+      const name = this.assets.langStrings?.[121 + idx];
+      return name ? `${id.toUpperCase()} · ${name}` : id.toUpperCase();
     }
-    if ((this.state === 'play' || this.state === 'actionMenu') && this.attackTargets.length > 0) {
-      ctx.strokeStyle = '#ff4b4b';
-      ctx.lineWidth = 2;
-      for (const t of this.attackTargets) {
-        ctx.strokeRect(offsetX + t.x * 24 - this.cameraX + 1, 28 + offsetY + t.y * 24 - this.cameraY + 1, 22, 22);
-      }
-    }
-    ctx.restore();
+    const sIdx = SKIRMISH_MAPS.indexOf(id);
+    const name = this.assets.langStrings?.[101 + sIdx];
+    return name ? `${id.toUpperCase()} ${name}` : id.toUpperCase();
   }
 
   drawHudIcon(ctx, hoverUnit) {
@@ -1054,9 +1754,53 @@ class AncientEmpiresWeb {
     }
   }
 
+  renderTargetForecast(ctx) {
+    const attacker = this.selected;
+    const target = this.targetCandidates[this.targetCursor];
+    if (!attacker || !target) return;
+    const isAttack = this.targetKind === 'attack';
+    const boxY = 30;
+    ctx.fillStyle = 'rgba(20, 16, 26, 0.94)';
+    ctx.fillRect(6, boxY, WIDTH - 12, 36);
+    ctx.strokeStyle = isAttack ? '#ff4b4b' : '#9cff7b';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(6, boxY, WIDTH - 12, 36);
+
+    if (!isAttack) {
+      centerText(ctx, 'SELECT TOMBSTONE TO RAISE SKELETON', boxY + 12, { font: 'bold 8px monospace', color: '#9cff7b' });
+      centerText(ctx, 'ENTER / TAP TARGET · ESC BACK', boxY + 26, { font: '8px monospace', color: '#e6decb' });
+      return;
+    }
+
+    const aProp = this.tileProperty(attacker.x, attacker.y) ?? 0;
+    const dProp = this.tileProperty(target.x, target.y) ?? 0;
+    const aMod = attackModifierFor(attacker, target, attacker.x, attacker.y, aProp, this.rawTile(attacker.x, attacker.y));
+    const aDef = defenseModifierFor(attacker, attacker.x, attacker.y, aProp, this.rawTile(attacker.x, attacker.y));
+    const dDef = defenseModifierFor(target, target.x, target.y, dProp, this.rawTile(target.x, target.y));
+
+    const hudImg = this.assets.images.hud_icons;
+    if (hudImg) {
+      drawRegionMIDP(ctx, hudImg, 0, 0, 13, 16, 0, 12, boxY + 3, MIDP.LEFT | MIDP.TOP);
+      drawRegionMIDP(ctx, hudImg, 13, 0, 13, 16, 0, 12, boxY + 19, MIDP.LEFT | MIDP.TOP);
+    }
+    ctx.font = 'bold 8px monospace';
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#5bb8ff';
+    ctx.fillText(`${this.unitName(attacker.type).slice(0, 10)} (${attacker.hp})`, 28, boxY + 10);
+    ctx.fillStyle = '#f4dfb3';
+    ctx.fillText(`ATK:${attacker.atkMin + aMod}-${attacker.atkMax + aMod} DEF:${attacker.defense + aDef}`, 28, boxY + 26);
+
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#ff7272';
+    ctx.fillText(`${this.unitName(target.type).slice(0, 10)} (${target.hp})`, WIDTH - 12, boxY + 10);
+    ctx.fillStyle = '#e6decb';
+    ctx.fillText(`DEF:${target.defense + dDef} LV:${target.level}`, WIDTH - 12, boxY + 26);
+  }
+
   paint() {
     const ctx = this.ctx;
     ctx.imageSmoothingEnabled = false;
+    ctx.textBaseline = 'alphabetic';
     ctx.fillStyle = '#0e131a';
     ctx.fillRect(0, 0, WIDTH, HEIGHT);
 
@@ -1070,6 +1814,23 @@ class AncientEmpiresWeb {
       return;
     }
 
+    if (this.state === 'cutscene') {
+      const cur = this.cutsceneQueue[0] ?? { image: null, text: '' };
+      this.cutsceneMaxScroll = renderCutsceneScreen(ctx, {
+        image: cur.image,
+        text: cur.text,
+        scrollPx: this.cutsceneScroll,
+        width: WIDTH,
+        height: HEIGHT,
+      });
+      return;
+    }
+
+    if (this.state === 'battle' && this.battleScene) {
+      this.battleScene.render(ctx);
+      return;
+    }
+
     if (this.state === 'menu') {
       const grad = ctx.createLinearGradient(0, 0, 0, HEIGHT);
       grad.addColorStop(0, '#1d1624');
@@ -1077,21 +1838,129 @@ class AncientEmpiresWeb {
       grad.addColorStop(1, '#0b0e15');
       ctx.fillStyle = grad;
       ctx.fillRect(0, 0, WIDTH, HEIGHT);
-      drawImageAt(ctx, this.assets.images.logo, 1, 20, 238, 85);
-      const labels = [
-        this.assets.langStrings?.[1] || 'PLAY CAMPAIGN',
-        this.assets.langStrings?.[3] || 'SELECT LEVEL',
-        'CONTINUE SAVED',
-      ];
-      labels.forEach((lbl, i) => {
-        const y = 152 + i * 30;
+      drawImageAt(ctx, this.assets.images.logo, 1, 14, 238, 85);
+      const items = this.getMainMenuItems();
+      const menuSheet = this.assets.images.menu_icons;
+      items.forEach((item, i) => {
+        const y = 114 + i * 26;
         ctx.fillStyle = i === this.menuCursor ? '#3c2a18' : '#1b1410';
-        ctx.fillRect(34, y, 172, 24);
+        ctx.fillRect(26, y, 188, 22);
         ctx.strokeStyle = i === this.menuCursor ? '#ffd84d' : '#7b6344';
-        ctx.strokeRect(34, y, 172, 24);
-        centerText(ctx, lbl, y + 12, { font: 'bold 10px monospace', color: i === this.menuCursor ? '#ffd84d' : '#f1e7d2' });
+        ctx.strokeRect(26, y, 188, 22);
+        if (menuSheet) {
+          const mMeta = this.assets.sprites.menu_icons;
+          const fw = mMeta?.frameWidth ?? 25;
+          const fh = mMeta?.frameHeight ?? 25;
+          ctx.drawImage(menuSheet, item.icon * fw, 0, fw, fh, 30, y + 1, 20, 20);
+        }
+        ctx.fillStyle = i === this.menuCursor ? '#ffd84d' : '#f1e7d2';
+        ctx.font = 'bold 9px monospace';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(item.label, 54, y + 11, 152);
       });
       centerText(ctx, 'TAP OR ARROWS · ENTER', 292, { font: '8px monospace', color: '#9eb092' });
+      return;
+    }
+
+    if (this.state === 'skirmishSetup') {
+      centerText(ctx, 'SKIRMISH SETUP', 20, { font: 'bold 11px monospace', color: '#ffd84d' });
+      const mapId = SKIRMISH_MAPS[this.skirmishConfig.mapIdx] || 's0';
+      const rows = [
+        ['MAP', this.mapLabel(mapId)],
+        ['STARTING GOLD', `${this.skirmishConfig.gold}G`],
+        ['PLAYER 1 (BLUE)', this.skirmishConfig.players[0] === 1 ? 'HUMAN' : 'CPU'],
+        ['PLAYER 2 (RED)', this.skirmishConfig.players[1] === 1 ? 'HUMAN' : 'CPU'],
+      ];
+      rows.forEach(([k, v], i) => {
+        const y = 58 + i * 34;
+        ctx.fillStyle = i === this.skirmishCursor ? '#3b2e1b' : '#181c24';
+        ctx.fillRect(18, y, WIDTH - 36, 28);
+        ctx.strokeStyle = i === this.skirmishCursor ? '#ffd84d' : '#524433';
+        ctx.strokeRect(18, y, WIDTH - 36, 28);
+        ctx.font = '8px monospace';
+        ctx.fillStyle = '#a9d69d';
+        ctx.textAlign = 'left';
+        ctx.fillText(k, 26, y + 11);
+        ctx.font = 'bold 9px monospace';
+        ctx.fillStyle = '#ffd84d';
+        ctx.fillText(`◀  ${v}  ▶`, 26, y + 23, WIDTH - 52);
+      });
+      const startSel = this.skirmishCursor === 4;
+      ctx.fillStyle = startSel ? '#3c2a18' : '#241a14';
+      ctx.fillRect(16, 280, 102, 24);
+      ctx.strokeStyle = startSel ? '#ffd84d' : '#8b6f47';
+      ctx.strokeRect(16, 280, 102, 24);
+      ctx.font = 'bold 9px monospace';
+      ctx.fillStyle = '#ffd84d';
+      ctx.textAlign = 'center';
+      ctx.fillText('START BATTLE', 67, 295);
+
+      ctx.fillStyle = '#1b1410';
+      ctx.fillRect(126, 280, 98, 24);
+      ctx.strokeStyle = '#8b6f47';
+      ctx.strokeRect(126, 280, 98, 24);
+      ctx.fillStyle = '#e6decb';
+      ctx.fillText('BACK · ESC', 175, 295);
+      return;
+    }
+
+    if (this.state === 'settings') {
+      centerText(ctx, 'SETTINGS', 24, { font: 'bold 11px monospace', color: '#ffd84d' });
+      const rows = [
+        ['FIGHT ANIMATION', this.settings.fightAnimation ? 'ON' : 'OFF'],
+        ['SOUND FX', this.settings.sound ? 'ON' : 'OFF'],
+        ['CAMPAIGN STORY', this.settings.showStory ? 'ON' : 'OFF'],
+      ];
+      rows.forEach(([label, val], i) => {
+        const y = 76 + i * 36;
+        ctx.fillStyle = i === this.settingsCursor ? '#3b2e1b' : '#181c24';
+        ctx.fillRect(24, y, WIDTH - 48, 28);
+        ctx.strokeStyle = i === this.settingsCursor ? '#ffd84d' : '#524433';
+        ctx.strokeRect(24, y, WIDTH - 48, 28);
+        ctx.font = 'bold 9px monospace';
+        ctx.fillStyle = '#f1e7d2';
+        ctx.textAlign = 'left';
+        ctx.fillText(label, 34, y + 17);
+        ctx.textAlign = 'right';
+        ctx.fillStyle = val === 'ON' ? '#9cff7b' : '#ff7b7b';
+        ctx.fillText(val, WIDTH - 34, y + 17);
+      });
+      ctx.fillStyle = '#241a14';
+      ctx.fillRect(48, 282, 144, 22);
+      ctx.strokeStyle = '#8b6f47';
+      ctx.strokeRect(48, 282, 144, 22);
+      centerText(ctx, 'BACK · ESC', 293, { font: 'bold 8px monospace', color: '#e6decb' });
+      return;
+    }
+
+    if (this.state === 'instructions') {
+      centerText(ctx, 'HOW TO PLAY & UNITS', 18, { font: 'bold 10px monospace', color: '#ffd84d' });
+      centerText(ctx, '▲ SCROLL UP', 36, { font: '8px monospace', color: this.helpScroll > 0 ? '#ffd84d' : '#4a5262' });
+      const tips = [];
+      for (let idx = 198; idx <= 214; idx++) {
+        if (this.assets.langStrings?.[idx]) {
+          const clean = this.assets.langStrings[idx].replace(/%KM/g, 'ARROWS').replace(/%K\d/g, 'ENTER');
+          tips.push(...wrapText(ctx, `• ${clean}`, WIDTH - 24));
+        }
+      }
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(8, 46, WIDTH - 16, 226);
+      ctx.clip();
+      ctx.font = '8px monospace';
+      ctx.textAlign = 'left';
+      ctx.fillStyle = '#e6decb';
+      for (let i = 0; i < 18 && this.helpScroll + i < tips.length; i++) {
+        ctx.fillText(tips[this.helpScroll + i], 12, 56 + i * 12);
+      }
+      ctx.restore();
+      centerText(ctx, '▼ SCROLL DOWN', 274, { font: '8px monospace', color: this.helpScroll < Math.max(0, tips.length - 18) ? '#ffd84d' : '#4a5262' });
+      ctx.fillStyle = '#241a14';
+      ctx.fillRect(48, 282, 144, 22);
+      ctx.strokeStyle = '#8b6f47';
+      ctx.strokeRect(48, 282, 144, 22);
+      centerText(ctx, 'TAP PAGE / ESC BACK', 293, { font: 'bold 8px monospace', color: '#e6decb' });
       return;
     }
 
@@ -1103,12 +1972,12 @@ class AncientEmpiresWeb {
         const idx = start + row;
         const y = 54 + row * 18;
         ctx.fillStyle = idx === this.mapIndex ? '#3b2e1b' : '#181c24';
-        ctx.fillRect(26, y, 180, 16);
+        ctx.fillRect(18, y, 188, 16);
         if (idx === this.mapIndex) {
           ctx.strokeStyle = '#ffd84d';
-          ctx.strokeRect(26, y, 180, 16);
+          ctx.strokeRect(18, y, 188, 16);
         }
-        centerText(ctx, this.mapList[idx].toUpperCase(), y + 8, { font: '9px monospace', color: idx === this.mapIndex ? '#ffd84d' : '#e6decb' });
+        centerText(ctx, this.mapLabel(this.mapList[idx]), y + 8, { font: '8px monospace', maxWidth: 180, color: idx === this.mapIndex ? '#ffd84d' : '#e6decb' });
       }
       // Visible scrollbar track & thumb
       ctx.fillStyle = '#181c24';
@@ -1141,21 +2010,33 @@ class AncientEmpiresWeb {
       viewportWidth: WIDTH - offsetX * 2,
       viewportHeight: boardH - offsetY * 2,
       units: this.units,
-      cursor: this.cursor,
+      cursor: { ...this.cursor, frameIndex: this.state === 'targetSelect' ? (this.animTick % 4 < 2 ? 1 : 0) : 0 },
+      rangeCells: (this.state === 'play' || this.state === 'moveAnim') ? this.reachable?.cells : null,
+      targetCells: (this.state === 'play' || this.state === 'targetSelect')
+        ? (this.state === 'targetSelect' ? this.targetCandidates.map(t => [t.x, t.y]) : this.attackTargets.map(t => [t.x, t.y]))
+        : null,
+      path: this.state === 'play' ? this.previewPath : null,
     });
     this.boardCtx.restore();
     ctx.drawImage(this.boardCanvas, 0, 28);
-    this.renderRange(ctx, offsetX, offsetY);
 
-    // Top HUD bar (0..28)
+    // Top HUD bar (0..28) using hud_icons_2 gold & unit count
     ctx.fillStyle = '#18141c';
     ctx.fillRect(0, 0, WIDTH, 28);
     const hoverUnit = this.unitAt(this.cursor.x, this.cursor.y);
     this.drawHudIcon(ctx, hoverUnit);
+    const myUnitsCount = this.units.filter(u => u.playerSelector === 1 + this.playerIndex && u.action !== 3).length;
+    const hud2 = this.assets.images.hud_icons_2;
+    if (hud2) {
+      ctx.drawImage(hud2, 11, 0, 11, 11, 30, 2, 11, 11);
+      ctx.drawImage(hud2, 0, 0, 11, 11, 108, 2, 11, 11);
+    }
     ctx.fillStyle = '#f4dfb3';
     ctx.font = 'bold 9px monospace';
     ctx.textAlign = 'left';
-    ctx.fillText(`T${this.turn + 1} P${this.playerIndex + 1} · ${this.balances[this.playerIndex] ?? 0}G`, 30, 11);
+    ctx.fillText(`${this.balances[this.playerIndex] ?? 0}G`, 44, 11);
+    ctx.fillText(`${myUnitsCount} · T${this.turn + 1} P${this.playerIndex + 1}`, 122, 11);
+
     ctx.fillStyle = '#a9d69d';
     ctx.font = '8px monospace';
     const tileProp = this.tileProperty(this.cursor.x, this.cursor.y);
@@ -1164,7 +2045,7 @@ class AncientEmpiresWeb {
       ? `${this.unitName(hoverUnit.type)} HP:${hoverUnit.hp} LV:${hoverUnit.level}`
       : tombHover
         ? `TOMBSTONE (${this.cursor.x},${this.cursor.y})`
-        : `${this.currentMapId.toUpperCase()} (${this.cursor.x},${this.cursor.y}) PROP:${tileProp ?? 0}`;
+        : `${this.currentMapId.toUpperCase()} (${this.cursor.x},${this.cursor.y}) DEF:${[0, 5, 10, 10, 15, 0, 5, 15, 15, 15][tileProp ?? 0] ?? 0}`;
     ctx.fillText(subLabel, 30, 23);
 
     // Bottom HUD bar (292..320)
@@ -1179,22 +2060,66 @@ class AncientEmpiresWeb {
     ctx.fillStyle = '#ffd84d';
     ctx.font = 'bold 9px monospace';
     ctx.textAlign = 'center';
-    ctx.fillText('MENU', 33, HEIGHT - 11);
-    ctx.fillText('END TURN', WIDTH - 43, HEIGHT - 11);
+    ctx.fillText(this.state === 'targetSelect' ? 'BACK' : 'MENU', 33, HEIGHT - 11);
+    ctx.fillText(this.state === 'targetSelect' ? 'CONFIRM' : 'END TURN', WIDTH - 43, HEIGHT - 11);
+
+    if (this.state === 'targetSelect') {
+      this.renderTargetForecast(ctx);
+      return;
+    }
+
+    if (this.state === 'storyDialog') {
+      const cur = this.storyQueue[0];
+      if (cur) {
+        renderStoryDialogOverlay(ctx, {
+          portraitsImg: this.assets.images.portraits,
+          portrait: cur.portrait,
+          text: cur.text,
+          width: WIDTH,
+          height: HEIGHT,
+        });
+      }
+      return;
+    }
+
+    if (this.state === 'stageBanner') {
+      ctx.fillStyle = 'rgba(14, 16, 24, 0.94)';
+      ctx.fillRect(14, 106, WIDTH - 28, 104);
+      ctx.strokeStyle = '#ffd84d';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(14, 106, WIDTH - 28, 104);
+      centerText(ctx, this.stageBannerTitle, 124, { font: 'bold 11px monospace', color: '#ffd84d' });
+      const lines = wrapText(ctx, this.stageBannerObjective, WIDTH - 48);
+      ctx.font = '9px monospace';
+      ctx.fillStyle = '#f1e7d2';
+      ctx.textAlign = 'center';
+      for (let i = 0; i < Math.min(lines.length, 3); i++) {
+        ctx.fillText(lines[i], WIDTH >> 1, 148 + i * 13);
+      }
+      centerText(ctx, this.stageBannerPrompt || 'TAP OR ENTER TO BEGIN', 194, { font: 'bold 8px monospace', color: '#a9d69d' });
+      return;
+    }
 
     if (this.state === 'actionMenu') {
-      const h = this.actionOptions.length * 20 + 16;
+      const h = this.actionOptions.length * 22 + 14;
       ctx.fillStyle = '#14101a';
-      ctx.fillRect(44, 108, 152, h);
+      ctx.fillRect(44, 98, 152, h);
       ctx.strokeStyle = '#ffd84d';
-      ctx.strokeRect(44, 108, 152, h);
+      ctx.strokeRect(44, 98, 152, h);
+      const actIcons = this.assets.images.action_icons;
       this.actionOptions.forEach((opt, i) => {
-        const y = 116 + i * 20;
+        const y = 105 + i * 22;
         if (i === this.actionCursor) {
           ctx.fillStyle = '#3b2e1b';
-          ctx.fillRect(50, y, 140, 18);
+          ctx.fillRect(50, y, 140, 20);
         }
-        centerText(ctx, opt.label, y + 9, { font: 'bold 9px monospace', color: i === this.actionCursor ? '#ffd84d' : '#f1e7d2' });
+        if (actIcons && opt.icon != null) {
+          ctx.drawImage(actIcons, opt.icon * 16, 0, 16, 16, 56, y + 2, 16, 16);
+        }
+        ctx.fillStyle = i === this.actionCursor ? '#ffd84d' : '#f1e7d2';
+        ctx.font = 'bold 9px monospace';
+        ctx.textAlign = 'left';
+        ctx.fillText(opt.label, 78, y + 13, 106);
       });
     } else if (this.state === 'recruitMenu') {
       const { list, rowHeight, headerHeight, panelH, panelY } = this.getRecruitPanelLayout();
@@ -1229,22 +2154,27 @@ class AncientEmpiresWeb {
       ctx.strokeRect(46, cancelY, 148, 16);
       centerText(ctx, 'CANCEL · ESC', cancelY + 8, { font: '8px monospace', color: '#e6decb' });
     } else if (this.state === 'pauseMenu') {
+      const opts = this.getPauseOptions();
+      const panelH = 28 + opts.length * 22 + 8;
+      const panelY = (HEIGHT - panelH) >> 1;
       ctx.fillStyle = '#14101a';
-      ctx.fillRect(36, 92, 168, 120);
+      ctx.fillRect(32, panelY, 176, panelH);
       ctx.strokeStyle = '#ffd84d';
-      ctx.strokeRect(36, 92, 168, 120);
-      centerText(ctx, 'GAME MENU', 104, { font: 'bold 10px monospace', color: '#ffd84d' });
-      const items = ['RESUME GAME', 'RESTART MAP', 'SELECT LEVEL', 'MAIN MENU'];
-      items.forEach((label, i) => {
-        const y = 116 + i * 22;
+      ctx.strokeRect(32, panelY, 176, panelH);
+      centerText(ctx, 'GAME MENU', panelY + 13, { font: 'bold 10px monospace', color: '#ffd84d' });
+      opts.forEach((label, i) => {
+        const y = panelY + 26 + i * 22;
         if (i === this.pauseCursor) {
           ctx.fillStyle = '#3b2e1b';
-          ctx.fillRect(44, y, 152, 19);
+          ctx.fillRect(40, y, 160, 19);
         }
         centerText(ctx, label, y + 9, { font: 'bold 9px monospace', color: i === this.pauseCursor ? '#ffd84d' : '#f1e7d2' });
       });
     } else if (this.state === 'dialog' || this.state === 'victory' || this.state === 'defeat') {
-      ctx.fillStyle = '#150d18';
+      if (this.state === 'defeat' && this.assets.images.gameover) {
+        drawImageAt(ctx, this.assets.images.gameover, 0, 28, WIDTH, HEIGHT - 56);
+      }
+      ctx.fillStyle = 'rgba(21, 13, 24, 0.92)';
       ctx.fillRect(14, 130, 212, 58);
       ctx.strokeStyle = this.state === 'victory' ? '#9cff7b' : this.state === 'defeat' ? '#ff6b6b' : '#caa568';
       ctx.strokeRect(14, 130, 212, 58);

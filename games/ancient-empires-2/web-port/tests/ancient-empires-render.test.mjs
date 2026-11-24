@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
-import { decodeMap, decodeSprite, decodeTerrainProperties } from '../ancient-empires-loader.js';
+import { decodeMap, decodeSprite, decodeTerrainProperties, decodeUnits } from '../ancient-empires-loader.js';
 import { renderOriginalBoard } from '../render-original.js';
+import { BattleScene } from '../ae2-battle.js';
+import { CAMPAIGN_STAGE_META } from '../ae2-story.js';
 
 const asset = name => new URL(`../assets/${name}`, import.meta.url);
 
@@ -101,4 +103,46 @@ test('original renderer draws 24x24 unit_icons, grayscale acted units, king head
   ]);
   assert.deepEqual(calls.filter(c => c[0] === 'fillText').map(c => c[1]), ['75']);
   assert.equal(calls.some(call => call[0] === 'fillRect'), false);
+});
+
+test('BattleScene formation, mirrored attacker facing, HP drain, and campaign story mappings match AE2 data', async () => {
+  const [unitsBytes, soldierSpriteBytes, soldierLangRaw] = await Promise.all([
+    readFile(asset('units.bin')),
+    readFile(asset('soldier.sprite')),
+    readFile(new URL('../data/lang-en.json', import.meta.url), 'utf8'),
+  ]);
+  const unitRecords = decodeUnits(new Uint8Array(unitsBytes));
+  const soldierMeta = decodeSprite(new Uint8Array(soldierSpriteBytes));
+  const lang = JSON.parse(soldierLangRaw);
+  assert.equal(lang[CAMPAIGN_STAGE_META.m0.titleIdx], 'TEMPLE RAIDERS');
+  assert.equal(lang[215], 'With the passing of the war against the forces of darkness, the brothers Galamar and Valadorn are reunited in their rule of the kingdom of Thorin. The kingdom is slowly returning to its peace time ways, protected by three ancient crystals safely guarded in the temples of Courage, Wisdom and Life, when rumours of skirmishes in the North reach the palace...');
+
+  const img = (name, w, h) => ({ name, naturalWidth: w, naturalHeight: h });
+  const scene = new BattleScene({
+    attacker: { type: 0, palette: 1, hp: 100 },
+    attackerName: 'SOLDIER',
+    attackerTerrain: 1,
+    defender: { type: 10, palette: 2, hp: 60 },
+    defenderName: 'SKELETON',
+    defenderTerrain: 3,
+    combatResult: {
+      attackerHpBefore: 100, defenderHpBefore: 60,
+      attackerHpAfter: 82, defenderHpAfter: 15,
+      damage: 45, counterDamage: 18,
+    },
+    assets: {
+      unitRecords,
+      unitFamilies: ['soldier', 'archer', 'lizard', 'wizard', 'wisp', 'spider', 'golem', 'catapult', 'wyvern', 'king', 'skeleton'],
+      sprites: { soldier: soldierMeta, skeleton: soldierMeta },
+      images: { soldier: img('soldier', 34, 36), skeleton: img('skeleton', 34, 36) },
+      frameImages: { soldier: [img('s0', 34, 36), img('s1', 34, 36), img('s2', 34, 36)] },
+      coloredPalettes: { 1: {}, 2: {} },
+    },
+  });
+  assert.equal(scene.leftSide.slots, 5);
+  assert.equal(scene.rightSide.visibleCount, 3);
+  for (let t = 0; t < 60 && !scene.finished; t++) scene.tick(50);
+  assert.equal(scene.finished, true);
+  assert.equal(Math.round(scene.leftSide.displayHp), 82);
+  assert.equal(Math.round(scene.rightSide.displayHp), 15);
 });

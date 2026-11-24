@@ -58,9 +58,13 @@ function drawMapTile(ctx, assets, rawTile, x, y) {
   return drawFrame(ctx, view, 'buildings', frameIndex, x, y, MIDP_ANCHOR.LEFT | MIDP_ANCHOR.TOP);
 }
 
-// Port of i.java:2907-2948 and i.java:3180-3410. This pass only draws binary
-// decoded terrain/unit frames; semantic overlays stay separate from base art.
-export function renderOriginalBoard(ctx, { map, assets, cameraX = 0, cameraY = 0, viewportWidth = 240, viewportHeight = 264, units = map.units, cursor = null, overlays = [] }) {
+// Port of i.java:2907-2948 and i.java:3180-3410. Renders decoded terrain,
+// range highlights (alpha.png), movement path (i.java:3434), units, and cursor.
+export function renderOriginalBoard(ctx, {
+  map, assets, cameraX = 0, cameraY = 0, viewportWidth = 240, viewportHeight = 264,
+  units = map.units, cursor = null, overlays = [],
+  rangeCells = null, targetCells = null, path = null,
+}) {
   if (!ctx || !map || !assets) throw new TypeError('renderOriginalBoard requires context, map and decoded assets');
   ctx.imageSmoothingEnabled = false;
   withMIDPClip(ctx, 0, 0, viewportWidth, viewportHeight, () => {
@@ -86,6 +90,72 @@ export function renderOriginalBoard(ctx, { map, assets, cameraX = 0, cameraY = 0
           }
         }
       }
+    }
+
+    // Port of i.java:3060-3069 & lang[199]: red alpha movement range squares under units.
+    if (rangeCells && rangeCells.length > 0) {
+      const alphaImg = assets.images?.alpha;
+      for (const [rx, ry] of rangeCells) {
+        const dx = rx * 24 - cameraX;
+        const dy = ry * 24 - cameraY;
+        if (alphaImg) {
+          drawRegionMIDP(ctx, alphaImg, 0, 0, 24, 24, 0, dx, dy, MIDP.LEFT | MIDP.TOP);
+        } else {
+          ctx.fillStyle = 'rgba(225, 48, 86, 0.36)';
+          ctx.fillRect(dx, dy, 24, 24);
+        }
+      }
+    }
+
+    if (targetCells && targetCells.length > 0) {
+      ctx.save();
+      ctx.strokeStyle = '#ff3838';
+      ctx.lineWidth = 2;
+      for (const [tx, ty] of targetCells) {
+        const dx = tx * 24 - cameraX;
+        const dy = ty * 24 - cameraY;
+        ctx.strokeRect(dx + 1, dy + 1, 22, 22);
+      }
+      ctx.restore();
+    }
+
+    // Port of i.java:3434-3477: red movement route ribbon and arrow cap.
+    if (path && path.length > 1) {
+      ctx.save();
+      ctx.fillStyle = '#e10012';
+      for (let i = 0; i < path.length; i++) {
+        const [px, py] = path[i];
+        const tileX = px * 24 - cameraX;
+        const tileY = py * 24 - cameraY;
+        const cx = tileX + 12;
+        const cy = tileY + 12;
+        if (i > 0) {
+          const [prevX, prevY] = path[i - 1];
+          if (prevX === px + 1) ctx.fillRect(cx - 4, cy - 4, 16, 8);
+          else if (prevX === px - 1) ctx.fillRect(tileX, cy - 4, 16, 8);
+          else if (prevY === py + 1) ctx.fillRect(cx - 4, cy - 4, 8, 16);
+          else if (prevY === py - 1) ctx.fillRect(cx - 4, tileY, 8, 16);
+        }
+        if (i < path.length - 1) {
+          const [nextX, nextY] = path[i + 1];
+          if (nextX === px + 1) ctx.fillRect(cx - 4, cy - 4, 16, 8);
+          else if (nextX === px - 1) ctx.fillRect(tileX, cy - 4, 16, 8);
+          else if (nextY === py + 1) ctx.fillRect(cx - 4, cy - 4, 8, 16);
+          else if (nextY === py - 1) ctx.fillRect(cx - 4, tileY, 8, 16);
+        } else {
+          const [prevX, prevY] = path[i - 1];
+          const dx = Math.sign(px - prevX);
+          const dy = Math.sign(py - prevY);
+          ctx.fillStyle = '#e10012';
+          ctx.beginPath();
+          ctx.moveTo(cx + dx * 7, cy + dy * 7);
+          ctx.lineTo(cx - dx * 5 - dy * 6, cy - dy * 5 + dx * 6);
+          ctx.lineTo(cx - dx * 5 + dy * 6, cy - dy * 5 - dx * 6);
+          ctx.closePath();
+          ctx.fill();
+        }
+      }
+      ctx.restore();
     }
 
     // Port of i.java:548-608, 3421-3425 and c.java:657-682: strategic map units
@@ -124,6 +194,19 @@ export function renderOriginalBoard(ctx, { map, assets, cameraX = 0, cameraY = 0
             ? unit.kingHead
             : Math.max(0, Math.min(3, teamPalette - 1));
           drawSheetFrame(ctx, headImg, headMeta, headMeta?.frames?.[headTeam * 2 + animFrame], drawX, drawY);
+        }
+
+        const statusMeta = assets.sprites?.status;
+        const statusImg = assets.images?.status;
+        if (statusMeta && statusImg && (unit.status ?? 0) !== 0) {
+          let sxOff = 0;
+          if ((unit.status & 1) !== 0) {
+            drawSheetFrame(ctx, statusImg, statusMeta, statusMeta.frames?.[0], drawX + 16, drawY + 1);
+            sxOff += 7;
+          }
+          if ((unit.status & 2) !== 0) {
+            drawSheetFrame(ctx, statusImg, statusMeta, statusMeta.frames?.[1], drawX + 16 - sxOff, drawY + 1);
+          }
         }
 
         if (typeof unit.hp === 'number' && unit.hp < 100 && typeof ctx.fillText === 'function') {

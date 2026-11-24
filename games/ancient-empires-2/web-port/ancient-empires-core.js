@@ -40,9 +40,10 @@ export function movementCost({ x, y, unitType, terrainProperty, occupiedUnit, un
   return MOVEMENT_COST_BY_PROPERTY[terrainProperty];
 }
 
-// Port of c.java:443-486: exact recursive remaining-movement flood fill
+// Port of c.java:443-486 & i.java:931: exact recursive remaining-movement flood fill
+// (range table initializes to 0, so cells with remaining <= 0 are impassable).
 export function calculateReachability({ unit, width, height, terrainAt, unitAt, teamForPlayer }) {
-  const range = Array.from({ length: width }, () => Array(height).fill(-1));
+  const range = Array.from({ length: width }, () => Array(height).fill(0));
   const maxRange = Math.max(0, Math.min(unit.movementRange ?? unit.budget ?? 0, 127));
   sourceRecursion(range, unit.x, unit.y, unit.type, maxRange, -1, unit, width, height, terrainAt, unitAt, teamForPlayer);
 
@@ -50,7 +51,7 @@ export function calculateReachability({ unit, width, height, terrainAt, unitAt, 
   const previous = new Map();
   for (let x = 0; x < width; x++) {
     for (let y = 0; y < height; y++) {
-      if (range[x][y] < 0) continue;
+      if (range[x][y] <= 0) continue;
       if (x === unit.x && y === unit.y) continue;
       const occupant = unitAt(x, y);
       if (occupant && occupant.id !== unit.id && occupant.action !== 3) continue;
@@ -61,6 +62,27 @@ export function calculateReachability({ unit, width, height, terrainAt, unitAt, 
     }
   }
   return { costs, previous, cells: [...costs.keys()].map(k => k.split(',').map(Number)), range };
+}
+
+export function traceRoute(reachability, startX, startY, endX, endY) {
+  const startKey = `${startX},${startY}`;
+  let key = `${endX},${endY}`;
+  if (!reachability?.previous || key === startKey || !reachability.costs?.has(key)) return [[startX, startY]];
+  const reversed = [[endX, endY]];
+  const visited = new Set([key]);
+  while (key !== startKey) {
+    const prevKey = reachability.previous.get(key);
+    if (!prevKey || visited.has(prevKey)) break;
+    visited.add(prevKey);
+    const [px, py] = prevKey.split(',').map(Number);
+    reversed.push([px, py]);
+    key = prevKey;
+    if (key === startKey) break;
+  }
+  if (reversed[reversed.length - 1][0] !== startX || reversed[reversed.length - 1][1] !== startY) {
+    reversed.push([startX, startY]);
+  }
+  return reversed.reverse();
 }
 
 function sourceRecursion(range, x, y, unitType, remaining, blockedDirection, unit, width, height, terrainAt, unitAt, teamForPlayer) {
@@ -99,7 +121,7 @@ function chooseSourceRouteParent(range, targetX, targetY, width, height) {
   ].filter(cell => cell.x >= 0 && cell.y >= 0 && cell.x < width && cell.y < height);
   let best = null;
   for (const cell of candidates) {
-    if (range[cell.x][cell.y] >= 0 && (!best || range[cell.x][cell.y] > range[best.x][best.y])) best = cell;
+    if (range[cell.x][cell.y] > 0 && (!best || range[cell.x][cell.y] > range[best.x][best.y])) best = cell;
   }
   return best;
 }
@@ -193,6 +215,8 @@ export function canCounterattack(defender, attackerX, attackerY) {
 // Port of c.java:166-200 & i.java:2358-2407: full combat strike + conditional counterstrike + level-up
 export function executeCombat({ attacker, defender, terrainAt, rawTileAt, rng = Math.random }) {
   const roll = (min, max) => min + Math.floor(rng() * Math.max(1, max - min + 1));
+  const attackerHpBefore = attacker.hp;
+  const defenderHpBefore = defender.hp;
   const aProp = terrainAt(attacker.x, attacker.y) ?? 0;
   const dProp = terrainAt(defender.x, defender.y) ?? 0;
   const aTile = rawTileAt(attacker.x, attacker.y) ?? 0;
@@ -253,7 +277,16 @@ export function executeCombat({ attacker, defender, terrainAt, rawTileAt, rng = 
     }
   }
 
-  return { damage: strike.damage, counterDamage, attackerLeveled, defenderLeveled };
+  return {
+    damage: strike.damage,
+    counterDamage,
+    attackerLeveled,
+    defenderLeveled,
+    attackerHpBefore,
+    defenderHpBefore,
+    attackerHpAfter: attacker.hp,
+    defenderHpAfter: defender.hp,
+  };
 }
 
 // Port of c.java:180-196: experience threshold & +2/+2/+2 stat promotion up to level 9

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   calculateReachability,
+  traceRoute,
   movementCost,
   resolveOriginalDamage,
   advancePlayerTurn,
@@ -23,10 +24,10 @@ test('source movement uses javap-verified i.g:[B terrain costs, mask exceptions,
   assert.equal(movementCost({ x: 0, y: 0, unitType: 0, terrainProperty: 0, occupiedUnit: { playerSelector: 2, action: 0 }, unit: baseUnit, teamForPlayer }), 1000);
 });
 
-test('range expansion respects source terrain costs and friendly occupied cells', () => {
+test('range expansion respects source terrain costs, 0-init remaining > 0 rule, and friendly occupied cells', () => {
   const units = [
-    { id: 1, x: 1, y: 1, type: 0, playerSelector: 1, movementRange: 2, movementMask: 0, action: 0 },
-    { id: 2, x: 1, y: 0, type: 0, playerSelector: 1, movementRange: 2, movementMask: 0, action: 0 },
+    { id: 1, x: 1, y: 1, type: 0, playerSelector: 1, movementRange: 3, movementMask: 0, action: 0 },
+    { id: 2, x: 1, y: 0, type: 0, playerSelector: 1, movementRange: 3, movementMask: 0, action: 0 },
   ];
   const reach = calculateReachability({
     unit: units[0],
@@ -37,8 +38,19 @@ test('range expansion respects source terrain costs and friendly occupied cells'
     teamForPlayer: p => p,
   });
   assert.equal(reach.costs.has('1,0'), false);
-  assert.equal(reach.costs.get('2,1'), 2);
+  assert.equal(reach.costs.get('2,1'), 2); // remaining = 3 - 2 = 1 (> 0)
   assert.equal(reach.costs.get('1,2'), 1);
+  assert.deepEqual(traceRoute(reach, 1, 1, 2, 1), [[1, 1], [2, 1]]);
+
+  const blockedReach = calculateReachability({
+    unit: { ...units[0], movementRange: 2 },
+    width: 3,
+    height: 3,
+    terrainAt: (x, y) => (x === 2 && y === 1 ? 2 : 0),
+    unitAt: (x, y) => units.find(u => u.x === x && u.y === y),
+    teamForPlayer: p => p,
+  });
+  assert.equal(blockedReach.costs.has('2,1'), false, 'i.java:931 0-init blocks cells with remaining === 0');
 });
 
 test('original combat arithmetic uses Java truncation and field values without invented stat labels', () => {
