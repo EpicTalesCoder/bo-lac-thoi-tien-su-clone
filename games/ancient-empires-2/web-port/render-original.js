@@ -64,6 +64,7 @@ export function renderOriginalBoard(ctx, {
   map, assets, cameraX = 0, cameraY = 0, viewportWidth = 240, viewportHeight = 264,
   units = map.units, cursor = null, overlays = [],
   rangeCells = null, targetCells = null, path = null,
+  waterAnimFrame = 0, floatTexts = null,
 }) {
   if (!ctx || !map || !assets) throw new TypeError('renderOriginalBoard requires context, map and decoded assets');
   ctx.imageSmoothingEnabled = false;
@@ -77,9 +78,17 @@ export function renderOriginalBoard(ctx, {
     for (let y = startY; y < endY; y++) {
       for (let x = startX; x < endX; x++) {
         const rawTile = s8(map.tiles[x][y]);
+        const animTile = (rawTile === 1 || rawTile === 2) && (waterAnimFrame & 1) !== 0
+          ? (rawTile === 1 ? 2 : 1)
+          : rawTile;
         const drawX = x * 24 - cameraX;
         const drawY = y * 24 - cameraY;
-        drawMapTile(ctx, assets, rawTile, drawX, drawY);
+        drawMapTile(ctx, assets, animTile, drawX, drawY);
+        if (rawTile === 27 && assets.sprites?.smoke && (assets.images?.smoke || assets.frameImages?.smoke)) {
+          // Port of i.java:2497: ruined village emits rising smoke until repaired
+          const smokeLen = Math.max(1, assets.sprites.smoke.frames?.length ?? 4);
+          drawFrame(ctx, assets, 'smoke', waterAnimFrame % smokeLen, drawX, drawY - 4, MIDP.LEFT | MIDP.TOP);
+        }
         if (y + 1 < map.height && assets.terrain.properties[s8(map.tiles[x][y + 1])] === 9) {
           // Port of i.java:2941-2943: original overhang/town overlay frame.
           drawFrame(ctx, assets, 'tiles0', 28, drawX, drawY, MIDP.LEFT | MIDP.TOP);
@@ -163,11 +172,14 @@ export function renderOriginalBoard(ctx, {
     // palette 1..4), tombstone when killed (action === 3), king_head_icons
     // overlay for King (type === 9), and HP text when hp < 100.
     for (const unit of units) {
+      if (unit.action === 4) continue;
       const drawX = unit.x * 24 - cameraX;
       const drawY = unit.y * 24 - cameraY;
-      if (unit.action === 3) {
-        const tomb = assets.images?.tombstone;
-        if (tomb) drawRegionMIDP(ctx, tomb, 0, 0, 24, 24, 0, drawX, drawY, MIDP.LEFT | MIDP.TOP);
+      if (unit.action === 3 || unit.hp <= 0) {
+        if (unit.type !== 9 && unit.type !== 10 && unit.type !== 11 && unit.x >= 0 && unit.y >= 0) {
+          const tomb = assets.images?.tombstone;
+          if (tomb) drawRegionMIDP(ctx, tomb, 0, 0, 24, 24, 0, drawX, drawY, MIDP.LEFT | MIDP.TOP);
+        }
         continue;
       }
 
@@ -252,6 +264,25 @@ export function renderOriginalBoard(ctx, {
     if (cursor) {
       drawFrame(ctx, assets, 'cursor', cursor.frameIndex ?? 0,
         cursor.x * 24 - cameraX, cursor.y * 24 - cameraY, MIDP.LEFT | MIDP.TOP);
+    }
+
+    // Port of i.java:2382: floating +20 heal / combat popups on strategic map
+    if (floatTexts && floatTexts.length > 0 && typeof ctx.fillText === 'function') {
+      ctx.save();
+      ctx.font = 'bold 9px monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.lineWidth = 2.5;
+      ctx.lineJoin = 'round';
+      for (const ft of floatTexts) {
+        const fx = ft.x * 24 - cameraX + 12;
+        const fy = ft.y * 24 - cameraY + 6 - (ft.offsetY ?? 0);
+        ctx.strokeStyle = '#120d16';
+        ctx.strokeText(ft.text, fx, fy);
+        ctx.fillStyle = ft.color || '#7dff7d';
+        ctx.fillText(ft.text, fx, fy);
+      }
+      ctx.restore();
     }
   });
 }

@@ -27,11 +27,35 @@ function drawBattleSpriteFrame(ctx, assets, family, palette, frameIdx, x, y, rev
   const image = frameList ? frameList[frame.sourceFrame] : sheet;
   if (!image) return false;
   const cols = frameList ? 1 : Math.max(1, Math.floor((image.naturalWidth || meta.frameWidth) / meta.frameWidth));
+  const sw = frameList ? (image.naturalWidth || meta.frameWidth) : meta.frameWidth;
+  const sh = frameList ? (image.naturalHeight || meta.frameHeight) : meta.frameHeight;
   const sx = frameList ? 0 : (frame.sourceFrame % cols) * meta.frameWidth;
   const sy = frameList ? 0 : Math.floor(frame.sourceFrame / cols) * meta.frameHeight;
+
+  // Port of h.java:56-87: align unpacked PNG frames smaller than (frameWidth, frameHeight) via anchorFlags
+  let anchorOx = 0;
+  let anchorOy = 0;
+  if (frameList && meta.anchorFlags > 0) {
+    let hAlign = meta.anchorFlags & 13;
+    let vAlign = meta.anchorFlags & 50;
+    if (frame.transform === 2) {
+      if ((hAlign & 4) !== 0) hAlign = 8;
+      else if ((hAlign & 8) !== 0) hAlign = 4;
+    } else if (frame.transform === 1) {
+      if ((vAlign & 16) !== 0) vAlign = 32;
+      else if ((vAlign & 32) !== 0) vAlign = 16;
+    }
+    if ((hAlign & 8) !== 0) anchorOx = meta.frameWidth - sw;
+    else if ((hAlign & 1) !== 0) anchorOx = (meta.frameWidth - sw) >> 1;
+    if ((vAlign & 32) !== 0) anchorOy = meta.frameHeight - sh;
+    else if ((vAlign & 2) !== 0) anchorOy = (meta.frameHeight - sh) >> 1;
+  }
+
   drawRegionMIDP(
-    ctx, image, sx, sy, meta.frameWidth, meta.frameHeight,
-    frame.transform ?? 0, x + (frame.offsetX ?? 0), y + (frame.offsetY ?? 0),
+    ctx, image, sx, sy, sw, sh,
+    frame.transform ?? 0,
+    x + anchorOx + (frame.offsetX ?? 0),
+    y + anchorOy + (frame.offsetY ?? 0),
     MIDP_ANCHOR.LEFT | MIDP_ANCHOR.TOP,
   );
   return true;
@@ -90,7 +114,7 @@ export class BattleScene {
       sideIndex,
       family,
       palette: Math.max(1, unit.palette ?? 1),
-      kingHead: Math.max(0, Math.min(3, (unit.palette ?? 1) - 1)),
+      kingHead: Number.isInteger(unit.kingHead) ? unit.kingHead : Math.max(0, Math.min(3, (unit.palette ?? 1) - 1)),
       slots,
       figW,
       figH,
@@ -195,9 +219,14 @@ export class BattleScene {
       ctx.fill();
 
       drawBattleSpriteFrame(ctx, this.assets, side.family, side.palette, seqFrame, fx, fy, isLeft);
-      if (side.unit.type === 9 && this.assets.sprites?.king_heads) {
-        const headIdx = (isLeft ? 8 : 0) + side.kingHead * 2 + (seqFrame % 2);
-        drawBattleSpriteFrame(ctx, this.assets, 'king_heads', 1, headIdx, fx, fy, false);
+      if (side.unit.type === 9) {
+        if (seqFrame === 2 && this.assets.sprites?.king_heads_back) {
+          const backIdx = (isLeft ? 4 : 0) + side.kingHead;
+          drawBattleSpriteFrame(ctx, this.assets, 'king_heads_back', 1, backIdx, fx, fy, false);
+        } else if (this.assets.sprites?.king_heads) {
+          const headIdx = (isLeft ? 8 : 0) + side.kingHead * 2 + (seqFrame % 2);
+          drawBattleSpriteFrame(ctx, this.assets, 'king_heads', 1, headIdx, fx, fy, false);
+        }
       }
     }
   }

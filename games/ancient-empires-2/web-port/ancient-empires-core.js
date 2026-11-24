@@ -26,7 +26,7 @@ export function movementCost({ x, y, unitType, terrainProperty, occupiedUnit, un
   if (x < 0 || y < 0) return OUT_OF_BOUNDS_COST;
   const uType = unitType ?? unit?.type ?? 0;
   const uMask = unit?.movementMask ?? 0;
-  if (occupiedUnit && occupiedUnit.action !== 3 && teamForPlayer(occupiedUnit.playerSelector) !== teamForPlayer(unit.playerSelector)) {
+  if (occupiedUnit && occupiedUnit.action !== 3 && occupiedUnit.action !== 4 && teamForPlayer(occupiedUnit.playerSelector) !== teamForPlayer(unit.playerSelector)) {
     return IMPASSABLE_COST;
   }
   if (uType === 11) {
@@ -54,7 +54,7 @@ export function calculateReachability({ unit, width, height, terrainAt, unitAt, 
       if (range[x][y] <= 0) continue;
       if (x === unit.x && y === unit.y) continue;
       const occupant = unitAt(x, y);
-      if (occupant && occupant.id !== unit.id && occupant.action !== 3) continue;
+      if (occupant && occupant.id !== unit.id && occupant.action !== 3 && occupant.action !== 4) continue;
       const key = `${x},${y}`;
       costs.set(key, maxRange - range[x][y]);
       const parent = chooseSourceRouteParent(range, x, y, width, height);
@@ -213,7 +213,7 @@ export function canCounterattack(defender, attackerX, attackerY) {
 }
 
 // Port of c.java:166-200 & i.java:2358-2407: full combat strike + conditional counterstrike + level-up
-export function executeCombat({ attacker, defender, terrainAt, rawTileAt, rng = Math.random }) {
+export function executeCombat({ attacker, defender, terrainAt, rawTileAt, rng = Math.random, tombTurns = 2 }) {
   const roll = (min, max) => min + Math.floor(rng() * Math.max(1, max - min + 1));
   const attackerHpBefore = attacker.hp;
   const defenderHpBefore = defender.hp;
@@ -247,9 +247,7 @@ export function executeCombat({ attacker, defender, terrainAt, rawTileAt, rng = 
   let defenderLeveled = false;
 
   if (defender.hp <= 0) {
-    defender.hp = 0;
-    defender.action = 3; // Tombstone (i.java:3545)
-    defender.tombTimer = defender.type === 9 ? 0 : 2;
+    markDefeatedUnit(defender, tombTurns);
   } else if (canCounterattack(defender, attacker.x, attacker.y)) {
     const counter = resolveOriginalDamage({
       attacker: {
@@ -271,9 +269,7 @@ export function executeCombat({ attacker, defender, terrainAt, rawTileAt, rng = 
     if (defender.type === 5 && attacker.hp > 0) attacker.status = (attacker.status || 0) | 1;
     defenderLeveled = applyLevelUp(defender);
     if (attacker.hp <= 0) {
-      attacker.hp = 0;
-      attacker.action = 3;
-      attacker.tombTimer = attacker.type === 9 ? 0 : 2;
+      markDefeatedUnit(attacker, tombTurns);
     }
   }
 
@@ -287,6 +283,27 @@ export function executeCombat({ attacker, defender, terrainAt, rawTileAt, rng = 
     attackerHpAfter: attacker.hp,
     defenderHpAfter: defender.hp,
   };
+}
+
+function markDefeatedUnit(unit, tombTurns = 2) {
+  unit.hp = 0;
+  unit.rawStatus = 0;
+  if (unit.type === 10 || unit.type === 11) {
+    // Port of i.java:2508-2509: Skeletons (10) & Crystals (11) vanish cleanly with no tombstone
+    unit.action = 4;
+    unit.tombTimer = 0;
+    return;
+  }
+  unit.action = 3; // Tombstone or off-map fallen Commander (i.java:2506-2518)
+  if (unit.type === 9) {
+    unit.x = -10;
+    unit.y = -10;
+    unit.tombTimer = 0;
+    const currentCost = unit.reviveCost ?? 200;
+    if (currentCost < 1000) unit.reviveCost = currentCost + 200;
+    return;
+  }
+  unit.tombTimer = tombTurns;
 }
 
 // Port of c.java:180-196: experience threshold & +2/+2/+2 stat promotion up to level 9
@@ -313,11 +330,38 @@ export function getAttackableTargets(unit, units, teamForPlayer) {
   // Catapult (minRange > 1) cannot fire after moving in AE2 unless still at start position
   if (minR > 1 && unit.movedThisTurn) return [];
   return units.filter(other => {
-    if (other.id === unit.id || other.action === 3 || other.hp <= 0) return false;
+    if (other.id === unit.id || other.action === 3 || other.action === 4 || other.hp <= 0) return false;
     if (teamForPlayer(other.playerSelector) === teamForPlayer(unit.playerSelector)) return false;
     const dist = Math.abs(other.x - unit.x) + Math.abs(other.y - unit.y);
     return dist >= minR && dist <= maxR;
   });
+}
+
+// Port of c.java:336-340: unmoved Catapult (type 7) can bombard unoccupied non-allied Towns (prop 8, tile >= 37)
+export function getTargetableTowns({ unit, map, terrainAt, unitAt, teamForPlayer, ownerTeamForTile }) {
+  if (!unit || unit.type !== 7) return [];
+  const minR = unit.minRange ?? 2;
+  const maxR = unit.maxRange ?? 4;
+  if (minR > 1 && unit.movedThisTurn) return [];
+  const resolveTileTeam = ownerTeamForTile || (raw => {
+    const pal = buildingPaletteFromTile(raw);
+    return pal > 0 ? teamForPlayer(pal) : -1;
+  });
+  const targets = [];
+  for (let x = 0; x < map.width; x++) {
+    for (let y = 0; y < map.height; y++) {
+      const dist = Math.abs(x - unit.x) + Math.abs(y - unit.y);
+      if (dist < minR || dist > maxR) continue;
+      if (unitAt(x, y)) continue;
+      if ((terrainAt(x, y) ?? 0) !== 8) continue;
+      const rawTile = s8(map.tiles[x][y]);
+      if (rawTile < FIRST_BUILDING_TILE) continue;
+      const tileTeam = resolveTileTeam(rawTile);
+      if (tileTeam !== -1 && tileTeam === teamForPlayer(unit.playerSelector)) continue;
+      targets.push({ x, y, rawTile });
+    }
+  }
+  return targets;
 }
 
 // Port of i.java:3591-3600: capture & repair predicates
@@ -352,9 +396,13 @@ export function advancePlayerTurn({
     skipped++;
   }
 
-  // Tombstone decay, status expiry, & reset unit action flags (i.java:3543-3558)
+  // Tombstone decay, status expiry, & reset unit action flags (i.java:2447, 3543-3558)
   for (let i = units.length - 1; i >= 0; i--) {
     const unit = units[i];
+    if (unit.action === 4) {
+      units.splice(i, 1);
+      continue;
+    }
     if (unit.action === 3 || unit.rawStatus === 3) {
       if (unit.type !== 9 && typeof unit.tombTimer === 'number') {
         unit.tombTimer -= 1;
@@ -366,17 +414,19 @@ export function advancePlayerTurn({
     unit.rawStatus = 0;
     unit.rawTurnCounter = 0;
     unit.movedThisTurn = false;
-    if (unit.playerSelector === nextPlayer + 1) {
-      // Clear expired poison/aura at start of owner's turn
-      unit.status = (unit.status || 0) & ~3;
+    if (unit.playerSelector === playerIndex + 1) {
+      // Clear expired poison (bit 1) at end of poisoned player's completed turn (i.java:2447)
+      unit.status = (unit.status || 0) & ~1;
     }
+    // Reset Wisp aura (bit 2) before recalculating adjacent Wisps below
+    unit.status = (unit.status || 0) & ~2;
   }
 
   // Wisp (type 4) grants +10 attack aura (status |= 2) to adjacent allies (c.java:223)
   for (const wisp of units) {
-    if (wisp.action === 3 || wisp.type !== 4 || wisp.playerSelector !== nextPlayer + 1) continue;
+    if (wisp.action === 3 || wisp.action === 4 || wisp.hp <= 0 || wisp.type !== 4) continue;
     for (const ally of units) {
-      if (ally.action === 3 || ally.playerSelector !== wisp.playerSelector) continue;
+      if (ally.action === 3 || ally.action === 4 || ally.hp <= 0 || ally.playerSelector !== wisp.playerSelector) continue;
       if (Math.abs(ally.x - wisp.x) + Math.abs(ally.y - wisp.y) === 1) {
         ally.status = (ally.status || 0) | 2;
       }
@@ -398,7 +448,7 @@ export function advancePlayerTurn({
   // Turn-start healing (+20 HP on Temple prop 7 or owned Village/Castle, i.java:2290-2301)
   const healed = [];
   for (const unit of units) {
-    if (unit.action === 3 || unit.playerSelector !== nextPlayer + 1 || unit.hp >= 100) continue;
+    if (unit.action === 3 || unit.action === 4 || unit.hp <= 0 || unit.playerSelector !== nextPlayer + 1 || unit.hp >= 100) continue;
     const prop = terrainPropertyAt(unit.x, unit.y);
     const onHealTile = prop === 7 || propertyOwnerAt(unit.x, unit.y, nextPlayer);
     if (!onHealTile) continue;
@@ -410,8 +460,8 @@ export function advancePlayerTurn({
   return { playerIndex: nextPlayer, turnCount: nextTurn, income, healed };
 }
 
-// Port of i.java:3774-4260 (strategic AI action scoring: capture > combat > advance toward objectives)
-export function chooseAiUnitAction({ unit, units, map, terrainAt, unitAt, teamForPlayer, myPalette }) {
+// Port of i.java:3774-4260 (strategic AI action scoring: capture > combat > bombard town > advance)
+export function chooseAiUnitAction({ unit, units, map, terrainAt, unitAt, teamForPlayer, myPalette, ownerTeamForTile }) {
   const reach = calculateReachability({
     unit,
     width: map.width,
@@ -423,7 +473,9 @@ export function chooseAiUnitAction({ unit, units, map, terrainAt, unitAt, teamFo
   const candidatePositions = [[unit.x, unit.y], ...reach.cells];
   let best = null;
 
-  const enemies = units.filter(u => u.action !== 3 && u.hp > 0 && teamForPlayer(u.playerSelector) !== teamForPlayer(unit.playerSelector));
+  const enemies = units.filter(
+    u => u.action !== 3 && u.action !== 4 && u.hp > 0 && teamForPlayer(u.playerSelector) !== teamForPlayer(unit.playerSelector)
+  );
 
   for (const [cx, cy] of candidatePositions) {
     const moved = cx !== unit.x || cy !== unit.y;
@@ -441,7 +493,7 @@ export function chooseAiUnitAction({ unit, units, map, terrainAt, unitAt, teamFo
     // 1b. Sorceress (type 3) Raise Skeleton from adjacent tombstone (i.java:2515-2530)
     if (unit.type === 3) {
       const tomb = units.find(
-        u => u.action === 3 && Math.abs(u.x - cx) + Math.abs(u.y - cy) === 1 && !unitAt(u.x, u.y)
+        u => u.action === 3 && u.type !== 9 && u.x >= 0 && u.y >= 0 && Math.abs(u.x - cx) + Math.abs(u.y - cy) === 1 && !unitAt(u.x, u.y)
       );
       if (tomb) {
         const score = 1550 + defBonus;
@@ -460,6 +512,25 @@ export function chooseAiUnitAction({ unit, units, map, terrainAt, unitAt, teamFo
       const kingBonus = target.type === 9 ? 400 : 0;
       const score = 1000 + estDmg * 12 + killBonus + kingBonus + defBonus * 2;
       if (!best || score > best.score) best = { kind: 'attack', x: cx, y: cy, targetId: target.id, score };
+    }
+
+    // 2b. Stationary Catapult bombards non-allied intact Towns (c.java:336-340, i.java:2497)
+    if (unit.type === 7 && !moved) {
+      const towns = getTargetableTowns({
+        unit: virtualUnit,
+        map,
+        terrainAt,
+        unitAt,
+        teamForPlayer,
+        ownerTeamForTile,
+      });
+      for (const town of towns) {
+        const pal = buildingPaletteFromTile(town.rawTile);
+        const score = (pal > 0 ? 1150 : 650) + defBonus * 2;
+        if (!best || score > best.score) {
+          best = { kind: 'destroyTown', x: cx, y: cy, targetX: town.x, targetY: town.y, score };
+        }
+      }
     }
 
     // 3. Otherwise advance toward nearest enemy or unowned village/castle

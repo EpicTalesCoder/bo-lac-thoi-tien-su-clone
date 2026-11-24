@@ -10,19 +10,21 @@ import {
   encodeBuildingTile,
   executeCombat,
   getAttackableTargets,
+  getTargetableTowns,
   getTileActionForUnit,
   traceRoute,
 } from './ancient-empires-core.js';
 import { drawRegionMIDP, renderOriginalBoard } from './render-original.js';
 import { playAe2Sfx } from './ae2-audio.js';
 import { BattleScene } from './ae2-battle.js';
-import { CAMPAIGN_STAGE_META, renderCutsceneScreen, renderStoryDialogOverlay, wrapText } from './ae2-story.js';
+import { CAMPAIGN_STAGE_CONFIG, CAMPAIGN_STAGE_META, renderCutsceneScreen, renderStoryDialogOverlay, wrapText } from './ae2-story.js';
 
 const WIDTH = 240;
 const HEIGHT = 320;
 const MIDP = Object.freeze({ HCENTER: 1, VCENTER: 2, LEFT: 4, RIGHT: 8, TOP: 16, BOTTOM: 32 });
 const CAMPAIGN_MAPS = ['m0', 'm1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm7'];
 const SKIRMISH_MAPS = ['s0', 's1', 's2', 's3', 's4', 's5', 's6', 's7', 's8', 's9', 's10', 's11'];
+const SKIRMISH_PLAYER_COUNTS = Object.freeze({ s2: 3, s3: 4, s4: 4, s6: 4, s8: 4, s10: 4, s11: 4 });
 const UNIT_LANG_BASE = [139, 143, 147, 151, 155, 159, 163, 167, 171, 175, 179];
 
 function loadImage(url) {
@@ -186,7 +188,7 @@ class AncientEmpiresWeb {
     this.pauseCursor = 0;
     this.subMenuReturnState = 'menu';
     this.settings = this.loadSettings();
-    this.skirmishConfig = { mapIdx: 0, gold: 350, players: [1, 0] };
+    this.skirmishConfig = { mapIdx: 0, gold: 350, players: [1, 0, 0, 0] };
     this.skirmishCursor = 0;
     this.settingsCursor = 0;
     this.helpScroll = 0;
@@ -235,6 +237,8 @@ class AncientEmpiresWeb {
     this.aiPending = false;
     this.aiTimer = 0;
     this.animTick = 0;
+    this.waterAnimFrame = 0;
+    this.floatTexts = [];
     this.saveKey = 'ae2-local-state-v2';
     this.settingsKey = 'ae2-settings-v1';
     this.lastTick = 0;
@@ -358,10 +362,43 @@ class AncientEmpiresWeb {
     this.paint();
   }
 
-  unitName(type) {
-    const idx = UNIT_LANG_BASE[type];
-    const str = idx != null ? this.assets.langStrings?.[idx] : null;
-    return str || `UNIT ${type}`;
+  unitName(type, level = 0) {
+    if (type === 11) return this.assets.langStrings?.[183] || 'CRYSTAL';
+    const base = UNIT_LANG_BASE[type];
+    if (base == null) return `UNIT ${type}`;
+    // Port of c.java:72-80: regular units promote names at Lv 2/4/6
+    const tier = type === 9 ? 0 : Math.min(3, Math.max(0, level >> 1));
+    return this.assets.langStrings?.[base + tier] || this.assets.langStrings?.[base] || `UNIT ${type}`;
+  }
+
+  getSkirmishPlayerCount(mapId = SKIRMISH_MAPS[this.skirmishConfig?.mapIdx ?? 0]) {
+    return SKIRMISH_PLAYER_COUNTS[mapId] ?? 2;
+  }
+
+  spawnStageUnit(type, playerSelector, x, y, extra = {}) {
+    const rec = this.assets.unitRecords[type];
+    if (!rec) return null;
+    const stats = computeUnitStats(rec, 0);
+    const unit = {
+      id: this.nextUnitId++,
+      type,
+      playerSelector,
+      palette: this.playerPalette[playerSelector] ?? playerSelector,
+      x,
+      y,
+      ...stats,
+      hp: 100,
+      xp: 0,
+      level: 0,
+      status: 0,
+      frameIndex: 0,
+      action: 0,
+      movedThisTurn: false,
+      ...(type === 9 ? { reviveCost: rec?.shortValue ?? 200 } : {}),
+      ...extra,
+    };
+    this.units.push(unit);
+    return unit;
   }
 
   initMapState(mapData, mapId, options = {}) {
@@ -371,12 +408,22 @@ class AncientEmpiresWeb {
       tiles: mapData.tiles.map(col => Int8Array.from(col)),
     };
     const players = new Set(mapData.units.map(u => u.playerSelector));
+    for (let x = 0; x < mapData.width; x++) {
+      for (let y = 0; y < mapData.height; y++) {
+        const pal = buildingPaletteFromTile(mapData.tiles[x][y]);
+        if (pal >= 1 && pal <= 4) players.add(pal);
+      }
+    }
     this.playerCount = Math.max(2, ...players);
     this.playerModes = options.playerModes
-      ? [...options.playerModes]
+      ? Array.from({ length: this.playerCount }, (_, i) => options.playerModes[i] ?? 0)
       : Array.from({ length: this.playerCount }, (_, i) => (i === 0 ? 1 : 0));
-    const startGold = options.startingGold ?? 350;
-    this.balances = Array.from({ length: this.playerCount }, () => startGold);
+    const stageCfg = CAMPAIGN_STAGE_CONFIG[mapId];
+    this.balances = Array.from({ length: this.playerCount }, (_, i) => {
+      if (options.startingGold != null) return options.startingGold;
+      if (stageCfg?.startGold?.[i] != null) return stageCfg.startGold[i];
+      return 350;
+    });
     this.playerPositions = Array.from({ length: this.playerCount }, () => [0, 0]);
     this.playerPalette = [0, 1, 2, 3, 4];
     this.turn = 0;
@@ -384,9 +431,26 @@ class AncientEmpiresWeb {
     this.nextUnitId = 1;
     this.triggeredTurnDialogs = new Set();
     this.m0Reinforced = false;
+    this.m4Stage = 0;
+    this.m6Stage = 0;
+    this.waterAnimFrame = 0;
+    this.floatTexts = [];
     this.stageBannerPrompt = 'TAP OR ENTER TO BEGIN';
-    this.units = mapData.units.map(record => {
+    const rawUnits = stageCfg?.removeInitialCrystals
+      ? mapData.units.filter(u => u.type !== 11)
+      : mapData.units;
+    this.units = rawUnits.map(record => {
       const stats = computeUnitStats(this.assets.unitRecords[record.type], 0);
+      let kingHead;
+      let isSaethBoss = false;
+      if (record.type === 9) {
+        if (record.playerSelector === 1 && stageCfg?.kingHeadP1 != null) kingHead = stageCfg.kingHeadP1;
+        else if (mapId === 'm7') {
+          if (record.playerSelector === 1) kingHead = record.x === 6 ? 2 : 0;
+          else if (record.x === 7 && record.y === 4) { kingHead = 3; isSaethBoss = true; }
+          else kingHead = 1;
+        }
+      }
       return {
         ...record,
         ...stats,
@@ -399,9 +463,27 @@ class AncientEmpiresWeb {
         action: 0,
         movedThisTurn: false,
         palette: this.playerPalette[record.playerSelector] ?? record.playerSelector,
+        ...(record.type === 9 ? { reviveCost: this.assets.unitRecords[9]?.shortValue ?? 200 } : {}),
+        ...(kingHead != null ? { kingHead } : {}),
+        ...(isSaethBoss ? { isSaethBoss: true } : {}),
       };
     });
-    const first = this.units.find(u => u.playerSelector === 1);
+
+    // Port of i.java:4789-4798: M6 begins with King Galamar escorting the Spirit Crystal convoy
+    if (mapId === 'm6') {
+      const galamar = this.units.find(u => u.type === 9 && u.playerSelector === 1);
+      if (galamar) {
+        galamar.x = 14;
+        galamar.y = 3;
+        galamar.kingHead = 0;
+      }
+      if (!this.unitAt(14, 2)) this.spawnStageUnit(0, 1, 14, 2);
+      if (!this.unitAt(13, 2)) this.spawnStageUnit(11, 1, 13, 2);
+      if (!this.unitAt(13, 3)) this.spawnStageUnit(1, 1, 13, 3);
+      if (!this.unitAt(13, 4)) this.spawnStageUnit(3, 1, 13, 4);
+    }
+
+    const first = this.units.find(u => u.playerSelector === 1 && u.action !== 3 && u.action !== 4);
     this.cursor = { x: first?.x ?? 0, y: first?.y ?? 0 };
     this.centerCameraOn(this.cursor.x, this.cursor.y);
     this.selected = null;
@@ -493,7 +575,7 @@ class AncientEmpiresWeb {
       const meta = CAMPAIGN_STAGE_META[mapId];
       const runStageIntroDialogs = () => {
         const startPlay = () => {
-          const hero = this.units.find(u => u.playerSelector === 1 && u.action !== 3);
+          const hero = this.units.find(u => u.playerSelector === 1 && u.action !== 3 && u.action !== 4 && u.hp > 0);
           if (hero) {
             this.cursor = { x: hero.x, y: hero.y };
             this.centerCameraOn(hero.x, hero.y);
@@ -581,8 +663,17 @@ class AncientEmpiresWeb {
   tick() {
     this.animTick++;
     if (this.animTick % 6 === 0) {
+      this.waterAnimFrame = (this.waterAnimFrame + 1) % 4;
       for (const u of this.units) {
-        if (u.action !== 3) u.frameIndex = (u.frameIndex + 1) % 2;
+        if (u.action !== 3 && u.action !== 4) u.frameIndex = (u.frameIndex + 1) % 2;
+      }
+    }
+    if (this.floatTexts.length > 0) {
+      for (let i = this.floatTexts.length - 1; i >= 0; i--) {
+        const ft = this.floatTexts[i];
+        ft.offsetY = (ft.offsetY ?? 0) + 0.45;
+        ft.timer -= 50;
+        if (ft.timer <= 0) this.floatTexts.splice(i, 1);
       }
     }
     if (this.state === 'cutscene') {
@@ -700,8 +791,9 @@ class AncientEmpiresWeb {
         else this.openMenu('menu');
         return;
       }
-      const row = Math.floor((y - 58) / 34);
-      if (row >= 0 && row < 4) {
+      const maxRows = 2 + this.getSkirmishPlayerCount();
+      const row = Math.floor((y - 44) / 33);
+      if (row >= 0 && row < maxRows) {
         this.skirmishCursor = row;
         this.adjustSkirmishOption(row, x >= WIDTH / 2 ? 1 : -1);
       }
@@ -856,24 +948,28 @@ class AncientEmpiresWeb {
   adjustSkirmishOption(row, dir) {
     if (row === 0) {
       this.skirmishConfig.mapIdx = (this.skirmishConfig.mapIdx + dir + SKIRMISH_MAPS.length) % SKIRMISH_MAPS.length;
+      const totalRows = 2 + this.getSkirmishPlayerCount();
+      if (this.skirmishCursor > totalRows) this.skirmishCursor = totalRows;
     } else if (row === 1) {
       const presets = [200, 350, 500, 750, 1000];
       const cur = Math.max(0, presets.indexOf(this.skirmishConfig.gold));
       this.skirmishConfig.gold = presets[(cur + dir + presets.length) % presets.length];
-    } else if (row === 2) {
-      this.skirmishConfig.players[0] = this.skirmishConfig.players[0] === 1 ? 0 : 1;
-    } else if (row === 3) {
-      this.skirmishConfig.players[1] = this.skirmishConfig.players[1] === 1 ? 0 : 1;
+    } else {
+      const pIdx = row - 2;
+      if (pIdx >= 0 && pIdx < this.getSkirmishPlayerCount()) {
+        this.skirmishConfig.players[pIdx] = this.skirmishConfig.players[pIdx] === 1 ? 0 : 1;
+      }
     }
     this.paint();
   }
 
   startConfiguredSkirmish() {
     const mapId = SKIRMISH_MAPS[this.skirmishConfig.mapIdx] || 's0';
+    const count = this.getSkirmishPlayerCount(mapId);
     this.loadAndStartMap(mapId, {
       includeIntro: false,
       startingGold: this.skirmishConfig.gold,
-      playerModes: [this.skirmishConfig.players[0], this.skirmishConfig.players[1], 0, 0],
+      playerModes: this.skirmishConfig.players.slice(0, count),
     });
   }
 
@@ -925,12 +1021,14 @@ class AncientEmpiresWeb {
       return;
     }
     if (this.state === 'skirmishSetup') {
-      if (code === 'ArrowUp' || code === 'KeyW') this.skirmishCursor = (this.skirmishCursor + 4) % 5;
-      else if (code === 'ArrowDown' || code === 'KeyS') this.skirmishCursor = (this.skirmishCursor + 1) % 5;
+      const startRow = 2 + this.getSkirmishPlayerCount();
+      const total = startRow + 1;
+      if (code === 'ArrowUp' || code === 'KeyW') this.skirmishCursor = (this.skirmishCursor + total - 1) % total;
+      else if (code === 'ArrowDown' || code === 'KeyS') this.skirmishCursor = (this.skirmishCursor + 1) % total;
       else if (code === 'ArrowLeft' || code === 'KeyA') this.adjustSkirmishOption(this.skirmishCursor, -1);
       else if (code === 'ArrowRight' || code === 'KeyD') this.adjustSkirmishOption(this.skirmishCursor, 1);
       else if (code === 'Enter' || code === 'Space' || code === 'Digit5') {
-        if (this.skirmishCursor === 4) this.startConfiguredSkirmish();
+        if (this.skirmishCursor >= startRow) this.startConfiguredSkirmish();
         else this.adjustSkirmishOption(this.skirmishCursor, 1);
         return;
       } else if (code === 'Escape') { this.openMenu('menu'); return; }
@@ -1036,7 +1134,7 @@ class AncientEmpiresWeb {
 
   focusCommander() {
     const mySelector = 1 + this.playerIndex;
-    const cmd = this.units.find(u => u.type === 9 && u.playerSelector === mySelector && u.action !== 3);
+    const cmd = this.units.find(u => u.type === 9 && u.playerSelector === mySelector && u.action !== 3 && u.action !== 4 && u.hp > 0);
     if (cmd) {
       this.cursor = { x: cmd.x, y: cmd.y };
       this.centerCameraOn(cmd.x, cmd.y);
@@ -1062,12 +1160,19 @@ class AncientEmpiresWeb {
     return playerSelector;
   }
 
+  ownerTeamForTile(rawTile) {
+    const pal = buildingPaletteFromTile(rawTile);
+    if (pal <= 0) return -1;
+    const ownerPlayer = this.playerPalette.indexOf(pal);
+    return ownerPlayer > 0 ? this.teamFor(ownerPlayer) : this.teamFor(pal);
+  }
+
   unitAt(x, y) {
-    return this.units.find(u => u.x === x && u.y === y && u.action !== 3);
+    return this.units.find(u => u.x === x && u.y === y && u.action !== 3 && u.action !== 4 && u.hp > 0);
   }
 
   tombstoneAt(x, y) {
-    return this.units.find(u => u.x === x && u.y === y && u.action === 3);
+    return this.units.find(u => u.x === x && u.y === y && u.action === 3 && u.type !== 9 && u.x >= 0 && u.y >= 0);
   }
 
   isPropertyOwnedBy(x, y, playerIdx) {
@@ -1130,6 +1235,15 @@ class AncientEmpiresWeb {
           return;
         }
       }
+      // Stationary Catapult can directly select a non-allied intact Town to bombard
+      if (!target && this.selected.type === 7 && !this.selected.movedThisTurn) {
+        const towns = this.targetableTownsFor(this.selected);
+        const tIdx = towns.findIndex(t => t.x === x && t.y === y);
+        if (tIdx >= 0) {
+          this.openTargetSelect('destroyTown', towns, tIdx);
+          return;
+        }
+      }
       // Stay on current tile -> open Action Menu directly
       if (x === this.selected.x && y === this.selected.y) {
         this.previewPath = null;
@@ -1168,7 +1282,10 @@ class AncientEmpiresWeb {
       this.moveOrigin = { x: target.x, y: target.y };
       this.reachable = this.showRange(target);
       this.previewPath = null;
-      this.attackTargets = getAttackableTargets(target, this.units, p => this.teamFor(p));
+      this.attackTargets = [
+        ...getAttackableTargets(target, this.units, p => this.teamFor(p)),
+        ...this.targetableTownsFor(target),
+      ];
       this.paint();
       return;
     }
@@ -1182,11 +1299,26 @@ class AncientEmpiresWeb {
     }
   }
 
+  targetableTownsFor(unit) {
+    return getTargetableTowns({
+      unit,
+      map: this.assets.map,
+      terrainAt: (x, y) => this.tileProperty(x, y) ?? 0,
+      unitAt: (x, y) => this.unitAt(x, y),
+      teamForPlayer: p => this.teamFor(p),
+      ownerTeamForTile: raw => this.ownerTeamForTile(raw),
+    });
+  }
+
   openActionMenu(unit) {
     const opts = [];
     const targets = getAttackableTargets(unit, this.units, p => this.teamFor(p));
     if (targets.length > 0) {
       opts.push({ kind: 'attack', icon: 2, label: this.assets.langStrings?.[62] || 'ATTACK', targets });
+    }
+    const townTargets = this.targetableTownsFor(unit);
+    if (townTargets.length > 0) {
+      opts.push({ kind: 'destroyTown', icon: 2, label: 'BOMBARD TOWN', targets: townTargets });
     }
     const myPal = this.playerPalette[unit.playerSelector] ?? unit.playerSelector;
     const tileAct = getTileActionForUnit(unit, this.rawTile(unit.x, unit.y), this.tileProperty(unit.x, unit.y), myPal);
@@ -1196,7 +1328,7 @@ class AncientEmpiresWeb {
     // Sorceress (type 3) can raise Skeleton from adjacent tombstone (i.java:2515-2530)
     if (unit.type === 3) {
       const tombs = this.units.filter(
-        u => u.action === 3 && Math.abs(u.x - unit.x) + Math.abs(u.y - unit.y) === 1 && !this.unitAt(u.x, u.y)
+        u => u.action === 3 && u.type !== 9 && u.x >= 0 && u.y >= 0 && Math.abs(u.x - unit.x) + Math.abs(u.y - unit.y) === 1 && !this.unitAt(u.x, u.y)
       );
       if (tombs.length > 0) opts.push({ kind: 'raise', icon: 3, label: this.assets.langStrings?.[69] || 'RAISE', tombs });
     }
@@ -1205,7 +1337,7 @@ class AncientEmpiresWeb {
     opts.push({ kind: 'cancel', icon: 6, label: this.assets.langStrings?.[65] || 'CANCEL' });
     this.actionOptions = opts;
     this.actionCursor = 0;
-    this.attackTargets = targets;
+    this.attackTargets = [...targets, ...townTargets];
     this.state = 'actionMenu';
     this.paint();
   }
@@ -1240,9 +1372,29 @@ class AncientEmpiresWeb {
     if (!unit || !chosen) { this.cancelSelection(); return; }
     if (this.targetKind === 'attack') {
       this.performAttack(unit, chosen);
+    } else if (this.targetKind === 'destroyTown') {
+      this.destroyTownAt(unit, chosen);
     } else if (this.targetKind === 'raise') {
       this.raiseSkeletonOn(unit, chosen);
     }
+  }
+
+  // Port of i.java:2493-2499: Catapult bombards Town into ruined tile 27
+  destroyTownAt(unit, town) {
+    this.assets.map.tiles[town.x][town.y] = 27;
+    unit.action = 1;
+    this.sfx('hit');
+    this.floatTexts.push({ x: town.x, y: town.y, text: 'RUINED!', color: '#ff9248', offsetY: 0, timer: 1100 });
+    this.selected = null;
+    this.moveOrigin = null;
+    this.reachable = null;
+    this.previewPath = null;
+    this.attackTargets = [];
+    this.targetCandidates = [];
+    this.state = 'play';
+    this.persistState();
+    this.checkMatchOutcome();
+    this.paint();
   }
 
   raiseSkeletonOn(unit, tomb) {
@@ -1286,6 +1438,10 @@ class AncientEmpiresWeb {
       this.openTargetSelect('attack', opt.targets, 0);
       return;
     }
+    if (opt.kind === 'destroyTown' && opt.targets?.length) {
+      this.openTargetSelect('destroyTown', opt.targets, 0);
+      return;
+    }
     if (opt.kind === 'capture' || opt.kind === 'repair') {
       const myPal = this.playerPalette[unit.playerSelector] ?? unit.playerSelector;
       this.assets.map.tiles[unit.x][unit.y] = encodeBuildingTile(this.rawTile(unit.x, unit.y), myPal);
@@ -1323,6 +1479,7 @@ class AncientEmpiresWeb {
       defender,
       terrainAt: (x, y) => this.tileProperty(x, y) ?? 0,
       rawTileAt: (x, y) => this.rawTile(x, y),
+      tombTurns: this.playerCount,
     });
     attacker.action = 1;
     this.selected = null;
@@ -1334,7 +1491,7 @@ class AncientEmpiresWeb {
 
     const finalize = () => {
       const msg = res.attackerLeveled
-        ? `PROMOTED TO LV ${attacker.level + 1}!`
+        ? `PROMOTED: ${this.unitName(attacker.type, attacker.level)}!`
         : (!this.settings.fightAnimation
             ? (res.counterDamage > 0 ? `HIT -${res.damage} · COUNTER -${res.counterDamage}` : `HIT -${res.damage}`)
             : null);
@@ -1350,10 +1507,10 @@ class AncientEmpiresWeb {
     if (this.settings.fightAnimation) {
       this.battleScene = new BattleScene({
         attacker,
-        attackerName: this.unitName(attacker.type),
+        attackerName: this.unitName(attacker.type, attacker.level),
         attackerTerrain: aTerrain,
         defender,
-        defenderName: this.unitName(defender.type),
+        defenderName: this.unitName(defender.type, defender.level),
         defenderTerrain: dTerrain,
         combatResult: res,
         assets: this.assets,
@@ -1369,9 +1526,23 @@ class AncientEmpiresWeb {
     }
   }
 
+  getFallenKingFor(playerSelector) {
+    return this.units.find(u => u.type === 9 && u.playerSelector === playerSelector && u.action === 3);
+  }
+
+  getRecruitCost(unitType, playerSelector = 1 + this.playerIndex) {
+    if (unitType === 9) {
+      const fallen = this.getFallenKingFor(playerSelector);
+      if (fallen?.reviveCost != null) return fallen.reviveCost;
+    }
+    return this.assets.unitRecords[unitType]?.shortValue ?? 9999;
+  }
+
   getRecruitList() {
     const mySelector = 1 + this.playerIndex;
-    const hasKing = this.units.some(u => u.type === 9 && u.playerSelector === mySelector && u.action !== 3 && u.hp > 0);
+    const hasKing = this.units.some(
+      u => u.type === 9 && u.playerSelector === mySelector && u.action !== 3 && u.action !== 4 && u.hp > 0
+    );
     return hasKing ? [0, 1, 2, 3, 4, 5, 6, 7, 8] : [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
   }
 
@@ -1379,31 +1550,27 @@ class AncientEmpiresWeb {
     if (!this.recruitCastle) return;
     const list = this.getRecruitList();
     const actualType = list[unitType] ?? unitType;
-    const rec = this.assets.unitRecords[actualType];
-    const cost = rec?.shortValue ?? 9999;
+    const mySelector = 1 + this.playerIndex;
+    const cost = this.getRecruitCost(actualType, mySelector);
     const gold = this.balances[this.playerIndex] ?? 0;
     if (gold < cost || this.unitAt(this.recruitCastle.x, this.recruitCastle.y)) {
       this.showToast(gold < cost ? 'NOT ENOUGH GOLD!' : 'TILE OCCUPIED!', 900);
       return;
     }
     this.balances[this.playerIndex] = gold - cost;
-    const stats = computeUnitStats(rec, 0);
-    this.units.push({
-      id: this.nextUnitId++,
-      type: actualType,
-      playerSelector: 1 + this.playerIndex,
-      palette: this.playerPalette[1 + this.playerIndex] ?? (1 + this.playerIndex),
-      x: this.recruitCastle.x,
-      y: this.recruitCastle.y,
-      ...stats,
-      hp: 100,
-      xp: 0,
-      level: 0,
-      status: 0,
-      frameIndex: 0,
-      action: 1,
-      movedThisTurn: false,
-    });
+    const fallenKing = actualType === 9 ? this.getFallenKingFor(mySelector) : null;
+    if (fallenKing) {
+      fallenKing.x = this.recruitCastle.x;
+      fallenKing.y = this.recruitCastle.y;
+      fallenKing.hp = 100;
+      fallenKing.status = 0;
+      fallenKing.frameIndex = 0;
+      fallenKing.action = 1;
+      fallenKing.movedThisTurn = false;
+      fallenKing.palette = this.playerPalette[mySelector] ?? mySelector;
+    } else {
+      this.spawnStageUnit(actualType, mySelector, this.recruitCastle.x, this.recruitCastle.y, { action: 1 });
+    }
     this.sfx('recruit');
     this.recruitCastle = null;
     this.state = 'play';
@@ -1461,29 +1628,41 @@ class AncientEmpiresWeb {
     });
     this.playerIndex = res.playerIndex;
     this.turn = res.turnCount;
+    for (const h of res.healed) {
+      this.floatTexts.push({ x: h.x, y: h.y, text: `+${h.amount}`, color: '#7dff7d', offsetY: 0, timer: 1100 });
+    }
     this.persistState();
     this.checkMatchOutcome();
     if (this.state === 'victory' || this.state === 'defeat') return;
 
+    const roundNum = Math.floor(this.turn / Math.max(1, this.playerCount)) + 1;
+    if (this.currentMapId === 'm2' && roundNum === 2 && !this.triggeredTurnDialogs.has('m2_elem')) {
+      this.triggeredTurnDialogs.add('m2_elem');
+      for (const [ex, ey] of CAMPAIGN_STAGE_CONFIG.m2.turn2Elementals) {
+        if (!this.unitAt(ex, ey)) this.spawnStageUnit(2, 1, ex, ey);
+      }
+    }
+
     if (this.playerModes[this.playerIndex] === 0) {
       this.aiPending = true;
       this.aiTimer = 350;
-      this.status.textContent = `CPU TURN · +${res.income}G`;
+      this.status.textContent = `P${this.playerIndex + 1} CPU · +${res.income}G`;
     } else {
       this.aiPending = false;
-      this.status.textContent = `TURN ${this.turn + 1} · +${res.income}G`;
+      this.status.textContent = `ROUND ${roundNum} · P${this.playerIndex + 1} +${res.income}G`;
       const meta = CAMPAIGN_STAGE_META[this.currentMapId];
-      const turnKey = this.turn + 1;
-      const turnScripts = meta?.turnDialogs?.[turnKey];
-      if (turnScripts && this.settings.showStory && !this.triggeredTurnDialogs.has(turnKey)) {
-        this.triggeredTurnDialogs.add(turnKey);
+      const turnScripts = meta?.turnDialogs?.[roundNum];
+      if (turnScripts && this.settings.showStory && !this.triggeredTurnDialogs.has(roundNum)) {
+        this.triggeredTurnDialogs.add(roundNum);
         this.playStoryDialogs(turnScripts, () => {
           this.showToast(`PLAYER ${this.playerIndex + 1} TURN (+${res.income}G)`, 900);
           this.paint();
         });
         return;
       }
-      this.showToast(`PLAYER ${this.playerIndex + 1} TURN (+${res.income}G)`, 900);
+      if (this.state !== 'storyDialog') {
+        this.showToast(`PLAYER ${this.playerIndex + 1} TURN (+${res.income}G)`, 900);
+      }
     }
     this.paint();
   }
@@ -1492,7 +1671,9 @@ class AncientEmpiresWeb {
     if (this.state !== 'play') return;
     const mySelector = 1 + this.playerIndex;
     const myPal = this.playerPalette[mySelector] ?? mySelector;
-    const idleUnit = this.units.find(u => u.playerSelector === mySelector && u.action === 0 && u.hp > 0);
+    const idleUnit = this.units.find(
+      u => u.playerSelector === mySelector && u.action === 0 && u.hp > 0 && u.type !== 11
+    );
     if (idleUnit) {
       const act = chooseAiUnitAction({
         unit: idleUnit,
@@ -1502,14 +1683,19 @@ class AncientEmpiresWeb {
         unitAt: (x, y) => this.unitAt(x, y),
         teamForPlayer: p => this.teamFor(p),
         myPalette: myPal,
+        ownerTeamForTile: raw => this.ownerTeamForTile(raw),
       });
       idleUnit.x = act.x;
       idleUnit.y = act.y;
       if (act.kind === 'capture' || act.kind === 'repair') {
         this.assets.map.tiles[act.x][act.y] = encodeBuildingTile(this.rawTile(act.x, act.y), myPal);
         this.sfx('capture');
+      } else if (act.kind === 'destroyTown') {
+        this.assets.map.tiles[act.targetX][act.targetY] = 27;
+        this.floatTexts.push({ x: act.targetX, y: act.targetY, text: 'RUINED!', color: '#ff9248', offsetY: 0, timer: 1100 });
+        this.sfx('hit');
       } else if (act.kind === 'raise') {
-        const tomb = this.units.find(u => u.id === act.tombId && u.action === 3);
+        const tomb = this.units.find(u => u.id === act.tombId && u.action === 3 && u.type !== 9);
         if (tomb) {
           const stats = computeUnitStats(this.assets.unitRecords[10], 0);
           Object.assign(tomb, {
@@ -1537,33 +1723,29 @@ class AncientEmpiresWeb {
       return;
     }
 
-    // AI Castle Recruitment (i.java:3774-3850)
+    // AI Castle Recruitment (i.java:3774-3850) — including Commander revival
     const gold = this.balances[this.playerIndex] ?? 0;
+    const fallenKing = this.getFallenKingFor(mySelector);
     if (gold >= 150) {
       for (let x = 0; x < this.assets.map.width; x++) {
         for (let y = 0; y < this.assets.map.height; y++) {
           if (this.tileProperty(x, y) === 9 && this.isPropertyOwnedBy(x, y, this.playerIndex) && !this.unitAt(x, y)) {
+            if (fallenKing && gold >= (fallenKing.reviveCost ?? 200)) {
+              this.balances[this.playerIndex] -= (fallenKing.reviveCost ?? 200);
+              fallenKing.x = x;
+              fallenKing.y = y;
+              fallenKing.hp = 100;
+              fallenKing.action = 1;
+              fallenKing.status = 0;
+              fallenKing.movedThisTurn = false;
+              fallenKing.palette = myPal;
+              break;
+            }
             const pickType = gold >= 450 ? 3 : gold >= 250 ? 1 : 0;
             const rec = this.assets.unitRecords[pickType];
             if (rec && (this.balances[this.playerIndex] ?? 0) >= rec.shortValue) {
               this.balances[this.playerIndex] -= rec.shortValue;
-              const stats = computeUnitStats(rec, 0);
-              this.units.push({
-                id: this.nextUnitId++,
-                type: pickType,
-                playerSelector: mySelector,
-                palette: myPal,
-                x,
-                y,
-                ...stats,
-                hp: 100,
-                xp: 0,
-                level: 0,
-                status: 0,
-                frameIndex: 0,
-                action: 1,
-                movedThisTurn: false,
-              });
+              this.spawnStageUnit(pickType, mySelector, x, y, { action: 1 });
               break;
             }
           }
@@ -1575,38 +1757,126 @@ class AncientEmpiresWeb {
     this.endTurn();
   }
 
-  spawnWaveUnit(type, playerSelector, x, y) {
-    const rec = this.assets.unitRecords[type];
-    if (!rec) return null;
-    const stats = computeUnitStats(rec, 0);
-    const unit = {
-      id: this.nextUnitId++,
-      type,
-      playerSelector,
-      palette: this.playerPalette[playerSelector] ?? playerSelector,
-      x,
-      y,
-      ...stats,
-      hp: 100,
-      xp: 0,
-      level: 0,
-      status: 0,
-      frameIndex: 0,
-      action: 0,
-      movedThisTurn: false,
-    };
-    this.units.push(unit);
-    return unit;
+  hasLivingUnit(playerSelector) {
+    return this.units.some(u => u.playerSelector === playerSelector && u.action !== 3 && u.action !== 4 && u.hp > 0);
+  }
+
+  countOwnedCastles(playerIdx) {
+    let castles = 0;
+    for (let x = 0; x < this.assets.map.width; x++) {
+      for (let y = 0; y < this.assets.map.height; y++) {
+        if (this.tileProperty(x, y) === 9 && this.isPropertyOwnedBy(x, y, playerIdx)) castles++;
+      }
+    }
+    return castles;
+  }
+
+  isSideEliminated(playerIdx) {
+    return !this.hasLivingUnit(playerIdx + 1) && this.countOwnedCastles(playerIdx) === 0;
+  }
+
+  spawnReinforcements(specs, playerSelector) {
+    for (const [type, tx, ty, extra] of specs) {
+      let px = tx;
+      let py = ty;
+      if (this.unitAt(px, py)) {
+        const alt = [[px + 1, py], [px - 1, py], [px, py + 1], [px, py - 1]]
+          .find(([ax, ay]) => ax >= 0 && ay >= 0 && ax < this.assets.map.width && ay < this.assets.map.height && !this.unitAt(ax, ay));
+        if (!alt) continue;
+        [px, py] = alt;
+      }
+      this.spawnStageUnit(type, playerSelector, px, py, extra);
+    }
+  }
+
+  checkCampaignTriggers() {
+    const p1Units = this.units.filter(u => u.playerSelector === 1 && u.action !== 3 && u.action !== 4 && u.hp > 0);
+    const p2Units = this.units.filter(u => u.playerSelector === 2 && u.action !== 3 && u.action !== 4 && u.hp > 0);
+    const queuedDialogs = [];
+
+    // Port of i.java:5570-5709: M4 Cave Ambushes 1-4 triggered as Player 1 advances
+    if (this.currentMapId === 'm4') {
+      if (this.m4Stage === 0 && p1Units.some(u => u.x <= 8)) {
+        this.m4Stage = 1;
+        this.spawnReinforcements([[10, 4, 1], [1, 5, 2], [10, 4, 3]], 2);
+        queuedDialogs.push({ langIdx: 258, portrait: 5, focus: [4, 2] });
+      }
+      if (this.m4Stage === 1 && p1Units.some(u => u.y >= 7)) {
+        this.m4Stage = 2;
+        this.spawnReinforcements([[1, 5, 10], [5, 7, 8], [5, 7, 9]], 2);
+      }
+      if (this.m4Stage === 2 && p1Units.some(u => u.x >= 8 && u.y >= 6)) {
+        this.m4Stage = 3;
+        this.spawnReinforcements([[5, 12, 7], [6, 12, 6], [5, 12, 5]], 2);
+      }
+      if (this.m4Stage === 3 && p1Units.some(u => u.x >= 15 && u.y >= 8)) {
+        this.m4Stage = 4;
+        this.spawnReinforcements([[5, 16, 10], [6, 17, 10], [5, 18, 10], [1, 18, 9]], 2);
+        queuedDialogs.push({ langIdx: 259, portrait: 0, focus: [17, 9] });
+      }
+    }
+
+    // Port of i.java:5790-5976: M6 Rendezvous Bridge Ambush, Crystal evacuation, Saeth & Valadorn arrival
+    if (this.currentMapId === 'm6') {
+      const roundNum = Math.floor(this.turn / Math.max(1, this.playerCount)) + 1;
+      if (this.m6Stage === 0 && roundNum >= 2) {
+        this.m6Stage = 1;
+        this.spawnReinforcements([[5, 14, 7], [0, 13, 7], [3, 12, 7], [1, 13, 8]], 2);
+        queuedDialogs.push({ langIdx: 264, portrait: 5, focus: [13, 7] });
+      } else if (this.m6Stage === 1 && (p2Units.some(u => u.x <= 9 || u.y >= 10) || p2Units.length === 0)) {
+        this.m6Stage = 2;
+        this.units = this.units.filter(u => u.type !== 11);
+        this.spawnReinforcements([
+          [9, 0, 8, { kingHead: 3 }], [0, 3, 8], [0, 1, 10], [8, 4, 8], [8, 2, 10], [4, 2, 9], [6, 4, 9], [6, 5, 10],
+          [0, 12, 14], [6, 14, 14], [2, 13, 12], [3, 13, 15],
+        ], 2);
+        this.spawnReinforcements([
+          [9, 13, 16, { kingHead: 2 }], [6, 12, 16], [8, 14, 16], [4, 13, 17], [1, 12, 17],
+        ], 1);
+        queuedDialogs.push(
+          { langIdx: 265, portrait: 5, focus: [13, 4] },
+          { langIdx: 266, portrait: 0 },
+          { langIdx: 267, portrait: 3, focus: [0, 8] },
+          { langIdx: 268, portrait: 5, focus: [13, 14] },
+          { langIdx: 269, portrait: 0 },
+          { langIdx: 270, portrait: 1, focus: [13, 16] }
+        );
+      }
+    }
+
+    if (queuedDialogs.length > 0 && this.settings.showStory) {
+      const resumeAi = this.aiPending;
+      this.aiPending = false;
+      this.playStoryDialogs(queuedDialogs, () => {
+        this.state = 'play';
+        this.aiPending = resumeAi;
+        this.persistState();
+        this.paint();
+      });
+    }
   }
 
   checkMatchOutcome() {
-    const galamarStages = new Set(['m0', 'm2', 'm4', 'm6']);
-    const kingAlive = this.units.some(u => u.playerSelector === 1 && u.type === 9 && u.action !== 3 && u.hp > 0);
-    const aliveHuman = this.units.some(u => u.playerSelector === 1 && u.action !== 3 && u.hp > 0);
-    const aliveCpu = this.units.some(u => u.playerSelector !== 1 && u.action !== 3 && u.hp > 0);
+    this.checkCampaignTriggers();
 
-    // Port of i.java:4907-4919: King Galamar falling triggers immediate defeat on escort/story stages.
-    if (!aliveHuman || (galamarStages.has(this.currentMapId) && !kingAlive)) {
+    const cfg = CAMPAIGN_STAGE_CONFIG[this.currentMapId];
+    const galamarAlive = this.units.some(
+      u => u.playerSelector === 1 && u.type === 9 && u.kingHead !== 2 && u.action !== 3 && u.action !== 4 && u.hp > 0
+    );
+    const crystalMissing = (this.currentMapId === 'm4' || (this.currentMapId === 'm6' && this.m6Stage < 2))
+      && !this.units.some(u => u.type === 11 && u.playerSelector === 1 && u.action !== 3 && u.action !== 4 && u.hp > 0);
+
+    for (let p = 0; p < this.playerCount; p++) {
+      if (this.playerModes[p] === 2) continue;
+      if (this.currentMapId === 'm4' && p === 1 && this.m4Stage < 4) continue;
+      if (this.currentMapId === 'm6' && p === 1 && this.m6Stage < 2) continue;
+      if (this.currentMapId === 'm0' && p === 1 && !this.m0Reinforced && this.settings.showStory) continue;
+      if (this.isSideEliminated(p)) this.playerModes[p] = 2;
+    }
+
+    const humanSurvivors = this.playerModes.filter(m => m === 1).length;
+    const galamarDefeat = !!cfg?.galamarSurvival && !galamarAlive;
+    if (galamarDefeat || crystalMissing || humanSurvivors === 0) {
       this.aiPending = false;
       this.sfx('defeat');
       this.state = 'defeat';
@@ -1615,13 +1885,13 @@ class AncientEmpiresWeb {
     }
 
     // Port of i.java:5044-5085: M0 Temple Raiders Wave 2 reinforcement ambush once initial raiders fall.
-    if (!aliveCpu && this.currentMapId === 'm0' && this.settings.showStory && !this.m0Reinforced) {
+    if (this.currentMapId === 'm0' && this.settings.showStory && !this.m0Reinforced && !this.hasLivingUnit(2)) {
       this.m0Reinforced = true;
       this.aiPending = false;
       const p1 = !this.unitAt(1, 2) ? [1, 2] : [1, 1];
       const p2 = !this.unitAt(10, 9) ? [10, 9] : [10, 10];
-      if (!this.unitAt(p1[0], p1[1])) this.spawnWaveUnit(1, 2, p1[0], p1[1]);
-      if (!this.unitAt(p2[0], p2[1])) this.spawnWaveUnit(0, 2, p2[0], p2[1]);
+      if (!this.unitAt(p1[0], p1[1])) this.spawnStageUnit(1, 2, p1[0], p1[1]);
+      if (!this.unitAt(p2[0], p2[1])) this.spawnStageUnit(0, 2, p2[0], p2[1]);
       this.playStoryDialogs([
         { langIdx: 225, portrait: 5, focus: p1 },
         { langIdx: 226, portrait: 0, focus: p2 },
@@ -1633,7 +1903,17 @@ class AncientEmpiresWeb {
       return;
     }
 
-    if (!aliveCpu) {
+    const saethKilled = !!cfg?.bossIsVictory
+      && this.units.some(u => u.isSaethBoss && (u.action === 3 || u.action === 4 || u.hp <= 0));
+    const activeSides = this.playerModes.filter(m => m !== 2).length;
+    const cpuStillStanding = Array.from({ length: this.playerCount }, (_, p) => p)
+      .some(p => this.playerModes[p] === 0 && (
+        !this.isSideEliminated(p)
+        || (this.currentMapId === 'm4' && p === 1 && this.m4Stage < 4)
+        || (this.currentMapId === 'm6' && p === 1 && this.m6Stage < 2)
+      ));
+
+    if (saethKilled || (!cpuStillStanding && activeSides <= 1) || (this.currentMapId.startsWith('m') && !cpuStillStanding)) {
       this.aiPending = false;
       this.sfx('victory');
       const meta = CAMPAIGN_STAGE_META[this.currentMapId];
@@ -1666,10 +1946,14 @@ class AncientEmpiresWeb {
       mapId: this.currentMapId,
       turn: this.turn,
       playerIndex: this.playerIndex,
+      playerCount: this.playerCount,
+      playerModes: this.playerModes,
       balances: this.balances,
       cursor: this.cursor,
       units: this.units,
       m0Reinforced: this.m0Reinforced,
+      m4Stage: this.m4Stage,
+      m6Stage: this.m6Stage,
       triggeredTurnDialogs: [...this.triggeredTurnDialogs],
       tiles: Array.from(this.assets.map.tiles, col => Array.from(col)),
     };
@@ -1687,11 +1971,15 @@ class AncientEmpiresWeb {
         this.assets.map.tiles = saved.tiles.map(col => Int8Array.from(col));
       }
       if (Array.isArray(saved.units)) this.units = saved.units;
+      if (Array.isArray(saved.playerModes)) this.playerModes = saved.playerModes;
+      if (Number.isInteger(saved.playerCount)) this.playerCount = saved.playerCount;
       if (Array.isArray(saved.balances)) this.balances = saved.balances;
       this.turn = saved.turn || 0;
       this.playerIndex = saved.playerIndex || 0;
       this.cursor = saved.cursor || this.cursor;
       this.m0Reinforced = !!saved.m0Reinforced;
+      this.m4Stage = saved.m4Stage || 0;
+      this.m6Stage = saved.m6Stage || 0;
       this.triggeredTurnDialogs = new Set(Array.isArray(saved.triggeredTurnDialogs) ? saved.triggeredTurnDialogs : []);
       this.state = 'play';
       this.status.textContent = `${this.currentMapId.toUpperCase()} · RESUMED`;
@@ -1725,7 +2013,10 @@ class AncientEmpiresWeb {
       if (hoverUnit.type === 9 && this.assets.sprites.king_head_icons) {
         const headMeta = this.assets.sprites.king_head_icons;
         const headImg = acted ? (this.assets.kingHeadPalettes?.[0] ?? this.assets.images.king_head_icons) : this.assets.images.king_head_icons;
-        const headFrame = headMeta.frames?.[Math.max(0, Math.min(3, teamPal - 1)) * 2 + ((hoverUnit.frameIndex ?? 0) & 1)];
+        const headTeam = Number.isInteger(hoverUnit.kingHead)
+          ? hoverUnit.kingHead
+          : Math.max(0, Math.min(3, teamPal - 1));
+        const headFrame = headMeta.frames?.[headTeam * 2 + ((hoverUnit.frameIndex ?? 0) & 1)];
         if (headImg && headFrame) {
           drawRegionMIDP(ctx, headImg, headFrame.sourceFrame * headMeta.frameWidth, 0, headMeta.frameWidth, headMeta.frameHeight,
             headFrame.transform ?? 0, 2 + (headFrame.offsetX ?? 0), 2 + (headFrame.offsetY ?? 0), MIDP.LEFT | MIDP.TOP);
@@ -1759,13 +2050,19 @@ class AncientEmpiresWeb {
     const target = this.targetCandidates[this.targetCursor];
     if (!attacker || !target) return;
     const isAttack = this.targetKind === 'attack';
+    const isTown = this.targetKind === 'destroyTown';
     const boxY = 30;
     ctx.fillStyle = 'rgba(20, 16, 26, 0.94)';
     ctx.fillRect(6, boxY, WIDTH - 12, 36);
-    ctx.strokeStyle = isAttack ? '#ff4b4b' : '#9cff7b';
+    ctx.strokeStyle = isAttack ? '#ff4b4b' : isTown ? '#ffa640' : '#9cff7b';
     ctx.lineWidth = 1;
     ctx.strokeRect(6, boxY, WIDTH - 12, 36);
 
+    if (isTown) {
+      centerText(ctx, `BOMBARD TOWN (${target.x},${target.y}) · DESTROYS TOWN`, boxY + 12, { font: 'bold 8px monospace', color: '#ffa640' });
+      centerText(ctx, 'ENTER / TAP TARGET · ESC BACK', boxY + 26, { font: '8px monospace', color: '#e6decb' });
+      return;
+    }
     if (!isAttack) {
       centerText(ctx, 'SELECT TOMBSTONE TO RAISE SKELETON', boxY + 12, { font: 'bold 8px monospace', color: '#9cff7b' });
       centerText(ctx, 'ENTER / TAP TARGET · ESC BACK', boxY + 26, { font: '8px monospace', color: '#e6decb' });
@@ -1786,13 +2083,13 @@ class AncientEmpiresWeb {
     ctx.font = 'bold 8px monospace';
     ctx.textAlign = 'left';
     ctx.fillStyle = '#5bb8ff';
-    ctx.fillText(`${this.unitName(attacker.type).slice(0, 10)} (${attacker.hp})`, 28, boxY + 10);
+    ctx.fillText(`${this.unitName(attacker.type, attacker.level).slice(0, 10)} (${attacker.hp})`, 28, boxY + 10);
     ctx.fillStyle = '#f4dfb3';
     ctx.fillText(`ATK:${attacker.atkMin + aMod}-${attacker.atkMax + aMod} DEF:${attacker.defense + aDef}`, 28, boxY + 26);
 
     ctx.textAlign = 'right';
     ctx.fillStyle = '#ff7272';
-    ctx.fillText(`${this.unitName(target.type).slice(0, 10)} (${target.hp})`, WIDTH - 12, boxY + 10);
+    ctx.fillText(`${this.unitName(target.type, target.level).slice(0, 10)} (${target.hp})`, WIDTH - 12, boxY + 10);
     ctx.fillStyle = '#e6decb';
     ctx.fillText(`DEF:${target.defense + dDef} LV:${target.level}`, WIDTH - 12, boxY + 26);
   }
@@ -1864,16 +2161,20 @@ class AncientEmpiresWeb {
     }
 
     if (this.state === 'skirmishSetup') {
-      centerText(ctx, 'SKIRMISH SETUP', 20, { font: 'bold 11px monospace', color: '#ffd84d' });
+      centerText(ctx, 'SKIRMISH SETUP', 18, { font: 'bold 11px monospace', color: '#ffd84d' });
       const mapId = SKIRMISH_MAPS[this.skirmishConfig.mapIdx] || 's0';
+      const pCount = this.getSkirmishPlayerCount(mapId);
+      const colors = ['BLUE', 'RED', 'GREEN', 'YELLOW'];
       const rows = [
         ['MAP', this.mapLabel(mapId)],
         ['STARTING GOLD', `${this.skirmishConfig.gold}G`],
-        ['PLAYER 1 (BLUE)', this.skirmishConfig.players[0] === 1 ? 'HUMAN' : 'CPU'],
-        ['PLAYER 2 (RED)', this.skirmishConfig.players[1] === 1 ? 'HUMAN' : 'CPU'],
+        ...Array.from({ length: pCount }, (_, i) => [
+          `PLAYER ${i + 1} (${colors[i]})`,
+          this.skirmishConfig.players[i] === 1 ? 'HUMAN' : 'CPU',
+        ]),
       ];
       rows.forEach(([k, v], i) => {
-        const y = 58 + i * 34;
+        const y = 44 + i * 33;
         ctx.fillStyle = i === this.skirmishCursor ? '#3b2e1b' : '#181c24';
         ctx.fillRect(18, y, WIDTH - 36, 28);
         ctx.strokeStyle = i === this.skirmishCursor ? '#ffd84d' : '#524433';
@@ -1886,7 +2187,7 @@ class AncientEmpiresWeb {
         ctx.fillStyle = '#ffd84d';
         ctx.fillText(`◀  ${v}  ▶`, 26, y + 23, WIDTH - 52);
       });
-      const startSel = this.skirmishCursor === 4;
+      const startSel = this.skirmishCursor >= rows.length;
       ctx.fillStyle = startSel ? '#3c2a18' : '#241a14';
       ctx.fillRect(16, 280, 102, 24);
       ctx.strokeStyle = startSel ? '#ffd84d' : '#8b6f47';
@@ -2016,6 +2317,8 @@ class AncientEmpiresWeb {
         ? (this.state === 'targetSelect' ? this.targetCandidates.map(t => [t.x, t.y]) : this.attackTargets.map(t => [t.x, t.y]))
         : null,
       path: this.state === 'play' ? this.previewPath : null,
+      waterAnimFrame: this.waterAnimFrame,
+      floatTexts: this.floatTexts,
     });
     this.boardCtx.restore();
     ctx.drawImage(this.boardCanvas, 0, 28);
@@ -2025,7 +2328,10 @@ class AncientEmpiresWeb {
     ctx.fillRect(0, 0, WIDTH, 28);
     const hoverUnit = this.unitAt(this.cursor.x, this.cursor.y);
     this.drawHudIcon(ctx, hoverUnit);
-    const myUnitsCount = this.units.filter(u => u.playerSelector === 1 + this.playerIndex && u.action !== 3).length;
+    const myUnitsCount = this.units.filter(
+      u => u.playerSelector === 1 + this.playerIndex && u.action !== 3 && u.action !== 4 && u.hp > 0
+    ).length;
+    const roundHud = Math.floor(this.turn / Math.max(1, this.playerCount)) + 1;
     const hud2 = this.assets.images.hud_icons_2;
     if (hud2) {
       ctx.drawImage(hud2, 11, 0, 11, 11, 30, 2, 11, 11);
@@ -2035,14 +2341,14 @@ class AncientEmpiresWeb {
     ctx.font = 'bold 9px monospace';
     ctx.textAlign = 'left';
     ctx.fillText(`${this.balances[this.playerIndex] ?? 0}G`, 44, 11);
-    ctx.fillText(`${myUnitsCount} · T${this.turn + 1} P${this.playerIndex + 1}`, 122, 11);
+    ctx.fillText(`${myUnitsCount} · R${roundHud} P${this.playerIndex + 1}`, 122, 11);
 
     ctx.fillStyle = '#a9d69d';
     ctx.font = '8px monospace';
     const tileProp = this.tileProperty(this.cursor.x, this.cursor.y);
     const tombHover = this.tombstoneAt(this.cursor.x, this.cursor.y);
     const subLabel = hoverUnit
-      ? `${this.unitName(hoverUnit.type)} HP:${hoverUnit.hp} LV:${hoverUnit.level}`
+      ? `${this.unitName(hoverUnit.type, hoverUnit.level)} HP:${hoverUnit.hp} LV:${hoverUnit.level}`
       : tombHover
         ? `TOMBSTONE (${this.cursor.x},${this.cursor.y})`
         : `${this.currentMapId.toUpperCase()} (${this.cursor.x},${this.cursor.y}) DEF:${[0, 5, 10, 10, 15, 0, 5, 15, 15, 15][tileProp ?? 0] ?? 0}`;
@@ -2133,7 +2439,7 @@ class AncientEmpiresWeb {
       for (let i = 0; i < list.length; i++) {
         const uType = list[i];
         const y = panelY + headerHeight + i * rowHeight;
-        const cost = this.assets.unitRecords[uType]?.shortValue ?? 999;
+        const cost = this.getRecruitCost(uType);
         const canAfford = (this.balances[this.playerIndex] ?? 0) >= cost;
         if (i === this.recruitCursor) {
           ctx.fillStyle = '#3b2e1b';

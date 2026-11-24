@@ -4,7 +4,7 @@ import test from 'node:test';
 import { decodeMap, decodeSprite, decodeTerrainProperties, decodeUnits } from '../ancient-empires-loader.js';
 import { renderOriginalBoard } from '../render-original.js';
 import { BattleScene } from '../ae2-battle.js';
-import { CAMPAIGN_STAGE_META } from '../ae2-story.js';
+import { CAMPAIGN_STAGE_CONFIG, CAMPAIGN_STAGE_META } from '../ae2-story.js';
 
 const asset = name => new URL(`../assets/${name}`, import.meta.url);
 
@@ -145,4 +145,109 @@ test('BattleScene formation, mirrored attacker facing, HP drain, and campaign st
   assert.equal(scene.finished, true);
   assert.equal(Math.round(scene.leftSide.displayHp), 82);
   assert.equal(Math.round(scene.rightSide.displayHp), 15);
+});
+
+test('renderOriginalBoard animates water/smoke, hides vanished/king corpses, renders floatTexts, and CAMPAIGN_STAGE_CONFIG matches i.java', async () => {
+  const [tilesBytes, propertyBytes, smokeBytes] = await Promise.all([
+    readFile(asset('tiles0.sprite')),
+    readFile(asset('tiles0.prop')),
+    readFile(asset('smoke.sprite')),
+  ]);
+  const tilesSprite = decodeSprite(new Uint8Array(tilesBytes));
+  const smokeSprite = decodeSprite(new Uint8Array(smokeBytes));
+  const terrain = decodeTerrainProperties(new Uint8Array(propertyBytes));
+  const img = (name, w, h) => ({ name, naturalWidth: w, naturalHeight: h });
+  const tileImages = tilesSprite.frames.map((_, index) => img(`tile-${index}`, 24, 24));
+  const map = {
+    width: 2,
+    height: 1,
+    tiles: [Int8Array.from([1]), Int8Array.from([27])],
+  };
+  const assets = {
+    terrain,
+    sprites: { tiles0: tilesSprite, smoke: smokeSprite },
+    images: { smoke: img('smoke', 96, 20), tombstone: img('tombstone', 24, 24) },
+    frameImages: { tiles0: tileImages },
+  };
+  const { ctx, calls } = makeContext();
+  ctx.strokeText = (...args) => calls.push(['strokeText', ...args]);
+  ctx.fillText = (...args) => calls.push(['fillText', ...args]);
+
+  renderOriginalBoard(ctx, {
+    map,
+    assets,
+    viewportWidth: 48,
+    viewportHeight: 24,
+    waterAnimFrame: 1,
+    floatTexts: [{ x: 0, y: 0, text: '+20', offsetY: 2 }],
+    units: [
+      { type: 10, palette: 2, action: 4, hp: 0, x: 0, y: 0 },
+      { type: 9, palette: 1, action: 3, hp: 0, x: -10, y: -10 },
+    ],
+  });
+  const draws = calls.filter(c => c[0] === 'drawImage').map(c => c[1].name);
+  assert.deepEqual(draws, ['tile-2', 'tile-27', 'smoke']);
+  assert.deepEqual(calls.filter(c => c[0] === 'fillText').map(c => c[1]), ['+20']);
+
+  assert.deepEqual(CAMPAIGN_STAGE_CONFIG.m1.startGold, [300, 50]);
+  assert.equal(CAMPAIGN_STAGE_CONFIG.m1.kingHeadP1, 2);
+  assert.equal(CAMPAIGN_STAGE_CONFIG.m4.crystalSurvival, true);
+  assert.equal(CAMPAIGN_STAGE_CONFIG.m7.removeInitialCrystals, true);
+  assert.equal(CAMPAIGN_STAGE_CONFIG.m7.bossIsVictory, true);
+});
+
+test('BattleScene applies h.java anchorFlags alignment to king frames and uses unit.kingHead + king_heads_back', async () => {
+  const [unitsBytes, kingBytes, headsBytes, backBytes] = await Promise.all([
+    readFile(asset('units.bin')),
+    readFile(asset('king.sprite')),
+    readFile(asset('king_heads.sprite')),
+    readFile(asset('king_heads_back.sprite')),
+  ]);
+  const unitRecords = decodeUnits(new Uint8Array(unitsBytes));
+  const kingMeta = decodeSprite(new Uint8Array(kingBytes));
+  const headsMeta = decodeSprite(new Uint8Array(headsBytes));
+  const backMeta = decodeSprite(new Uint8Array(backBytes));
+  const img = (name, w, h) => ({ name, naturalWidth: w, naturalHeight: h });
+  const scene = new BattleScene({
+    attacker: { type: 9, palette: 1, kingHead: 2, hp: 100 },
+    attackerName: 'COMMANDER',
+    attackerTerrain: 1,
+    defender: { type: 0, palette: 2, hp: 100 },
+    defenderName: 'SOLDIER',
+    defenderTerrain: 1,
+    combatResult: { attackerHpBefore: 100, defenderHpBefore: 100, attackerHpAfter: 90, defenderHpAfter: 50, damage: 50, counterDamage: 10 },
+    assets: {
+      unitRecords,
+      unitFamilies: ['soldier', 'archer', 'lizard', 'wizard', 'wisp', 'spider', 'golem', 'catapult', 'wyvern', 'king', 'skeleton'],
+      sprites: { king: kingMeta, king_heads: headsMeta, king_heads_back: backMeta, soldier: kingMeta },
+      images: { king_heads: img('king_heads', 88, 19), king_heads_back: img('king_heads_back', 68, 15) },
+      frameImages: {
+        king: [img('king_00', 61, 38), img('king_01', 61, 38), img('king_02', 48, 75)],
+        soldier: [img('sol_0', 34, 36), img('sol_1', 34, 36), img('sol_2', 34, 36)],
+      },
+      coloredPalettes: { 1: {}, 2: {} },
+    },
+  });
+  assert.equal(scene.leftSide.kingHead, 2);
+  const { ctx, calls } = makeContext();
+  ctx.fillStyle = '';
+  ctx.fillRect = () => {};
+  ctx.ellipse = () => {};
+  ctx.fill = () => {};
+  ctx.strokeText = () => {};
+  ctx.fillText = () => {};
+  // Elapsed 300ms -> isAttacking (seqFrame = 2 -> king_02 48x75 + king_heads_back)
+  scene.elapsed = 300;
+  scene.render(ctx);
+  const draws = calls.filter(c => c[0] === 'drawImage').map(c => c[1].name);
+  assert.equal(draws.includes('king_02'), true);
+  assert.equal(draws.includes('king_heads_back'), true);
+  // Reset calls and check idle frame 0 (king_00 61x38 -> y anchored at baseY + 37, head at baseY + 26)
+  calls.length = 0;
+  scene.elapsed = 0;
+  scene.render(ctx);
+  const bodyCall = calls.find(c => c[0] === 'drawImage' && c[1].name === 'king_00');
+  const headCall = calls.find(c => c[0] === 'drawImage' && c[1].name === 'king_heads');
+  assert.ok(bodyCall && headCall);
+  assert.equal(headCall[2], 2 * 22); // Valadorn (kingHead 2) source X offset
 });

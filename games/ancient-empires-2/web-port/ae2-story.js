@@ -11,6 +11,18 @@ export const SPEAKER_NAMES = Object.freeze({
   5: 'CAPTAIN',
 });
 
+export const CAMPAIGN_STAGE_CONFIG = Object.freeze({
+  // Port of i.java:4684-4826, 5382-5980: per-stage starting gold, hero portraits, escorts, & victory rules
+  m0: { startGold: [0, 0], galamarSurvival: true },
+  m1: { startGold: [300, 50], kingHeadP1: 2 },
+  m2: { startGold: [0, 0], galamarSurvival: true, turn2Elementals: [[3, 8], [4, 7], [5, 8]] },
+  m3: { startGold: [400, 400] },
+  m4: { startGold: [0, 0], galamarSurvival: true, crystalSurvival: true },
+  m5: { startGold: [600, 600], kingHeadP1: 2 },
+  m6: { startGold: [400, 600], galamarSurvival: true, crystalEscort: true },
+  m7: { startGold: [800, 200], removeInitialCrystals: true, bossIsVictory: true },
+});
+
 export const CAMPAIGN_STAGE_META = Object.freeze({
   m0: {
     stage: 0,
