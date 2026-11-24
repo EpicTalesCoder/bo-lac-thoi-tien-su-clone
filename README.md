@@ -3,6 +3,7 @@
 Hệ thống Monorepo hợp nhất **nền tảng dịch ngược REA** (`src/`, `bridge/`, `AGENTS.md`, `docs/`) và các tựa game J2ME (`.jar` MIDP 2.0) chuyển đổi trực tiếp sang **HTML5 Canvas + ES Modules + Web Audio API + Multiplayer 4 người / Discord Activity**.
 
 > **Tài liệu bắt buộc cho cộng tác viên & AI Agent**:
+>
 > - Hướng dẫn Decompile & Port 1:1 giống mã nguồn gốc: [docs/J2ME_DECOMPILE_FIDELITY_GUIDE.md](docs/J2ME_DECOMPILE_FIDELITY_GUIDE.md)
 > - Bộ 4 Prompt mẫu copy-paste để AI port game mới giống gốc: [docs/PROMPT_TEMPLATE_NEW_GAME.md](docs/PROMPT_TEMPLATE_NEW_GAME.md)
 > - Script chuẩn bị bằng chứng tự động (1 lệnh): `python3 tools/prepare-j2me-evidence.py <slug>`
@@ -45,10 +46,10 @@ Hệ thống Monorepo hợp nhất **nền tảng dịch ngược REA** (`src/`,
 │   ├── build-portal.py                # Đóng gói Portal + toàn bộ games/<slug>/web-port vào dist/
 │   ├── new-game-port.py               # Khởi tạo nhanh cấu trúc thư mục cho một game .jar mới
 │   └── extract_a.py                   # Script giải mã các bảng nhị phân từ /a, /pd0, /ma
-├── vercel.json                        # Cấu hình CI/CD tự động cho Vercel
+├── vercel.json                        # Cấu hình build/deploy tự động qua Vercel Git integration
 ├── netlify.toml                       # Cấu hình CI/CD tự động cho Netlify
 └── .github/workflows/
-    └── deploy-web-port.yml            # GitHub Actions kiểm tra cú pháp & deploy tự động
+    └── deploy-web-port.yml            # GitHub Actions kiểm tra assets & build Portal; Vercel tự deploy
 ```
 
 ---
@@ -62,11 +63,13 @@ python3 tools/new-game-port.py <slug-game> <duong-dan-file.jar> "Tên Hiển Th�
 ```
 
 Ví dụ:
+
 ```bash
 python3 tools/new-game-port.py anh-hung-thoi-loan ~/Downloads/AnhHungThoiLoan.jar "Anh Hùng Thời Loạn"
 ```
 
 Script `tools/new-game-port.py` sẽ tự động:
+
 1. Copy file `.jar` gốc nguyên vẹn vào `games/<slug>/original/`.
 2. Giải nén toàn bộ tài nguyên nhị phân vào `games/<slug>/analysis/recovered/` và ghi mã băm đối chiếu `ASSETS-SHA256.txt`.
 3. Tạo khung `games/<slug>/web-port/index.html` và thư mục `assets/`.

@@ -1,24 +1,22 @@
-name: CI & Deploy Multi-Game Web Portal
+name: Web Portal CI
 
 on:
   push:
     branches: [main]
     paths:
-      - 'games/**'
-      - 'portal/**'
-      - 'tools/**'
-      - 'vercel.json'
-      - 'netlify.toml'
-      - '.github/workflows/deploy-web-port.yml'
+      - "games/**"
+      - "portal/**"
+      - "tools/**"
+      - "vercel.json"
+      - "netlify.toml"
+      - ".github/workflows/deploy-web-port.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
-  group: 'pages'
+  group: "web-portal"
   cancel-in-progress: true
 
 jobs:
@@ -28,7 +26,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Verify JS syntax and build Multi-Game Portal into dist/
+      - name: Verify web-port assets and build Multi-Game Portal into dist/
         run: |
           python3 -c '
           import pathlib
@@ -44,19 +42,3 @@ jobs:
           print("All web-port JS modules and binary assets verified!")
           '
           python3 tools/build-portal.py
-
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: 'dist'
-
-  deploy-github-pages:
-    needs: verify-and-build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
