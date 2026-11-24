@@ -78,6 +78,19 @@ export function getTileSlope(tables, tile) {
   return tables.cc[9][tile] ?? 0;
 }
 
+export function hasTileFloor(tables, tile) {
+  return getTileFloorOffset(tables, tile) !== 0;
+}
+
+function tileSurfaceY(tables, tile, tx, ty, worldX) {
+  const floorOff = getTileFloorOffset(tables, tile);
+  const slope = getTileSlope(tables, tile);
+  const localX = clamp(worldX - (tx << 4), 0, 15);
+  if (slope === 2) return (ty << 4) + (localX >> 1) + floorOff;
+  if (slope === -2) return (ty << 4) + ((16 - localX) >> 1) + floorOff;
+  return (ty << 4) + floorOff;
+}
+
 // Scan level for valid walkable floor tiles when spawn lists are sparse.
 function findFallbackSpawns(level, tables) {
   const spawns = [];
@@ -86,7 +99,7 @@ function findFallbackSpawns(level, tables) {
     for (let ty = 2; ty < level.height - 2; ty++) {
       const tileHere = getTileAt(level, tx, ty);
       const tileAbove = getTileAt(level, tx, ty - 1);
-      if (getTileFloorOffset(tables, tileHere) > 0 && getTileFloorOffset(tables, tileAbove) === 0) {
+      if (hasTileFloor(tables, tileHere) && !hasTileFloor(tables, tileAbove)) {
         spawns.push({ x: tx, y: ty });
         break;
       }
@@ -96,6 +109,8 @@ function findFallbackSpawns(level, tables) {
 }
 
 // Extract spawn points & CTF bases from decoded `ll` level (e.java:3820-3925).
+// Note: In `ll`, `-2` spawns and `-5/-7` base are on the LEFT side (Team 0),
+// while `-3` spawns and `-4/-6` base are on the RIGHT side (Team 1).
 function extractLevelPoints(level, tables) {
   const team0 = [];
   const team1 = [];
@@ -116,14 +131,26 @@ function extractLevelPoints(level, tables) {
   const team0Spawns = team0.length ? team0 : dmSpawns.slice(0, Math.max(1, dmSpawns.length >> 1));
   const team1Spawns = team1.length ? team1 : dmSpawns.slice(Math.max(0, dmSpawns.length >> 1));
 
-  // Bases from baseAndFlags markers (-4..-7); fallback to left/right spawns.
-  let base0 = null;
-  let base1 = null;
+  // Match each base to its own team side (`-5/-7` = LEFT Team 0, `-4/-6` = RIGHT Team 1).
+  let baseLeft = null;
+  let baseRight = null;
   for (const [xRaw, yRaw, marker] of level.baseAndFlags || []) {
     const px = (xRaw & 0xff) * 16;
     const py = ((yRaw & 0xff) + 1) * 16;
-    if (marker === -4 || marker === -6) base0 = { x: px, y: py };
-    else if (marker === -5 || marker === -7) base1 = { x: px, y: py };
+    if (marker === -5 || marker === -7) baseLeft = { x: px, y: py };
+    else if (marker === -4 || marker === -6) baseRight = { x: px, y: py };
+  }
+  const avg0X = team0Spawns.reduce((s, p) => s + p.x, 0) / Math.max(1, team0Spawns.length);
+  const avg1X = team1Spawns.reduce((s, p) => s + p.x, 0) / Math.max(1, team1Spawns.length);
+  let base0 = baseLeft;
+  let base1 = baseRight;
+  if (baseLeft && baseRight) {
+    const dLeft0 = Math.abs(baseLeft.x / 16 - avg0X);
+    const dRight0 = Math.abs(baseRight.x / 16 - avg0X);
+    if (dRight0 < dLeft0) {
+      base0 = baseRight;
+      base1 = baseLeft;
+    }
   }
   if (!base0) {
     const s0 = team0Spawns[0] || fallback[0];
@@ -229,18 +256,48 @@ export function respawnActor(match, index, tables) {
   actor.weapon = 1;
   actor.weaponSlot = 1;
 
-  // Cycle spawn point (e.java:2589-2612)
-  actor.spawnCursor = (actor.spawnCursor + 1);
+  // Pick spawn point from the actor's own team pool (or DM pool), preferring farthest from enemies (e.java:2589-2612)
   let pool = match.spawns.dmSpawns;
   if (match.mode === MODE.TEAM_DEATHMATCH || match.mode === MODE.CAPTURE_FLAG) {
     pool = actor.team === 0 ? match.spawns.team0Spawns : match.spawns.team1Spawns;
   }
   if (!pool.length) pool = match.spawns.dmSpawns;
-  actor.spawnCursor %= Math.max(1, pool.length);
-  const spawn = pool[actor.spawnCursor] || { x: 4, y: 6 };
+  actor.spawnCursor = (actor.spawnCursor + 1) % Math.max(1, pool.length);
+  let spawn = pool[actor.spawnCursor] || { x: 4, y: 6 };
+  if (pool.length > 1 && match.tickCount > 0) {
+    let bestScore = -1;
+    for (let sIdx = 0; sIdx < pool.length; sIdx++) {
+      const cand = pool[(actor.spawnCursor + sIdx) % pool.length];
+      let minEnemyDist = Infinity;
+      for (let otherIdx = 0; otherIdx < match.actors.length; otherIdx++) {
+        const other = match.actors[otherIdx];
+        if (otherIdx === index || other.status !== 1 || other.team === actor.team) continue;
+        const d = Math.abs(other.x - (cand.x * 16 + 8)) + Math.abs(other.y - cand.y * 16);
+        if (d < minEnemyDist) minEnemyDist = d;
+      }
+      if (minEnemyDist > bestScore) {
+        bestScore = minEnemyDist;
+        spawn = cand;
+      }
+    }
+  }
 
   actor.x = spawn.x * 16 + 8;
-  actor.y = spawn.y * 16;
+  // Snap spawn Y cleanly to the nearest floor tile at or just below spawn.y so actors never spawn in mid-air
+  let spawnTy = clamp(spawn.y, 1, match.level.height - 2);
+  if (tables) {
+    for (let dy = 0; dy <= 3 && spawnTy + dy < match.level.height - 1; dy++) {
+      if (hasTileFloor(tables, getTileAt(match.level, spawn.x, spawnTy + dy))) {
+        spawnTy = spawnTy + dy;
+        break;
+      }
+    }
+  }
+  const spawnTile = getTileAt(match.level, spawn.x, spawnTy);
+  actor.y = tables && hasTileFloor(tables, spawnTile)
+    ? tileSurfaceY(tables, spawnTile, spawn.x, spawnTy, actor.x)
+    : spawnTy * 16;
+  actor.inAir = tables && hasTileFloor(tables, spawnTile) ? 0 : 1;
   actor.facing = match.mode === MODE.CAPTURE_FLAG && actor.team === 0 ? 1 : (actor.x < match.level.worldWidth / 2 ? 1 : -1);
   actor.health = actor.maxHealth;
   actor.armor = 0;
@@ -806,8 +863,8 @@ function stepBotAI(match, actorIndex, tables) {
     const ty = clamp(bot.y >> 4, 1, match.level.height - 2);
     const aheadX = clamp(tx + bot.facing, 1, match.level.width - 2);
     const wallAhead = getTileFloorOffset(tables, getTileAt(match.level, aheadX, Math.max(0, ty - 1))) === 2;
-    const floorAhead = getTileFloorOffset(tables, getTileAt(match.level, aheadX, ty)) > 0
-      || getTileFloorOffset(tables, getTileAt(match.level, aheadX, Math.min(match.level.height - 1, ty + 1))) > 0;
+    const floorAhead = hasTileFloor(tables, getTileAt(match.level, aheadX, ty))
+      || hasTileFloor(tables, getTileAt(match.level, aheadX, Math.min(match.level.height - 1, ty + 1)));
     const wantHigherPlatform = targetGrounded && goalY < bot.y - 28;
     if (bot.inAir === 0 && bot.jumpCooldown <= 0 && (wantHigherPlatform || wallAhead || !floorAhead)) {
       applyJump(bot);
@@ -867,37 +924,53 @@ export function tickSourceMatch(match, input = {}, tables = null) {
       }
     }
 
-    // Vertical physics & ground collision (e.java:375-426)
+    // Vertical physics & swept ground/slope collision (e.java:375-426, cc[6] !== 0 includes -1 ramps!)
     if (actor.inAir === 1) {
       if (actor.vy < MAX_FALL_SPEED) actor.vy += GRAVITY;
       else actor.vy = MAX_FALL_SPEED;
-      actor.y += actor.vy;
 
-      const tx = clamp(actor.x >> 4, 0, level.width - 1);
-      const ty = clamp(actor.y >> 4, 0, level.height - 1);
-      const tile = getTileAt(level, tx, ty);
-      const floorOff = getTileFloorOffset(tables, tile);
-      if (actor.vy > 0 && floorOff > 0) {
-        if (actor.status === 1) actor.action = 3;
-        actor.y = (ty << 4) + floorOff;
-        actor.inAir = 0;
-        actor.vy = 0;
+      const prevY = actor.y;
+      const nextY = prevY + actor.vy;
+      let landed = false;
+
+      if (actor.vy > 0 && actor.status === 1) {
+        const tx = clamp(actor.x >> 4, 0, level.width - 1);
+        const startTy = clamp(Math.floor(prevY / 16), 0, level.height - 1);
+        const endTy = clamp(Math.floor(nextY / 16), 0, level.height - 1);
+        for (let ty = startTy; ty <= endTy; ty++) {
+          const tile = getTileAt(level, tx, ty);
+          if (!hasTileFloor(tables, tile)) continue;
+          const surfaceY = tileSurfaceY(tables, tile, tx, ty, actor.x);
+          if (prevY <= surfaceY + 6 && nextY >= surfaceY - 2) {
+            actor.action = 3;
+            actor.y = surfaceY;
+            actor.inAir = 0;
+            actor.vy = 0;
+            landed = true;
+            break;
+          }
+        }
+      }
+      if (!landed) {
+        actor.y = nextY;
       }
     } else {
       const tx = clamp(actor.x >> 4, 0, level.width - 1);
       const ty = clamp(actor.y >> 4, 0, level.height - 1);
-      const tile = getTileAt(level, tx, ty);
-      const floorOff = getTileFloorOffset(tables, tile);
-      const slope = getTileSlope(tables, tile);
-      if (floorOff === 0) {
+      const tileHere = getTileAt(level, tx, ty);
+      if (hasTileFloor(tables, tileHere)) {
+        actor.y = tileSurfaceY(tables, tileHere, tx, ty, actor.x);
+      } else if (ty + 1 < level.height && hasTileFloor(tables, getTileAt(level, tx, ty + 1))
+        && Math.abs(tileSurfaceY(tables, getTileAt(level, tx, ty + 1), tx, ty + 1, actor.x) - actor.y) <= 12) {
+        // Smoothly step down onto adjacent slope/stair tile
+        actor.y = tileSurfaceY(tables, getTileAt(level, tx, ty + 1), tx, ty + 1, actor.x);
+      } else if (ty > 0 && hasTileFloor(tables, getTileAt(level, tx, ty - 1))
+        && Math.abs(tileSurfaceY(tables, getTileAt(level, tx, ty - 1), tx, ty - 1, actor.x) - actor.y) <= 12) {
+        // Smoothly step up onto adjacent slope/stair tile
+        actor.y = tileSurfaceY(tables, getTileAt(level, tx, ty - 1), tx, ty - 1, actor.x);
+      } else {
         actor.inAir = 1;
         actor.vy = 0;
-      } else if (slope === 2) {
-        actor.y = (ty << 4) + ((actor.x - (tx << 4)) >> 1) + floorOff;
-      } else if (slope === -2) {
-        actor.y = (ty << 4) + ((-(actor.x - (tx << 4)) + 16) >> 1) + floorOff;
-      } else {
-        actor.y = (ty << 4) + floorOff;
       }
     }
 
@@ -922,12 +995,17 @@ export function tickSourceMatch(match, input = {}, tables = null) {
       actor.vx = Math.min(0, actor.vx + ACCEL_X);
     }
 
-    // World bounds & pit death (e.java:1326-1364)
+    // World bounds & pit death (e.java:1326-1364): fall off-screen instead of hovering at bottom edge!
     actor.x = clamp(actor.x, 16, Math.max(16, level.worldWidth - 16));
-    if ((actor.y >> 4) > level.height - 2) {
-      actor.y = (level.height - 1) * 16;
+    if ((actor.y >> 4) >= level.height - 1) {
       if (actor.status === 1) {
         handleActorDeath(match, idx, -1, 0, 1);
+        actor.inAir = 1;
+        actor.vy = 8;
+      }
+      if (actor.y > level.worldHeight + 48) {
+        actor.y = level.worldHeight + 48;
+        actor.vy = 0;
       }
     }
 
@@ -940,11 +1018,11 @@ export function tickSourceMatch(match, input = {}, tables = null) {
     {
       const stx = clamp(actor.x >> 4, 0, level.width - 1);
       let sty = clamp(actor.y >> 4, 0, level.height - 1);
-      while (sty < level.height - 1 && getTileFloorOffset(tables, getTileAt(level, stx, sty)) === 0) {
+      while (sty < level.height - 1 && !hasTileFloor(tables, getTileAt(level, stx, sty))) {
         sty += 1;
       }
-      const sOff = getTileFloorOffset(tables, getTileAt(level, stx, sty));
-      actor.shadowY = sOff > 0 ? (sty << 4) + sOff : (level.height - 1) << 4;
+      const sTile = getTileAt(level, stx, sty);
+      actor.shadowY = hasTileFloor(tables, sTile) ? tileSurfaceY(tables, sTile, stx, sty, actor.x) : (level.height - 1) << 4;
     }
 
     // Pending jump impulse & animation state machine (e.java:731-819)
