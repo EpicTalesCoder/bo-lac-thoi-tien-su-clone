@@ -6,7 +6,8 @@ import { fileURLToPath } from 'node:url';
 import { loadOriginalWorldResources } from '../gf3-resource-loader.js';
 import {
   SOURCE_VIEW, createFarmSession, stepFarmSession,
-  startKitchenRecipe, collectKitchenDish, upgradeBarn, upgradeCoop, sellGood,
+  startKitchenRecipe, collectKitchenDish, startFeedMillRecipe, collectFeedMillBatch,
+  upgradeBarn, upgradeCoop, sellGood,
   collectOrFeedAnimal, serializeFarmSession, restoreFarmSession,
 } from '../gf-core.js';
 
@@ -94,4 +95,20 @@ test('kitchen 4-stove cap, ingredient validation, cooking completion, barn sell 
   assert.equal(healed.inventory.get(4001)?.name, 'Trứng');
   assert.equal(healed.inventory.get(4003)?.name, 'Len');
   assert.equal(healed.plots.has('24,33'), false);
+
+  // Feed Mill (/9[22]) crafts Cow feed and feeds Cow from feedStock (rejects when feedStock depleted)
+  assert.equal(world.catalog.feedRecipes.length, 6);
+  assert.ok(world.farmEntities.some(e => e.category === 50 && e.entityId === 14));
+  assert.ok(world.catalog.recipes.some(r => r.category === 'bakery' && /Bột|Bơ|Bánh/i.test(r.name)));
+  const cowFeedRecipe = world.catalog.feedRecipes[0];
+  s.inventory.set(cowFeedRecipe.ingredients[0].goodId, { id: cowFeedRecipe.ingredients[0].goodId, name: cowFeedRecipe.ingredients[0].name, qty: 4, sellPrice: 12 });
+  assert.equal(startFeedMillRecipe(s, cowFeedRecipe.id).ok, true);
+  stepFarmSession(s, cowFeedRecipe.millSec * 1000 + 200);
+  const feedBefore = s.feedStock.get(4111)?.qty || 0;
+  assert.equal(collectFeedMillBatch(s, s.millQueue[0].uid).ok, true);
+  assert.equal(s.feedStock.get(4111).qty, feedBefore + cowFeedRecipe.outputQty);
+  assert.equal(collectOrFeedAnimal(s, cow.uid).action, 'fed');
+  cow.fed = false;
+  s.feedStock.clear();
+  assert.equal(collectOrFeedAnimal(s, cow.uid).reason, 'no_feed');
 });

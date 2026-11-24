@@ -21,18 +21,20 @@ html, body {
   width: 100vw;
   height: 100vh;
   margin: 0;
-  padding: 0;
+  padding: 6px;
   overflow: hidden;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 6px;
   background: radial-gradient(circle at center, #182518 0%, #090e0a 100%);
 }
 
 #game {
   display: block;
-  width: min(100vw, calc(100vh * 0.75));
-  height: min(100vh, calc(100vw / 0.75));
+  width: min(calc(100vw - 12px), calc((100vh - 48px) * 0.75));
+  height: min(calc(100vh - 48px), calc((100vw - 12px) / 0.75));
   background: #0d140f;
   image-rendering: pixelated;
   image-rendering: crisp-edges;
@@ -41,19 +43,18 @@ html, body {
 }
 
 .floating-toolbar {
-  position: fixed;
-  bottom: 10px;
-  right: 12px;
-  z-index: 30;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
   gap: 6px;
-  padding: 4px 8px;
+  padding: 4px 10px;
   border: 1px solid #d6dba544;
   border-radius: 999px;
-  background: rgba(14, 21, 16, 0.76);
+  background: rgba(14, 21, 16, 0.84);
   backdrop-filter: blur(6px);
-  opacity: 0.78;
+  flex-shrink: 0;
+  opacity: 0.9;
   transition: opacity .15s ease;
 }
 

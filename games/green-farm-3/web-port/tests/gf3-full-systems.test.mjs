@@ -7,8 +7,10 @@ import { loadOriginalWorldResources } from '../gf3-resource-loader.js';
 import {
   SOURCE_VIEW, createFarmSession, stepFarmSession,
   plantFruitTree, placeDecoration, clearDebris, buyLandZone,
+  findLandZoneAtPoint, isPointInUnlockedLand, plowPlot,
   startKitchenRecipe, collectKitchenDish, repairManorRoom,
   upgradeBarn, claimMail, helpNeighbor, openBuildingMenu,
+  startFishingRound, castFishingLine, scoopPondWater,
   visitNeighborFarm, helpNeighborEntity, returnHomeFarm, isWalkBlocked,
   serializeFarmSession, restoreFarmSession,
 } from '../gf-core.js';
@@ -58,9 +60,13 @@ test('full /9 catalog & all building/kitchen/tree/land/neighbor/mail systems wor
   assert.equal(cooked.ok, true);
   assert.ok((s.inventory.get(flour.outputGoodId)?.qty || 0) >= 1);
 
-  // 2. Land expansion, Fruit tree planting, Decor placement, Debris clearing
+  // 2. Locked land detection, direct parcel plow guard, Expansion, Trees, Decor, Debris clearing
+  assert.equal(findLandZoneAtPoint(650, 480)?.id, 'west');
+  assert.equal(isPointInUnlockedLand(s, 650, 480), false);
+  assert.equal(plowPlot(s, 27, 18, 650, 480).reason, 'land_locked');
   assert.equal(buyLandZone(s, 'west').ok, true);
   assert.ok(s.unlockedZones.includes('west'));
+  assert.equal(isPointInUnlockedLand(s, 650, 480), true);
 
   const appleTree = world.catalog.crops.find(c => c.id === 3012);
   const prevTrees = s.fruitTrees.length;
@@ -88,6 +94,20 @@ test('full /9 catalog & all building/kitchen/tree/land/neighbor/mail systems wor
   assert.equal(s.view, SOURCE_VIEW.KITCHEN);
   assert.equal(openBuildingMenu(s, 10), 'barn');
   assert.equal(s.view, SOURCE_VIEW.BARN);
+  assert.equal(openBuildingMenu(s, 14), 'feed_mill');
+  assert.equal(s.view, SOURCE_VIEW.FEED_MILL);
+  assert.equal(openBuildingMenu(s, 17), 'fishing');
+  assert.equal(s.view, SOURCE_VIEW.FISHING);
+
+  // 3b. Pond Fishing Minigame (/9[19] loot table) & scoop water energy refill
+  assert.equal(startFishingRound(s, 0, 100000).ok, true);
+  assert.equal(s.fishing.mode, 'playing');
+  const firstFish = s.fishing.bubbles[0].num;
+  const castRes = castFishingLine(s, firstFish);
+  assert.equal(castRes.ok, true);
+  assert.ok(castRes.reward?.name);
+  s.energy = 10;
+  assert.equal(scoopPondWater(s).energy, 15);
 
   // 4. Visiting all 10 real neighbor farms (pack10[5..14]) + helping + returning home + collision
   for (let n = 0; n < 10; n += 1) {

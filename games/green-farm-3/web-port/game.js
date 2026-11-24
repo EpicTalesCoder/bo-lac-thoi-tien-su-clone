@@ -15,18 +15,20 @@ import {
   sellAllGoods, claimQuestReward, serializeFarmSession, restoreFarmSession,
   xpForNextLevel, sourceFrame, sourceText, sourceTileAt,
   setFarmerWalkTarget, moveFarmerByVector, clampWorldCamera, snapPlotToIso4x4, isWalkBlocked,
-  buyLandZone, startKitchenRecipe, collectKitchenDish, repairManorRoom,
-  upgradeBarn, upgradeCoop, claimMail, sellCollectible, collectOrFeedAnimal,
-  visitNeighborFarm, returnHomeFarm,
+  findLandZoneAtPoint, isPointInUnlockedLand,
+  buyLandZone, startKitchenRecipe, collectKitchenDish, startFeedMillRecipe, collectFeedMillBatch,
+  repairManorRoom, upgradeBarn, upgradeCoop, claimMail, sellCollectible, collectOrFeedAnimal,
+  visitNeighborFarm, returnHomeFarm, startFishingRound, castFishingLine, scoopPondWater,
 } from './gf-core.js';
 
 const BUILDING_INTERACT_SPECS = {
   10: { cyOff: -12, tapRx: 40, tapRy: 36, keyRx: 44, keyRy: 46, approachDy: 46 }, // Barn
   11: { cyOff: -14, tapRx: 38, tapRy: 36, keyRx: 44, keyRy: 44, approachDy: 42 }, // Chicken coop
   12: { cyOff: -14, tapRx: 38, tapRy: 36, keyRx: 44, keyRy: 44, approachDy: 42 }, // Livestock shed
-  13: { cyOff: -14, tapRx: 32, tapRy: 32, keyRx: 38, keyRy: 38, approachDy: 32 }, // Silos
+  13: { cyOff: -14, tapRx: 32, tapRy: 32, keyRx: 38, keyRy: 38, approachDy: 32 }, // Silos (Tháp chứa / Máy xay)
+  14: { cyOff: -18, tapRx: 30, tapRy: 38, keyRx: 38, keyRy: 46, approachDy: 16 }, // Feed Mill (Máy xay)
   15: { cyOff: -10, tapRx: 20, tapRy: 20, keyRx: 26, keyRy: 26, approachDy: 20 }, // Mailbox
-  17: { cyOff: -2, tapRx: 52, tapRy: 38, keyRx: 58, keyRy: 48, approachDy: 44 },  // Pond
+  17: { cyOff: -2, tapRx: 52, tapRy: 38, keyRx: 58, keyRy: 48, approachDy: 44 },  // Pond (Ao cá)
   18: { cyOff: 12, tapRx: 56, tapRy: 58, keyRx: 56, keyRy: 76, approachDy: 78 },  // Manor
   19: { cyOff: 12, tapRx: 56, tapRy: 58, keyRx: 56, keyRy: 76, approachDy: 78 },  // Manor
 };
@@ -412,6 +414,46 @@ function renderFarmWorld(ctx) {
         if (soilEntry) drawBSpriteBlockFrame(wctx, soilEntry.sprite, soilEntry.moduleImages, 0, sx, sy, 0);
       }
 
+      // Pass 1b: Visual boundary & clickable Lock signposts on unowned expansion parcels
+      const ownedSet = new Set(s.unlockedZones || ['center']);
+      const lockIconSp = getUiSpriteBlock(20);
+      for (const z of LAND_ZONES) {
+        if (ownedSet.has(z.id)) continue;
+        const zx = z.minX + ox;
+        const zy = z.minY + oy;
+        const zw = z.maxX - z.minX;
+        const zh = z.maxY - z.minY;
+        if (zx + zw < -20 || zy + zh < -20 || zx > viewW + 20 || zy > viewH + 20) continue;
+        wctx.fillStyle = 'rgba(18, 42, 12, 0.14)';
+        wctx.fillRect(zx, zy, zw, zh);
+        wctx.save();
+        wctx.strokeStyle = 'rgba(255, 224, 110, 0.78)';
+        wctx.lineWidth = 1.5;
+        wctx.setLineDash([5, 4]);
+        wctx.strokeRect(zx + 1, zy + 1, zw - 2, zh - 2);
+        wctx.restore();
+        const badgeAnchor = {
+          west: [740, 495],
+          south: [1044, 772],
+          east: [1382, 495],
+          far_west: [740, 705],
+          far_east: [1382, 705],
+        }[z.id] || [z.signX, z.signY];
+        const bx = badgeAnchor[0] + ox;
+        const by = badgeAnchor[1] + oy;
+        if (bx >= -40 && by >= -20 && bx <= viewW + 40 && by <= viewH + 20) {
+          drawList.push({
+            sortY: badgeAnchor[1] + 10,
+            draw: () => {
+              drawRoundedPill(wctx, bx - 38, by - 13, 76, 22, 6, 'rgba(68, 37, 13, 0.92)', '#ffd84d', 1.2);
+              if (lockIconSp) drawBSpriteBlockFrameScaled(wctx, lockIconSp.sprite, lockIconSp.moduleImages, 123, bx - 25, by - 2, 13, 15);
+              drawText(wctx, `MUA ĐẤT`, bx + 7, by - 4, { align: 'center', size: 6, color: '#fff7c2', bold: true });
+              drawText(wctx, `${z.cost} Xu`, bx + 7, by + 5, { align: 'center', size: 6, color: '#9cff7b', bold: true });
+            },
+          });
+        }
+      }
+
       // Pass 2a: World structures, props, fences, bushes (skip interior Manor cutaways 0..8 overlapping exterior Manor!)
       for (const ent of sourceWorld?.farmEntities || []) {
         if (ent.category === 49 || ent.category === 54 || ent.category === 52) continue;
@@ -431,10 +473,13 @@ function renderFarmWorld(ctx) {
             } else {
               drawBSpriteBlockFrame(wctx, entry.sprite, entry.moduleImages, ent.frame, sx, sy, 0);
             }
-            // Only show clean Gameloft alert bubbles when Kitchen dish is ready or Mailbox has unread mail
+            // Only show clean Gameloft alert bubbles when Kitchen dish, Feed Mill batch, or Mailbox has unread mail
             if (ent.category === 50 && ent.entityId === 18 && (s.kitchenQueue || []).some(j => j.ready)) {
               const ui1 = getUiSpriteBlock(1);
               if (ui1) drawBSpriteBlockFrame(wctx, ui1.sprite, ui1.moduleImages, 34, sx, sy - 42, 0);
+            } else if (ent.category === 50 && ent.entityId === 14 && (s.millQueue || []).some(j => j.ready)) {
+              const ui1 = getUiSpriteBlock(1);
+              if (ui1) drawBSpriteBlockFrame(wctx, ui1.sprite, ui1.moduleImages, 34, sx, sy - 38, 0);
             } else if (ent.category === 50 && ent.entityId === 15 && (s.neighborMail || []).some(m => !m.claimed)) {
               const ui1 = getUiSpriteBlock(1);
               if (ui1) drawBSpriteBlockFrame(wctx, ui1.sprite, ui1.moduleImages, 8, sx, sy - 24, 0);
@@ -858,10 +903,19 @@ function renderShop(ctx) {
   drawText(ctx, `◀ Trang ${page + 1}/${totalPages} ▶`, SCREEN_W / 2, 306, { align: 'center', size: 8, color: '#4a2508', bold: true });
 }
 
-// --- SCREEN B: 1:1 ORIGINAL GAMELOFT /6[3] KITCHEN (3x2 RECIPE CARDS + ACTIVE STOVES TAB!) ---
+function getKitchenRecipes(s) {
+  const all = s.catalog?.recipes || [];
+  const cat = s.kitchenCategory || 'all';
+  if (cat === 'bakery') return all.filter(r => r.category === 'bakery');
+  if (cat === 'cooking') return all.filter(r => r.category === 'cooking');
+  return all;
+}
+
+// --- SCREEN B: 1:1 ORIGINAL GAMELOFT /6[3] KITCHEN & BAKERY (ALL / BAKERY / COOKING + ACTIVE STOVES) ---
 function renderKitchen(ctx) {
   const s = app.session;
   const tab = s.kitchenTab || 'recipes';
+  const cat = s.kitchenCategory || 'all';
   ctx.fillStyle = '#3c2512';
   ctx.fillRect(0, 0, SCREEN_W, SCREEN_H);
 
@@ -876,30 +930,34 @@ function renderKitchen(ctx) {
 
   // Clean header ribbon for title & active stove status
   ctx.fillStyle = '#5c3314';
-  ctx.fillRect(16, 6, 208, 36);
+  ctx.fillRect(16, 6, 208, 34);
   ctx.strokeStyle = '#d4a259';
-  ctx.strokeRect(16.5, 6.5, 207, 35);
-  drawText(ctx, `NHÀ BẾP · Bếp ${s.kitchenQueue?.length || 0}/4`, SCREEN_W / 2, 20, { align: 'center', size: 9, color: '#fff7d1', bold: true });
+  ctx.strokeRect(16.5, 6.5, 207, 33);
+  drawText(ctx, `NHÀ BẾP & LÒ BÁNH · Bếp ${s.kitchenQueue?.length || 0}/4`, SCREEN_W / 2, 19, { align: 'center', size: 8, color: '#fff7d1', bold: true });
   const readyJob = (s.kitchenQueue || []).find(j => j.ready);
   const cookingJob = (s.kitchenQueue || []).find(j => !j.ready);
   const stoveHint = readyJob
     ? `Xong: ${readyJob.name} (Chạm đây nhận!)`
     : cookingJob
-      ? `Đang nấu: ${cookingJob.name} (${Math.ceil((cookingJob.cookMs - cookingJob.progressMs) / 1000)}s)`
-      : 'Chạm thẻ món bên dưới để nấu';
-  drawText(ctx, stoveHint, SCREEN_W / 2, 35, { align: 'center', size: 7, color: readyJob ? '#9cff7b' : '#ffe49e', bold: true });
+      ? `Đang nướng: ${cookingJob.name} (${Math.ceil((cookingJob.cookMs - cookingJob.progressMs) / 1000)}s)`
+      : 'Chạm thẻ bên dưới để làm bánh / nấu ăn';
+  drawText(ctx, stoveHint, SCREEN_W / 2, 33, { align: 'center', size: 7, color: readyJob ? '#9cff7b' : '#ffe49e', bold: true });
 
-  // Clean 2 Kitchen tabs: Recipes (left) & Active Stoves (right)
-  drawRoundedPill(ctx, 62, 48, 52, 34, 6, tab === 'recipes' ? '#ffffff' : '#f4dfa8', tab === 'recipes' ? '#ffd84d' : '#9c6e3b', tab === 'recipes' ? 2 : 1);
-  const sp28 = getUiSpriteBlock(28);
-  if (sp28) drawBSpriteBlockFrameScaled(ctx, sp28.sprite, sp28.moduleImages, 6, 88, 65, 26, 26);
-
-  drawRoundedPill(ctx, 126, 48, 52, 34, 6, tab === 'stoves' ? '#ffffff' : '#f4dfa8', tab === 'stoves' ? '#ffd84d' : '#9c6e3b', tab === 'stoves' ? 2 : 1);
-  const sp20 = getUiSpriteBlock(20);
-  if (sp20) drawBSpriteBlockFrameScaled(ctx, sp20.sprite, sp20.moduleImages, 104, 152, 65, 22, 22);
-  if ((s.kitchenQueue?.length || 0) > 0) {
-    drawText(ctx, `${s.kitchenQueue.length}/4`, 170, 58, { align: 'right', size: 7, color: readyJob ? '#1c6b1c' : '#8c4b18', bold: true });
-  }
+  // Clean 4 sub-tabs: Tất cả, Làm bánh, Món nấu, Bếp (x/4)
+  const kTabs = [
+    { id: 'all', label: 'Tất cả', active: tab === 'recipes' && cat === 'all' },
+    { id: 'bakery', label: 'Làm bánh', active: tab === 'recipes' && cat === 'bakery' },
+    { id: 'cooking', label: 'Món nấu', active: tab === 'recipes' && cat === 'cooking' },
+    { id: 'stoves', label: `Bếp (${s.kitchenQueue?.length || 0}/4)`, active: tab === 'stoves' },
+  ];
+  kTabs.forEach((t, i) => {
+    const tx = 18 + i * 52;
+    drawRoundedPill(ctx, tx, 46, 48, 22, 5, t.active ? '#8c4b18' : '#f4dfa8', t.active ? '#ffd84d' : '#9c6e3b', t.active ? 1.5 : 1);
+    drawText(ctx, t.label, tx + 24, 60, { align: 'center', size: 6.5, color: t.active ? '#fff7d1' : '#4a2508', bold: true, maxWidth: 46 });
+  });
+  // Shortcut button to Feed Mill (Máy xay thức ăn động vật)
+  drawRoundedPill(ctx, 18, 72, 204, 15, 4, '#ead19c', '#9c6e3b', 1);
+  drawText(ctx, '⚙️ Cần xay thức ăn cho thú? Chạm đây mở MÁY XAY ▶', SCREEN_W / 2, 82, { align: 'center', size: 6.5, color: '#5c3314', bold: true });
 
   if (tab === 'stoves') {
     const slots = s.kitchenQueue || [];
@@ -940,9 +998,10 @@ function renderKitchen(ctx) {
   }
 
   // 6 live recipes per page mapped 1:1 onto /6[3]'s 3x2 card coordinates (x = 20, 88, 155; y = 92, 182)
-  const recipes = s.catalog.recipes || [];
+  const recipes = getKitchenRecipes(s);
   const perPage = 6;
-  const page = Math.floor(s.panelCursor / perPage);
+  const cursor = Math.min(s.panelCursor, Math.max(0, recipes.length - 1));
+  const page = Math.floor(cursor / perPage);
   const totalPages = Math.max(1, Math.ceil(recipes.length / perPage));
   const start = page * perPage;
   const colsX = [20, 88, 155];
@@ -953,7 +1012,7 @@ function renderKitchen(ctx) {
     const r = recipes[idx];
     const cx = colsX[i % 3];
     const cy = rowsY[Math.floor(i / 3)];
-    const sel = idx === s.panelCursor;
+    const sel = idx === cursor;
     const canCook = s.level >= r.unlockLevel && r.ingredients.every(ing => (s.inventory.get(ing.goodId)?.qty || 0) >= ing.qty);
 
     ctx.fillStyle = sel ? '#fff1b8' : '#f7e6c0';
@@ -988,6 +1047,118 @@ function renderKitchen(ctx) {
     drawBSpriteBlockFrame(ctx, softkeys.sprite, softkeys.moduleImages, 0, 208, 289, 0);
   }
   drawText(ctx, `◀ Trang ${page + 1}/${totalPages} ▶`, SCREEN_W / 2, 306, { align: 'center', size: 8, color: '#4a2508', bold: true });
+}
+
+// --- SCREEN B2: 1:1 ORIGINAL GAMELOFT /6[22] + /6[6] FEED MILL (MÁY XAY THỨC ĂN THÚ) ---
+function renderFeedMill(ctx) {
+  const s = app.session;
+  const tab = s.millTab || 'recipes';
+  const totalFeed = [...(s.feedStock?.values() || [])].reduce((acc, it) => acc + (it.qty || 0), 0);
+  drawOriginalWindowShell(ctx, 22, `MÁY XAY THỨC ĂN · Xay ${s.millQueue?.length || 0}/4`, `Thức ăn trong Tháp chứa: ${totalFeed} phần`);
+
+  const tabs = [
+    { id: 'recipes', label: 'CHẾ BIẾN (6)' },
+    { id: 'queue', label: `XAY (${s.millQueue?.length || 0}/4)` },
+    { id: 'silo', label: `THÁP (${totalFeed})` },
+  ];
+  tabs.forEach((t, i) => {
+    const tx = 18 + i * 69;
+    const active = tab === t.id;
+    drawRoundedPill(ctx, tx, 38, 65, 17, 5, active ? '#8c4b18' : '#e6ca94', active ? '#ffd84d' : '#8b5a2b', active ? 1.5 : 1);
+    drawText(ctx, t.label, tx + 32.5, 49, { align: 'center', size: 6.5, color: active ? '#fff7d1' : '#4a2508', bold: true });
+  });
+
+  if (tab === 'queue') {
+    const slots = s.millQueue || [];
+    for (let i = 0; i < 4; i += 1) {
+      const cx = 24 + (i % 2) * 98;
+      const cy = 66 + Math.floor(i / 2) * 102;
+      const job = slots[i];
+      ctx.fillStyle = job?.ready ? '#fff1b8' : '#f7e6c0';
+      ctx.fillRect(cx, cy, 92, 92);
+      ctx.strokeStyle = job?.ready ? '#2e7d32' : '#9c6e3b';
+      ctx.lineWidth = job?.ready ? 2 : 1;
+      ctx.strokeRect(cx + 0.5, cy + 0.5, 91, 91);
+      ctx.lineWidth = 1;
+      if (!job) {
+        drawText(ctx, `Cối xay #${i + 1}`, cx + 46, cy + 36, { align: 'center', size: 8, color: '#7a5c3d', bold: true });
+        drawText(ctx, 'Đang trống', cx + 46, cy + 54, { align: 'center', size: 7, color: '#9c6e3b' });
+      } else {
+        drawText(ctx, `${job.name} (+${job.outputQty})`, cx + 46, cy + 14, { align: 'center', size: 6.5, color: '#3a1f08', bold: true, maxWidth: 84 });
+        const feedSp = getAnySpriteBlock(job.iconBlock ?? 34);
+        if (feedSp) drawBSpriteBlockFrameScaled(ctx, feedSp.sprite, feedSp.moduleImages, job.iconFrame ?? 0, cx + 46, cy + 42, 30, 28);
+        ctx.fillStyle = job.ready ? '#2e7d32' : '#d6be8a';
+        ctx.fillRect(cx + 8, cy + 68, 76, 17);
+        const rem = Math.max(0, Math.ceil((job.millMs - job.progressMs) / 1000));
+        drawText(ctx, job.ready ? `NHẬN +${job.outputQty}` : `Còn ${rem}s`, cx + 46, cy + 79, {
+          align: 'center', size: 7, color: job.ready ? '#ffffff' : '#4a2508', bold: true,
+        });
+      }
+    }
+    drawText(ctx, 'Chạm cối xay hoàn thành để nhận vào Tháp chứa', SCREEN_W / 2, 306, { align: 'center', size: 6.5, color: '#4a2508', bold: true });
+    return;
+  }
+
+  if (tab === 'silo') {
+    const feedItems = [...(s.feedStock?.values() || [])];
+    if (feedItems.length === 0) {
+      drawText(ctx, 'Tháp chứa đang trống!', SCREEN_W / 2, 130, { align: 'center', size: 9, color: '#7a3f10', bold: true });
+      drawText(ctx, 'Chuyển sang tab CHẾ BIẾN để xay nguyên liệu cho thú.', SCREEN_W / 2, 150, { align: 'center', size: 7, color: '#5c3314' });
+    } else {
+      for (let i = 0; i < Math.min(6, feedItems.length); i += 1) {
+        const it = feedItems[i];
+        const cx = 20 + (i % 3) * 68;
+        const cy = 66 + Math.floor(i / 3) * 98;
+        ctx.fillStyle = '#f7e6c0';
+        ctx.fillRect(cx, cy, 62, 88);
+        ctx.strokeStyle = '#9c6e3b';
+        ctx.strokeRect(cx + 0.5, cy + 0.5, 61, 87);
+        const sp = getAnySpriteBlock(it.iconBlock ?? 34);
+        if (sp) drawBSpriteBlockFrameScaled(ctx, sp.sprite, sp.moduleImages, it.iconFrame ?? 0, cx + 31, cy + 32, 32, 32);
+        drawText(ctx, it.name, cx + 31, cy + 60, { align: 'center', size: 6.5, color: '#3a1f08', bold: true, maxWidth: 56 });
+        drawText(ctx, `Có: ${it.qty} phần`, cx + 31, cy + 76, { align: 'center', size: 7, color: '#1c6b1c', bold: true });
+      }
+    }
+    drawText(ctx, 'Dùng để cho Bò, Gà, Cừu, Heo, Dê ăn mỗi ngày', SCREEN_W / 2, 306, { align: 'center', size: 6.5, color: '#4a2508', bold: true });
+    return;
+  }
+
+  // Tab 'recipes': All 6 /9[22] Feed Mill recipes in 3x2 grid
+  const recipes = s.catalog?.feedRecipes || [];
+  const colsX = [18, 86, 154];
+  const rowsY = [64, 174];
+  for (let i = 0; i < Math.min(6, recipes.length); i += 1) {
+    const r = recipes[i];
+    const cx = colsX[i % 3];
+    const cy = rowsY[Math.floor(i / 3)];
+    const sel = i === s.panelCursor;
+    const canMill = s.level >= r.unlockLevel && r.ingredients.every(ing => (s.inventory.get(ing.goodId)?.qty || 0) >= ing.qty);
+    const haveStock = s.feedStock?.get(r.outputGoodId)?.qty || 0;
+
+    ctx.fillStyle = sel ? '#fff1b8' : '#f7e6c0';
+    ctx.fillRect(cx, cy, 64, 102);
+    ctx.strokeStyle = sel ? '#c46210' : '#9c6e3b';
+    ctx.lineWidth = sel ? 2 : 1;
+    ctx.strokeRect(cx + 0.5, cy + 0.5, 63, 101);
+    ctx.lineWidth = 1;
+    drawText(ctx, r.name, cx + 32, cy + 11, { align: 'center', size: 6.5, color: '#3a1f08', bold: true, maxWidth: 58 });
+    const sp = getAnySpriteBlock(r.iconBlock ?? 34);
+    if (sp) drawBSpriteBlockFrameScaled(ctx, sp.sprite, sp.moduleImages, r.iconFrame ?? 0, cx + 32, cy + 31, 26, 26);
+
+    r.ingredients.slice(0, 2).forEach((ing, j) => {
+      const have = s.inventory.get(ing.goodId)?.qty || 0;
+      const ok = have >= ing.qty;
+      drawText(ctx, `${ing.name} ${have}/${ing.qty}`, cx + 32, cy + 54 + j * 10, {
+        align: 'center', size: 5.8, color: ok ? '#1c6b1c' : '#9c2c1c', bold: true, maxWidth: 58,
+      });
+    });
+    drawText(ctx, `Kho: ${haveStock}`, cx + 32, cy + 77, { align: 'center', size: 6, color: '#6b3e14', bold: true });
+    ctx.fillStyle = canMill ? '#2e7d32' : '#d6be8a';
+    ctx.fillRect(cx + 5, cy + 82, 54, 15);
+    const lbl = s.level < r.unlockLevel ? `Lv.${r.unlockLevel}` : canMill ? `XAY +${r.outputQty}` : 'Thiếu NL';
+    drawText(ctx, lbl, cx + 32, cy + 92, { align: 'center', size: 6.5, color: canMill ? '#ffffff' : '#5c3314', bold: true });
+  }
+  drawText(ctx, 'Chế biến Lúa mì, Cà chua, Bắp thành Thức ăn thú', SCREEN_W / 2, 306, { align: 'center', size: 6.5, color: '#4a2508', bold: true });
 }
 
 // --- SCREEN C: AUTHENTIC QUESTS WITH CINDY LOU PORTRAIT (/6[9] + /7[7]) & 10 NEIGHBORS ---
@@ -1250,9 +1421,10 @@ function renderBarn(ctx) {
 function getManorCards(s) {
   const rooms = (s.catalog.buildings || []).filter(b => b.isManorRoom);
   return [
+    { kind: 'open_kitchen', title: 'Lò bánh & Nhà bếp (83 món)', desc: 'Vào bếp xay bột, làm bánh kếp, bánh bí đỏ & món nấu giá cao!', btn: 'VÀO LÀM BÁNH', spriteBlock: 132, frame: 0 },
+    { kind: 'open_feed_mill', title: 'Máy xay thức ăn thú', desc: 'Xay Lúa mì, Cà chua, Bắp thành thức ăn cho Bò, Gà, Cừu.', btn: 'MỞ MÁY XAY', spriteBlock: 15, frame: 0 },
     { kind: 'tool_plow', title: 'Cuốc cày đất', desc: 'Chạm bãi cỏ để cày ô đất trồng cây mới (10 Xu/ô).', btn: s.activeTool === 'plow' ? 'TẮT CUỐC' : 'DÙNG CUỐC', spriteBlock: 6, frame: 0 },
     { kind: 'tool_clear', title: 'Rìu dọn cỏ & đá', desc: 'Dọn bụi cây & đá lấy đất trống (+15 Xu).', btn: s.activeTool === 'clear' ? 'TẮT RÌU' : 'DÙNG RÌU', spriteBlock: 139, frame: 0 },
-    { kind: 'open_kitchen', title: 'Nhà bếp (83 món)', desc: 'Chế biến nông sản thành bánh, súp, bột bán giá cao.', btn: 'VÀO BẾP', spriteBlock: 132, frame: 0 },
     { kind: 'open_barn', title: 'Kho thóc', desc: `Lưu trữ & bán nông sản (Sức chứa: ${s.barnCapacity} chỗ).`, btn: 'MỞ KHO', spriteBlock: 82, frame: 0 },
     { kind: 'open_neighbors', title: '10 Hàng xóm', desc: 'Sang thăm trực tiếp 10 trang trại bạn bè và giúp việc.', btn: 'ĐI THĂM', spriteBlock: 86, frame: 0 },
     { kind: 'open_collections', title: 'Phòng sưu tập', desc: 'Trưng bày & bán 15 cổ vật quý tìm được khi làm vườn.', btn: 'XEM TỦ ĐỒ', spriteBlock: 129, frame: 0 },
@@ -1261,13 +1433,14 @@ function getManorCards(s) {
     { kind: 'toggle_audio', title: 'Nhạc & Âm thanh', desc: 'Bật hoặc tắt nhạc nền và hiệu ứng âm thanh.', btn: app.audioEnabled ? 'ĐANG BẬT (TẮT)' : 'ĐANG TẮT (BẬT)', uiBlock: 20, uiFrame: 109 },
     ...rooms.map((r) => {
       const done = !!s.unlockedRooms?.[r.entityId];
+      const isKitchenRoom = r.entityId === 2;
       const cost = Math.max(150, Math.min(5000, r.repairCost || 300));
       return {
-        kind: 'repair_room',
+        kind: isKitchenRoom && done ? 'open_kitchen' : 'repair_room',
         entityId: r.entityId,
         title: `Phòng: ${r.name}`,
-        desc: done ? 'Phòng này đã được sửa chữa hoàn chỉnh!' : `Sửa chữa để khôi phục Dinh thự chú để lại.`,
-        btn: done ? 'ĐÃ SỬA' : `SỬA ${cost} Xu`,
+        desc: isKitchenRoom ? 'Nhà bếp của Thái ấp: Chế biến bột & làm bánh ngay!' : (done ? 'Phòng này đã được sửa chữa hoàn chỉnh!' : 'Sửa chữa để khôi phục Dinh thự chú để lại.'),
+        btn: isKitchenRoom ? 'VÀO LÀM BÁNH' : (done ? 'ĐÃ SỬA' : `SỬA ${cost} Xu`),
         spriteBlock: r.worldBlock,
         frame: r.frame || 0,
       };
@@ -1293,18 +1466,30 @@ function renderManor(ctx) {
 
   // Clean wooden title plate
   ctx.fillStyle = '#5c3314';
-  ctx.fillRect(16, 6, 208, 26);
+  ctx.fillRect(16, 6, 208, 24);
   ctx.strokeStyle = '#d4a259';
-  ctx.strokeRect(16.5, 6.5, 207, 25);
-  drawText(ctx, `MENU & DINH THỰ (${idx + 1}/${cards.length})`, SCREEN_W / 2, 22, { align: 'center', size: 8, color: '#fff7d1', bold: true });
+  ctx.strokeRect(16.5, 6.5, 207, 23);
+  drawText(ctx, `MENU & DINH THỰ (${idx + 1}/${cards.length})`, SCREEN_W / 2, 21, { align: 'center', size: 8, color: '#fff7d1', bold: true });
 
-  // Farmer/Uncle portrait cleanly positioned BELOW title bar so hat & head are never clipped
+  // Direct House Navigation Tabs so entering Manor immediately gives Bakery & Feed Mill access
+  const mTabs = [
+    { label: 'THÁI ẤP', active: true },
+    { label: 'LÀM BÁNH', active: false },
+    { label: 'MÁY XAY', active: false },
+  ];
+  mTabs.forEach((t, i) => {
+    const tx = 18 + i * 69;
+    drawRoundedPill(ctx, tx, 33, 65, 16, 4, t.active ? '#8c4b18' : '#e6ca94', t.active ? '#ffd84d' : '#8b5a2b', 1);
+    drawText(ctx, t.label, tx + 32.5, 44, { align: 'center', size: 6.5, color: t.active ? '#fff7d1' : '#4a2508', bold: true });
+  });
+
+  // Farmer/Uncle portrait cleanly positioned BELOW tabs bar so hat & head are never clipped
   const uncle = getUiSpriteBlock(15);
   if (uncle) {
-    drawBSpriteBlockFrameScaled(ctx, uncle.sprite, uncle.moduleImages, 1, 44, 62, 44, 52);
+    drawBSpriteBlockFrameScaled(ctx, uncle.sprite, uncle.moduleImages, 1, 44, 72, 40, 46);
   }
-  drawText(ctx, `Cấp ${s.level} · ${s.coins} Xu`, 138, 60, { align: 'center', size: 8, color: '#4a2508', bold: true });
-  drawText(ctx, `Năng lượng: ${s.energy}/${s.maxEnergy}`, 138, 74, { align: 'center', size: 7, color: '#6b3e14', bold: true });
+  drawText(ctx, `Cấp ${s.level} · ${s.coins} Xu`, 138, 67, { align: 'center', size: 8, color: '#4a2508', bold: true });
+  drawText(ctx, `Năng lượng: ${s.energy}/${s.maxEnergy}`, 138, 80, { align: 'center', size: 7, color: '#6b3e14', bold: true });
 
   // Clean parchment showcase card strictly inside x=24..216, y=94..256
   ctx.fillStyle = '#faebc8';
@@ -1350,8 +1535,10 @@ function renderCoop(ctx) {
     const spec = lookup.find(sp => sp.id === a.animalId);
     return isChicken ? (spec?.kind === 'chicken' || a.worldBlock === 8) : (spec?.kind !== 'chicken' && a.worldBlock !== 8);
   });
+  const feedTotal = [...(s.feedStock?.values() || [])].reduce((acc, it) => acc + (it.qty || 0), 0);
   const rows = [
     { left: `Mua thêm ${isChicken ? 'Gà' : 'Vật nuôi'} tại Chợ`, right: 'MỞ CHỢ', rightColor: 'green', spriteBlock: isChicken ? 8 : 17, spriteFrame: 0 },
+    { left: `Thức ăn trong Tháp: ${feedTotal} phần`, right: 'MÁY XAY', rightColor: 'gold', spriteBlock: 15, spriteFrame: 0 },
     ...animals.map(a => ({
       left: a.name,
       right: a.ready ? 'THU HOẠCH' : a.fed ? 'ĐANG LỚN' : 'CHO ĂN',
@@ -1361,7 +1548,7 @@ function renderCoop(ctx) {
       spriteFrame: a.idleFrame || 0,
     })),
   ];
-  renderCleanParchmentList(ctx, 22, isChicken ? 'CHUỒNG GÀ' : 'CHUỒNG THÚ', `Số lượng: ${animals.length}/${isChicken ? s.coopCapacity : s.shedCapacity}`, rows, s.panelCursor, 'Chạm thú để thu / cho ăn');
+  renderCleanParchmentList(ctx, 22, isChicken ? 'CHUỒNG GÀ' : 'CHUỒNG THÚ', `Số lượng: ${animals.length}/${isChicken ? s.coopCapacity : s.shedCapacity} · Thức ăn: ${feedTotal}`, rows, s.panelCursor, 'Chạm thú để thu / cho ăn');
 }
 
 function renderMailbox(ctx) {
@@ -1390,6 +1577,192 @@ function renderCollections(ctx) {
   renderCleanParchmentList(ctx, 9, 'PHÒNG SƯU TẬP CỔ VẬT', 'Tìm 15 cổ vật khi thu hoạch & dọn đất', rows, s.panelCursor, 'Chạm cổ vật để bán');
 }
 
+// --- DIRECT LAND EXPANSION PROMPT (/6[11] — clicking empty outer parcel on farm map!) ---
+function renderLandPurchase(ctx) {
+  const s = app.session;
+  const expandable = LAND_ZONES.filter(z => z.id !== 'center');
+  const zone = expandable.find(z => z.id === s.selectedLandZoneId) || expandable[0];
+  const owned = (s.unlockedZones || []).includes(zone.id);
+  const canBuy = !owned && s.level >= zone.unlockLevel && s.coins >= zone.cost;
+  drawOriginalWindowShell(ctx, 11, 'MỞ RỘNG MẪU ĐẤT MỚI', `Cấp ${s.level} · Hiện có ${s.coins} Xu`, { showConfirm: true });
+
+  ctx.fillStyle = '#faebc8';
+  ctx.fillRect(22, 48, 196, 224);
+  ctx.strokeStyle = '#9c6e3b';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(22.5, 48.5, 195, 223);
+  ctx.lineWidth = 1;
+
+  drawText(ctx, zone.name, 120, 70, { align: 'center', size: 9, color: '#3a1f08', bold: true, maxWidth: 164 });
+  const sp4 = getUiSpriteBlock(4);
+  if (sp4) drawBSpriteBlockFrameScaled(ctx, sp4.sprite, sp4.moduleImages, 2, 120, 114, 56, 56);
+
+  wrapLines(zone.desc || 'Mở rộng khu đất trang trại để cày thêm ruộng & trồng cây!', 30).slice(0, 2).forEach((ln, i) => {
+    drawText(ctx, ln, 120, 152 + i * 12, { align: 'center', size: 7, color: '#4a290c', bold: true });
+  });
+
+  drawText(ctx, `Yêu cầu: Cấp ${zone.unlockLevel} · Giá: ${zone.cost} Xu`, 120, 186, {
+    align: 'center', size: 7.5, color: s.level >= zone.unlockLevel ? '#1c6b1c' : '#9c2c1c', bold: true,
+  });
+
+  ctx.fillStyle = owned ? '#8c4b18' : canBuy ? '#2e7d32' : '#c7ab7a';
+  ctx.fillRect(46, 200, 148, 28);
+  ctx.strokeStyle = '#ffd84d';
+  ctx.strokeRect(46.5, 200.5, 147, 27);
+  const btnText = owned ? 'ĐÃ SỞ HỮU' : s.level < zone.unlockLevel ? `CẦN CẤP ${zone.unlockLevel}` : `MUA ĐẤT (${zone.cost} Xu)`;
+  drawText(ctx, btnText, 120, 217, { align: 'center', size: 8, color: owned || canBuy ? '#fff7d1' : '#5c3314', bold: true });
+
+  drawRoundedPill(ctx, 56, 236, 128, 22, 5, '#e6ca94', '#8b5a2b', 1);
+  drawText(ctx, 'XEM BẢN ĐỒ ĐẤT', 120, 250, { align: 'center', size: 7, color: '#4a2508', bold: true });
+
+  drawText(ctx, '◀', 34, 118, { align: 'center', size: 13, color: '#8c4b18', bold: true });
+  drawText(ctx, '▶', 206, 118, { align: 'center', size: 13, color: '#8c4b18', bold: true });
+  drawText(ctx, '◀ ▶ Chọn mảnh đất khác · Chạm MUA ĐẤT', SCREEN_W / 2, 306, { align: 'center', size: 6.5, color: '#4a2508', bold: true });
+}
+
+// --- POND FISHING MINIGAME (/6[24], /6[20], /7[32], /9[19] — a.java:32210-32850!) ---
+function renderFishing(ctx) {
+  const s = app.session;
+  const f = s.fishing || { mode: 'menu', rodType: 0, freeCooldownUntil: 0, castsLeft: 5, catches: [], bubbles: [] };
+  const cfg = s.catalog?.fishingConfig || { cashCost: 5, coinCost: 50 };
+  const animTick = Math.floor((s.animTimeMs || 0) / 110);
+
+  drawOriginalWindowShell(ctx, 22, 'HỒ CÂU CÁ AO TRANG TRẠI', `Xu: ${s.coins} · Tiền mặt: ${s.cash} · ⚡${s.energy}/${s.maxEnergy}`, { showConfirm: f.mode === 'result' });
+
+  // Draw real farm Pond building sprite (entityId 17) centered cleanly inside Pond frame
+  const pondEnt = sourceWorld?.farmEntities?.find(e => e.category === 50 && e.entityId === 17);
+  const pondSp = pondEnt ? getSpriteBlock(pondEnt.block, pondEnt.paletteIndex) : null;
+  const sp32 = getUiSpriteBlock(32);
+  const boxH = f.mode === 'playing' ? 194 : 108;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(18, 42, 204, boxH);
+  ctx.clip();
+  ctx.fillStyle = '#6bd41a';
+  ctx.fillRect(18, 42, 204, boxH);
+  if (pondSp) {
+    const fIdx = pondEnt.useAnim && pondSp.sprite.animations?.length > 0
+      ? (pondSp.sprite.animations[0][animTick % pondSp.sprite.animations[0].length]?.frame ?? pondEnt.frame ?? 0)
+      : (pondEnt.frame ?? 0);
+    const b = pondSp.sprite.bounds?.[fIdx];
+    const bw = Math.max(1, b?.width || 96);
+    const bh = Math.max(1, b?.height || 64);
+    const bx = b?.x ?? -(bw >> 1);
+    const by = b?.y ?? -(bh >> 1);
+    const scratch = renderFishing._pondScratch || (renderFishing._pondScratch = document.createElement('canvas'));
+    if (scratch.width !== bw || scratch.height !== bh) {
+      scratch.width = bw;
+      scratch.height = bh;
+    }
+    const pctx = scratch.getContext('2d');
+    pctx.clearRect(0, 0, bw, bh);
+    pctx.imageSmoothingEnabled = false;
+    drawBSpriteBlockFrame(pctx, pondSp.sprite, pondSp.moduleImages, fIdx, -bx, -by, 0);
+    const zoom = Math.max(1.35, Math.min(204 / bw, boxH / bh) * (f.mode === 'playing' ? 1.18 : 1.05));
+    const dw = Math.round(bw * zoom);
+    const dh = Math.round(bh * zoom);
+    const dx = Math.round(120 - dw / 2);
+    const dy = Math.round(42 + boxH / 2 + (f.mode === 'playing' ? 8 : 2) - dh / 2);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(scratch, 0, 0, bw, bh, dx, dy, dw, dh);
+  } else {
+    ctx.fillStyle = '#1b85b8';
+    ctx.fillRect(18, 42, 204, boxH);
+  }
+  ctx.restore();
+  ctx.strokeStyle = '#8b5a2b';
+  ctx.strokeRect(18.5, 42.5, 203, boxH - 1);
+
+  if (f.mode === 'menu') {
+    const now = Date.now();
+    const freeRem = Math.max(0, Math.ceil(((f.freeCooldownUntil || 0) - now) / 1000));
+    ctx.fillStyle = '#faebc8';
+    ctx.fillRect(18, 154, 204, 126);
+    ctx.strokeStyle = '#9c6e3b';
+    ctx.strokeRect(18.5, 154.5, 203, 125);
+    drawText(ctx, 'Chọn loại cần câu (tối đa 3 thưởng / lượt)', SCREEN_W / 2, 165, { align: 'center', size: 7, color: '#3a1f08', bold: true });
+    const rods = [
+      { label: 'CÂU MIỄN PHÍ', sub: freeRem === 0 ? 'Sẵn sàng!' : `Đợi ${freeRem}s`, color: freeRem === 0 ? '#2e7d32' : '#c7ab7a', text: freeRem === 0 ? '#ffffff' : '#5c3314' },
+      { label: `CẦN CÂU XU (${cfg.coinCost} Xu)`, sub: 'Thưởng Xu, Cây, Bánh ngon', color: s.coins >= cfg.coinCost ? '#2e7d32' : '#c7ab7a', text: s.coins >= cfg.coinCost ? '#ffffff' : '#5c3314' },
+      { label: `CẦN VÀNG (${cfg.cashCost} Cash)`, sub: 'Vật phẩm hiếm & Ngựa/Bò quý!', color: s.cash >= cfg.cashCost ? '#8c4b18' : '#c7ab7a', text: s.cash >= cfg.cashCost ? '#fff7d1' : '#5c3314' },
+    ];
+    rods.forEach((r, i) => {
+      const ry = 172 + i * 27;
+      ctx.fillStyle = r.color;
+      ctx.fillRect(28, ry, 184, 23);
+      ctx.strokeStyle = '#ffd84d';
+      ctx.strokeRect(28.5, ry + 0.5, 183, 22);
+      drawText(ctx, `${r.label} · ${r.sub}`, 120, ry + 14, { align: 'center', size: 7, color: r.text, bold: true });
+    });
+    drawRoundedPill(ctx, 42, 255, 156, 20, 5, '#e6ca94', '#8b5a2b', 1);
+    drawText(ctx, '💧 Múc nước Ao (+5 ⚡ Năng lượng)', 120, 268, { align: 'center', size: 6.8, color: '#1b5e8a', bold: true });
+    drawText(ctx, 'Chạm loại cần để bắt đầu câu cá!', SCREEN_W / 2, 306, { align: 'center', size: 7, color: '#4a2508', bold: true });
+    return;
+  }
+
+  if (f.mode === 'playing') {
+    const rodName = f.rodType === 1 ? 'Cần Vàng' : f.rodType === 2 ? 'Cần Xu' : 'Miễn phí';
+    drawRoundedPill(ctx, 24, 46, 192, 16, 4, 'rgba(36, 20, 8, 0.88)', '#e8c47a', 1);
+    drawText(ctx, `${rodName} · Lượt quăng: ${f.castsLeft}/5 · Đã câu: ${f.catches.length}/3`, 120, 57, { align: 'center', size: 7, color: '#fff7d1', bold: true });
+
+    // Animated bobbing numbered fish targets (1..9) on the Pond
+    for (const b of f.bubbles || []) {
+      const bobY = b.y + Math.round(Math.sin((animTick + b.num) * 0.45) * 3);
+      if (sp32 && sp32.sprite.animations?.length > 0) {
+        drawBSpriteBlockAnim(ctx, sp32.sprite, sp32.moduleImages, 0, animTick + b.num, b.x, bobY, 0);
+      }
+      ctx.fillStyle = 'rgba(255, 246, 186, 0.96)';
+      ctx.beginPath();
+      ctx.arc(b.x, bobY - 4, 13, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = '#c46210';
+      ctx.stroke();
+      ctx.lineWidth = 1;
+      drawText(ctx, `${b.num}`, b.x, bobY, { align: 'center', size: 10, color: '#3a1f08', bold: true });
+    }
+    ctx.fillStyle = '#faebc8';
+    ctx.fillRect(18, 242, 204, 38);
+    ctx.strokeStyle = '#9c6e3b';
+    ctx.strokeRect(18.5, 242.5, 203, 37);
+    drawText(ctx, 'Chạm bóng cá hoặc bấm phím số 1-9!', SCREEN_W / 2, 256, { align: 'center', size: 7.5, color: '#3a1f08', bold: true });
+    drawText(ctx, `Đã trúng: ${f.catches.map(c => c.name).join(', ') || 'Chưa có'}`, SCREEN_W / 2, 272, { align: 'center', size: 6.8, color: '#1c6b1c', bold: true, maxWidth: 196 });
+    drawText(ctx, 'Chạm số để giật cần câu', SCREEN_W / 2, 306, { align: 'center', size: 7, color: '#4a2508', bold: true });
+    return;
+  }
+
+  // f.mode === 'result' (/6[20] reward summary!)
+  ctx.fillStyle = '#faebc8';
+  ctx.fillRect(18, 154, 204, 126);
+  ctx.strokeStyle = '#9c6e3b';
+  ctx.strokeRect(18.5, 154.5, 203, 125);
+  drawText(ctx, '🎉 CÂU HAY LẮM! PHẦN THƯỞNG:', SCREEN_W / 2, 168, { align: 'center', size: 8, color: '#2e7d32', bold: true });
+  if (f.catches.length === 0) {
+    drawText(ctx, 'Chưa câu trúng cá nào lần này — thử lại nhé!', SCREEN_W / 2, 206, { align: 'center', size: 7, color: '#7a3f10' });
+  } else {
+    f.catches.slice(0, 3).forEach((rw, i) => {
+      const cx = 24 + i * 66;
+      const cy = 178;
+      ctx.fillStyle = '#fff1b8';
+      ctx.fillRect(cx, cy, 60, 60);
+      ctx.strokeStyle = '#9c6e3b';
+      ctx.strokeRect(cx + 0.5, cy + 0.5, 59, 59);
+      const sp = rw.spriteBlock != null ? getSpriteBlock(rw.spriteBlock, rw.paletteIndex || 0)
+        : rw.iconBlock != null ? getAnySpriteBlock(rw.iconBlock)
+        : rw.uiBlock != null ? getUiSpriteBlock(rw.uiBlock)
+        : null;
+      if (sp) drawBSpriteBlockFrameScaled(ctx, sp.sprite, sp.moduleImages, rw.spriteFrame ?? rw.iconFrame ?? rw.uiFrame ?? 0, cx + 30, cy + 24, 28, 26);
+      drawText(ctx, rw.name, cx + 30, cy + 50, { align: 'center', size: 6, color: '#3a1f08', bold: true, maxWidth: 56 });
+    });
+  }
+  ctx.fillStyle = '#2e7d32';
+  ctx.fillRect(54, 248, 132, 24);
+  ctx.strokeStyle = '#ffd84d';
+  ctx.strokeRect(54.5, 248.5, 131, 23);
+  drawText(ctx, 'CÂU TIẾP', 120, 263, { align: 'center', size: 8, color: '#ffffff', bold: true });
+  drawText(ctx, 'Chạm CÂU TIẾP hoặc ⬅ Về trang trại', SCREEN_W / 2, 306, { align: 'center', size: 6.8, color: '#4a2508', bold: true });
+}
+
 function renderFrame(ctx, now) {
   const timing = sourceFrame(previousFrameAt, now);
   previousFrameAt = timing.now;
@@ -1402,10 +1775,13 @@ function renderFrame(ctx, now) {
   else if (v === SOURCE_VIEW.SEED_PICKER) renderSeedPicker(ctx);
   else if (v === SOURCE_VIEW.BARN) renderBarn(ctx);
   else if (v === SOURCE_VIEW.KITCHEN) renderKitchen(ctx);
+  else if (v === SOURCE_VIEW.FEED_MILL) renderFeedMill(ctx);
   else if (v === SOURCE_VIEW.MANOR) renderManor(ctx);
   else if (v === SOURCE_VIEW.COOP) renderCoop(ctx);
   else if (v === SOURCE_VIEW.MAILBOX) renderMailbox(ctx);
   else if (v === SOURCE_VIEW.COLLECTIONS) renderCollections(ctx);
+  else if (v === SOURCE_VIEW.LAND) renderLandPurchase(ctx);
+  else if (v === SOURCE_VIEW.FISHING) renderFishing(ctx);
   else if (v === SOURCE_VIEW.QUESTS || v === SOURCE_VIEW.NEIGHBORS) renderQuestsOrNeighbors(ctx);
   else renderFarmWorld(ctx);
 }
@@ -1540,9 +1916,34 @@ function handlePanelAction(s, idx) {
         s.toastMs = 1500;
       }
     } else {
-      const recipe = (s.catalog.recipes || [])[idx];
+      const recipe = getKitchenRecipes(s)[idx];
       if (recipe) { startKitchenRecipe(s, recipe.id); saveSession(); }
     }
+  } else if (v === SOURCE_VIEW.FEED_MILL) {
+    if (s.millTab === 'queue') {
+      const job = (s.millQueue || [])[idx];
+      if (job?.ready) { collectFeedMillBatch(s, job.uid); saveSession(); }
+      else if (job) {
+        const rem = Math.max(0, Math.ceil((job.millMs - job.progressMs) / 1000));
+        s.toast = `${job.name} đang xay (còn ${rem}s)...`;
+        s.toastMs = 1500;
+      }
+    } else if (s.millTab === 'recipes') {
+      const recipe = (s.catalog.feedRecipes || [])[idx];
+      if (recipe) { startFeedMillRecipe(s, recipe.id); saveSession(); }
+    }
+  } else if (v === SOURCE_VIEW.LAND) {
+    const expandable = LAND_ZONES.filter(z => z.id !== 'center');
+    const zone = expandable.find(z => z.id === s.selectedLandZoneId) || expandable[0];
+    if (zone) {
+      const res = buyLandZone(s, zone.id);
+      saveSession();
+      if (res.ok) s.view = SOURCE_VIEW.WORLD_LAYER;
+    }
+  } else if (v === SOURCE_VIEW.FISHING) {
+    const f = s.fishing;
+    if (f?.mode === 'result') { f.mode = 'menu'; saveSession(); }
+    else if (f?.mode === 'menu') { startFishingRound(s, idx % 3); saveSession(); }
   } else if (v === SOURCE_VIEW.MANOR) {
     const cards = getManorCards(s);
     const cur = cards[((idx % cards.length) + cards.length) % cards.length];
@@ -1556,7 +1957,8 @@ function handlePanelAction(s, idx) {
       s.placementItem = null;
       s.view = SOURCE_VIEW.WORLD_LAYER;
     } else if (cur.kind === 'open_barn') { s.parentView = SOURCE_VIEW.MANOR; s.barnTab = 'goods'; s.barnCursor = 0; s.view = SOURCE_VIEW.BARN; }
-    else if (cur.kind === 'open_kitchen') { s.parentView = SOURCE_VIEW.MANOR; s.kitchenTab = 'recipes'; s.panelCursor = 0; s.view = SOURCE_VIEW.KITCHEN; }
+    else if (cur.kind === 'open_kitchen') { s.parentView = SOURCE_VIEW.MANOR; s.kitchenTab = 'recipes'; s.kitchenCategory = 'bakery'; s.panelCursor = 0; s.view = SOURCE_VIEW.KITCHEN; }
+    else if (cur.kind === 'open_feed_mill') { s.parentView = SOURCE_VIEW.MANOR; s.millTab = 'recipes'; s.panelCursor = 0; s.view = SOURCE_VIEW.FEED_MILL; }
     else if (cur.kind === 'open_collections') { s.parentView = SOURCE_VIEW.MANOR; s.panelCursor = 0; s.view = SOURCE_VIEW.COLLECTIONS; }
     else if (cur.kind === 'open_mailbox') { s.parentView = SOURCE_VIEW.MANOR; s.panelCursor = 0; s.view = SOURCE_VIEW.MAILBOX; }
     else if (cur.kind === 'open_neighbors') { s.parentView = SOURCE_VIEW.MANOR; s.panelCursor = 0; s.view = SOURCE_VIEW.NEIGHBORS; }
@@ -1570,6 +1972,7 @@ function handlePanelAction(s, idx) {
     else if (cur.kind === 'repair_room') { repairManorRoom(s, cur.entityId); saveSession(); }
   } else if (v === SOURCE_VIEW.COOP) {
     if (idx === 0) { s.parentView = SOURCE_VIEW.COOP; s.shopTab = 'animals'; s.shopCursor = 0; s.view = SOURCE_VIEW.SHOP; }
+    else if (idx === 1) { s.parentView = SOURCE_VIEW.COOP; s.millTab = 'recipes'; s.panelCursor = 0; s.view = SOURCE_VIEW.FEED_MILL; }
     else {
       const isChicken = s.coopFilter === 'chicken';
       const lookup = s.catalog.allAnimals || s.catalog.animals || [];
@@ -1577,8 +1980,17 @@ function handlePanelAction(s, idx) {
         const spec = lookup.find(sp => sp.id === a.animalId);
         return isChicken ? (spec?.kind === 'chicken' || a.worldBlock === 8) : (spec?.kind !== 'chicken' && a.worldBlock !== 8);
       });
-      const animal = list[idx - 1];
-      if (animal) { collectOrFeedAnimal(s, animal.uid); saveSession(); }
+      const animal = list[idx - 2];
+      if (animal) {
+        const res = collectOrFeedAnimal(s, animal.uid);
+        saveSession();
+        if (res.reason === 'no_feed') {
+          s.parentView = SOURCE_VIEW.COOP;
+          s.millTab = 'recipes';
+          s.panelCursor = 0;
+          s.view = SOURCE_VIEW.FEED_MILL;
+        }
+      }
     }
   } else if (v === SOURCE_VIEW.MAILBOX) {
     const m = s.neighborMail?.[idx];
@@ -1670,16 +2082,31 @@ function handleTap(x, y, event) {
 
     if (s.view === SOURCE_VIEW.KITCHEN) {
       // Tap top header to collect any ready dish!
-      if (y <= 44) {
+      if (y <= 42) {
         const readyJob = (s.kitchenQueue || []).find(j => j.ready);
         if (readyJob) { collectKitchenDish(s, readyJob.uid); saveSession(); }
         event.preventDefault();
         return;
       }
-      // 2 Kitchen tabs: Recipes (left) & Stoves (right)
-      if (y >= 46 && y <= 84) {
-        s.kitchenTab = x < SCREEN_W / 2 ? 'recipes' : 'stoves';
+      // 4 Kitchen tabs: Tất cả, Làm bánh, Món nấu, Bếp
+      if (y >= 44 && y <= 69 && x >= 16 && x <= 224) {
+        const tIdx = Math.max(0, Math.min(3, Math.floor((x - 18) / 52)));
+        if (tIdx === 3) s.kitchenTab = 'stoves';
+        else {
+          s.kitchenTab = 'recipes';
+          s.kitchenCategory = ['all', 'bakery', 'cooking'][tIdx];
+        }
         s.panelCursor = 0;
+        playSfx('click');
+        event.preventDefault();
+        return;
+      }
+      // Shortcut banner to open Máy xay (Feed Mill)
+      if (y >= 70 && y <= 88 && x >= 18 && x <= 222) {
+        s.parentView = SOURCE_VIEW.KITCHEN;
+        s.millTab = 'recipes';
+        s.panelCursor = 0;
+        s.view = SOURCE_VIEW.FEED_MILL;
         playSfx('click');
         event.preventDefault();
         return;
@@ -1694,9 +2121,9 @@ function handleTap(x, y, event) {
         return;
       }
       if (y >= 278 && x > 44 && x < 196) {
-        const recipes = s.catalog.recipes || [];
+        const recipes = getKitchenRecipes(s);
         const pages = Math.max(1, Math.ceil(recipes.length / 6));
-        const curPage = Math.floor(s.panelCursor / 6);
+        const curPage = Math.floor(Math.min(s.panelCursor, Math.max(0, recipes.length - 1)) / 6);
         const nextPage = x < SCREEN_W / 2 ? (curPage - 1 + pages) % pages : (curPage + 1) % pages;
         s.panelCursor = nextPage * 6;
         playSfx('click');
@@ -1707,11 +2134,87 @@ function handleTap(x, y, event) {
       if (y >= 88 && y <= 272 && x >= 16 && x <= 224) {
         const col = Math.max(0, Math.min(2, Math.floor((x - 16) / 68)));
         const row = y < 178 ? 0 : 1;
-        const page = Math.floor(s.panelCursor / 6);
+        const recipes = getKitchenRecipes(s);
+        const page = Math.floor(Math.min(s.panelCursor, Math.max(0, recipes.length - 1)) / 6);
         const targetIdx = page * 6 + row * 3 + col;
-        if (targetIdx < (s.catalog.recipes || []).length) {
+        if (targetIdx < recipes.length) {
           s.panelCursor = targetIdx;
           handlePanelAction(s, targetIdx);
+        }
+      }
+      event.preventDefault();
+      return;
+    }
+
+    if (s.view === SOURCE_VIEW.FEED_MILL) {
+      if (y >= 36 && y <= 58 && x >= 16 && x <= 224) {
+        const tIdx = Math.max(0, Math.min(2, Math.floor((x - 18) / 69)));
+        s.millTab = ['recipes', 'queue', 'silo'][tIdx];
+        s.panelCursor = 0;
+        playSfx('click');
+        event.preventDefault();
+        return;
+      }
+      if (s.millTab === 'queue' && y >= 64 && y <= 264 && x >= 20 && x <= 220) {
+        const col = x < 120 ? 0 : 1;
+        const row = y < 164 ? 0 : 1;
+        handlePanelAction(s, row * 2 + col);
+      } else if (s.millTab === 'recipes' && y >= 62 && y <= 278 && x >= 16 && x <= 224) {
+        const col = Math.max(0, Math.min(2, Math.floor((x - 16) / 68)));
+        const row = y < 170 ? 0 : 1;
+        const idx = row * 3 + col;
+        if (idx < (s.catalog?.feedRecipes?.length || 0)) {
+          s.panelCursor = idx;
+          handlePanelAction(s, idx);
+        }
+      }
+      event.preventDefault();
+      return;
+    }
+
+    if (s.view === SOURCE_VIEW.LAND) {
+      const expandable = LAND_ZONES.filter(z => z.id !== 'center');
+      const curIdx = Math.max(0, expandable.findIndex(z => z.id === s.selectedLandZoneId));
+      if (y >= 90 && y <= 150 && x <= 52) {
+        s.selectedLandZoneId = expandable[(curIdx - 1 + expandable.length) % expandable.length].id;
+        playSfx('click');
+      } else if (y >= 90 && y <= 150 && x >= 188) {
+        s.selectedLandZoneId = expandable[(curIdx + 1) % expandable.length].id;
+        playSfx('click');
+      } else if (y >= 198 && y <= 232 && x >= 44 && x <= 196) {
+        handlePanelAction(s, curIdx);
+      } else if (y >= 234 && y <= 260 && x >= 52 && x <= 188) {
+        s.shopTab = 'land';
+        s.shopCursor = 0;
+        s.view = SOURCE_VIEW.SHOP;
+        playSfx('click');
+      }
+      event.preventDefault();
+      return;
+    }
+
+    if (s.view === SOURCE_VIEW.FISHING) {
+      const f = s.fishing;
+      if (f?.mode === 'menu') {
+        if (y >= 170 && y <= 248 && x >= 26 && x <= 214) {
+          const rodIdx = Math.min(2, Math.floor((y - 172) / 27));
+          const rodTypeMap = [0, 2, 1]; // [Free, Coins, Cash]
+          startFishingRound(s, rodTypeMap[rodIdx]);
+          saveSession();
+        } else if (y >= 252 && y <= 278 && x >= 40 && x <= 200) {
+          scoopPondWater(s);
+          saveSession();
+        }
+      } else if (f?.mode === 'playing') {
+        const hitBubble = (f.bubbles || []).find(b => Math.hypot(b.x - x, b.y - y) <= 24);
+        if (hitBubble) {
+          castFishingLine(s, hitBubble.num);
+          saveSession();
+        }
+      } else if (f?.mode === 'result') {
+        if (y >= 244 && y <= 276 && x >= 50 && x <= 190) {
+          f.mode = 'menu';
+          playSfx('click');
         }
       }
       event.preventDefault();
@@ -1767,6 +2270,24 @@ function handleTap(x, y, event) {
     }
 
     if (s.view === SOURCE_VIEW.MANOR) {
+      if (y >= 32 && y <= 50 && x >= 16 && x <= 224) {
+        const tIdx = Math.max(0, Math.min(2, Math.floor((x - 18) / 69)));
+        if (tIdx === 1) {
+          s.parentView = SOURCE_VIEW.MANOR;
+          s.kitchenTab = 'recipes';
+          s.kitchenCategory = 'bakery';
+          s.panelCursor = 0;
+          s.view = SOURCE_VIEW.KITCHEN;
+        } else if (tIdx === 2) {
+          s.parentView = SOURCE_VIEW.MANOR;
+          s.millTab = 'recipes';
+          s.panelCursor = 0;
+          s.view = SOURCE_VIEW.FEED_MILL;
+        }
+        playSfx('click');
+        event.preventDefault();
+        return;
+      }
       const cards = getManorCards(s);
       if (x <= 52 && y >= 100 && y <= 220) {
         s.panelCursor = (s.panelCursor - 1 + cards.length) % cards.length;
@@ -1937,6 +2458,17 @@ function handleTap(x, y, event) {
   const hit = sourceTileAt(sourceWorld.tileMap, wx - s.cameraX, wy - s.cameraY, s.cameraX, s.cameraY);
 
   if (s.activeTool === 'place' && s.placementItem && hit) {
+    if (!isPointInUnlockedLand(s, wx, wy)) {
+      const z = findLandZoneAtPoint(wx, wy);
+      if (z) {
+        s.selectedLandZoneId = z.id;
+        s.parentView = null;
+        s.view = SOURCE_VIEW.LAND;
+        playSfx('click');
+        event.preventDefault();
+        return;
+      }
+    }
     setFarmerWalkTarget(s, wx, wy, { type: 'place', item: s.placementItem, row: hit.row, col: hit.column, worldX: wx, worldY: wy });
     saveSession();
     event.preventDefault();
@@ -1944,6 +2476,17 @@ function handleTap(x, y, event) {
   }
 
   if (s.activeTool === 'plow' && hit) {
+    if (!isPointInUnlockedLand(s, wx, wy)) {
+      const z = findLandZoneAtPoint(wx, wy);
+      if (z) {
+        s.selectedLandZoneId = z.id;
+        s.parentView = null;
+        s.view = SOURCE_VIEW.LAND;
+        playSfx('click');
+        event.preventDefault();
+        return;
+      }
+    }
     s.cursorRow = hit.row;
     s.cursorCol = hit.column;
     setFarmerWalkTarget(s, wx, wy, { type: 'tile', row: hit.row, col: hit.column, worldX: wx, worldY: wy });
@@ -2037,6 +2580,17 @@ function handleTap(x, y, event) {
     return;
   }
 
+  // Tapping empty ground inside an unowned land parcel opens the direct Land Purchase screen
+  const tappedZone = findLandZoneAtPoint(wx, wy);
+  if (tappedZone && !(s.unlockedZones || ['center']).includes(tappedZone.id)) {
+    s.selectedLandZoneId = tappedZone.id;
+    s.parentView = null;
+    s.view = SOURCE_VIEW.LAND;
+    playSfx('click');
+    event.preventDefault();
+    return;
+  }
+
   if (hit) {
     s.cursorRow = hit.row;
     s.cursorCol = hit.column;
@@ -2071,6 +2625,15 @@ function onKeyDown(event) {
     return;
   }
   if (s.view !== SOURCE_VIEW.WORLD_LAYER) {
+    if (s.view === SOURCE_VIEW.FISHING && s.fishing?.mode === 'playing') {
+      const digitMatch = /^([1-9])$/.exec(event.key || '');
+      if (digitMatch) {
+        castFishingLine(s, Number(digitMatch[1]));
+        saveSession();
+        event.preventDefault();
+        return;
+      }
+    }
     if (code === KEY.SK_RIGHT || event.code === 'Escape' || event.key === 'Escape') {
       const nextView = s.parentView || SOURCE_VIEW.WORLD_LAYER;
       s.parentView = null;
@@ -2105,9 +2668,16 @@ function onKeyDown(event) {
       } else if (s.view === SOURCE_VIEW.MANOR) {
         const len = getManorCards(s).length;
         s.panelCursor = (s.panelCursor + delta + len) % len;
+      } else if (s.view === SOURCE_VIEW.LAND) {
+        const exp = LAND_ZONES.filter(z => z.id !== 'center');
+        const curIdx = Math.max(0, exp.findIndex(z => z.id === s.selectedLandZoneId));
+        s.selectedLandZoneId = exp[(curIdx + delta + exp.length) % exp.length].id;
+      } else if (s.view === SOURCE_VIEW.FEED_MILL) {
+        const len = s.millTab === 'queue' ? 4 : Math.max(1, s.catalog?.feedRecipes?.length || 6);
+        s.panelCursor = (s.panelCursor + delta + len) % len;
       } else {
         const len = s.view === SOURCE_VIEW.KITCHEN
-          ? (s.kitchenTab === 'stoves' ? 4 : (s.catalog.recipes?.length || 1))
+          ? (s.kitchenTab === 'stoves' ? 4 : Math.max(1, getKitchenRecipes(s).length))
           : s.view === SOURCE_VIEW.NEIGHBORS ? (s.catalog.neighbors?.length || 1) : 16;
         s.panelCursor = (s.panelCursor + delta + len) % len;
       }
@@ -2286,9 +2856,9 @@ if (typeof window !== 'undefined') {
           const curP = Math.floor(s.shopCursor / 4);
           s.shopCursor = ((curP + delta + pages) % pages) * 4;
         } else if (s.view === SOURCE_VIEW.KITCHEN && s.kitchenTab !== 'stoves') {
-          const len = s.catalog.recipes?.length || 1;
+          const len = getKitchenRecipes(s).length || 1;
           const pages = Math.max(1, Math.ceil(len / 6));
-          const curP = Math.floor(s.panelCursor / 6);
+          const curP = Math.floor(Math.min(s.panelCursor, len - 1) / 6);
           s.panelCursor = ((curP + delta + pages) % pages) * 6;
         } else if (s.view === SOURCE_VIEW.BARN && s.barnTab !== 'upgrade') {
           const len = (s.inventory.size + 1) || 1;

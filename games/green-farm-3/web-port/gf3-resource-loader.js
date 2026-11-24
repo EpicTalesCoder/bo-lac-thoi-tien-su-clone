@@ -205,8 +205,11 @@ export function decodeFarmCatalog(pack9, textData = {}) {
   const t7 = decodeConfigTable(readPackBlock(pack9, 7));
   const t8 = decodeConfigTable(readPackBlock(pack9, 8));
   const t16 = decodeConfigTable(readPackBlock(pack9, 16));
+  const t19 = decodeConfigTable(readPackBlock(pack9, 19));
+  const t22 = decodeConfigTable(readPackBlock(pack9, 22));
   const t25 = decodeConfigTable(readPackBlock(pack9, 25));
   const t26 = decodeConfigTable(readPackBlock(pack9, 26));
+  const t33 = decodeConfigTable(readPackBlock(pack9, 33));
 
   const goods = t1.rows.map((r, idx) => ({
     index: idx,
@@ -334,10 +337,12 @@ export function decodeFarmCatalog(pack9, textData = {}) {
       else ingList.push({ goodId: g2.id, name: g2.name, qty: r[10], iconBlock: g2.iconBlock, iconFrame: g2.iconFrame });
     }
     const outGood = (r[18] >= 0 && r[18] < goods.length) ? goods[r[18]] : findGoodByName(name);
+    const isBakery = /bánh|bột|bơ|tart|kem|kẹo|caramen|nướng|kếp|vỏ/i.test(name);
     return {
       index: idx,
       id: r[1],
       name,
+      category: isBakery ? 'bakery' : 'cooking',
       unlockLevel: Math.max(1, r[3] || 1),
       cookSec: Math.max(6, (r[5] || 5) * 2),
       ingredients: ingList,
@@ -348,6 +353,60 @@ export function decodeFarmCatalog(pack9, textData = {}) {
       xp: Math.max(5, r[16] || Math.round((r[5] || 5) * 1.5)),
     };
   });
+
+  // Port of a.java:22914-22959 & 23112-23151: /9[22] Máy xay (Animal Feed Mill recipes)
+  const feedRecipes = t22.rows.map((r, idx) => {
+    const ingList = [];
+    const g1 = goods[r[5]];
+    if (g1 && r[6] > 0) {
+      ingList.push({ goodId: g1.id, name: g1.name, qty: r[6], iconBlock: g1.iconBlock, iconFrame: g1.iconFrame });
+    }
+    const g2 = goods[r[8]];
+    if (g2 && r[9] > 0) {
+      if (r[8] === r[5] && ingList.length > 0) ingList[0].qty += r[9];
+      else ingList.push({ goodId: g2.id, name: g2.name, qty: r[9], iconBlock: g2.iconBlock, iconFrame: g2.iconFrame });
+    }
+    const outGood = (r[15] >= 0 && r[15] < goods.length) ? goods[r[15]] : goods[111 + idx];
+    const name = txt(r[2]) || outGood?.name || `Thức ăn #${idx + 1}`;
+    const targetKind = /bò/i.test(name) ? 'cow'
+      : /gà/i.test(name) ? 'chicken'
+      : /heo|lợn/i.test(name) ? 'pig'
+      : /dê/i.test(name) ? 'goat'
+      : /cừu/i.test(name) ? 'sheep'
+      : 'super';
+    return {
+      index: idx,
+      id: r[1],
+      name,
+      targetKind,
+      unlockLevel: Math.max(1, r[4] || 1),
+      millSec: Math.max(4, Math.min(20, r[11] || 4)),
+      outputQty: Math.max(1, r[13] || 3),
+      outputGoodId: outGood?.id ?? (4111 + idx),
+      iconBlock: outGood?.iconBlock ?? 34,
+      iconFrame: outGood?.iconFrame ?? idx,
+      sellPrice: outGood?.sellPrice ?? 30,
+      xp: Math.max(4, r[14] || 5),
+      ingredients: ingList,
+    };
+  });
+
+  // Port of a.java:32619-32779: /9[19] Pond Fishing loot pool & /9[33] rod fees
+  const fishingLoot = t19.rows.map((r, idx) => ({
+    index: idx,
+    itemId: r[3],
+    kind: r[4],
+    qty: Math.max(1, r[5] || 1),
+    weightFree: Math.max(0, r[6] || 0),
+    weightCash: Math.max(0, r[7] || 0),
+    weightCoin: Math.max(0, r[8] || 0),
+  }));
+  const fishingConfig = {
+    freeCooldownMs: 60000, // Friendly 60s web-port cooldown (first daily cast is ready immediately)
+    sourceCooldownSec: t33.rows[0]?.[1] || 86400,
+    cashCost: 5,
+    coinCost: t33.rows[1]?.[3] || 50,
+  };
 
   const neighbors = t8.rows.map((r, idx) => ({
     index: idx,
@@ -377,7 +436,10 @@ export function decodeFarmCatalog(pack9, textData = {}) {
 
   const levelXp = t26.rows.map((r) => Math.max(20, (r[1] || 30) * 2));
 
-  return { crops, goods, animals, allAnimals, buildings, decorations, recipes, neighbors, collectibles, quests, levelXp };
+  return {
+    crops, goods, animals, allAnimals, buildings, decorations, recipes, feedRecipes,
+    fishingLoot, fishingConfig, neighbors, collectibles, quests, levelXp,
+  };
 }
 
 /**
@@ -537,6 +599,13 @@ export async function loadOriginalWorldResources({ baseUrl = new URL('assets/pac
   );
   const catalog = decodeFarmCatalog(pack9, textData);
   const farmEntities = decodeFarmWorldEntities(pack9, pack10, [3, 4]);
+  // Port of a.java:16278 & pack10[18]: place Harold's Feed Mill (Máy xay, entityId 14) on the farm
+  try {
+    const millEnt = decodeFarmWorldEntities(pack9, pack10, [18]).find(e => e.category === 50 && e.entityId === 14);
+    if (millEnt && !farmEntities.some(e => e.category === 50 && e.entityId === 14)) {
+      farmEntities.push(millEnt);
+    }
+  } catch { /* optional pack10[18] */ }
   const neighborFarmEntities = (neighborIndex) => {
     const idx = Math.max(0, Math.min(9, neighborIndex | 0));
     return decodeFarmWorldEntities(pack9, pack10, [3, 5 + idx]);
