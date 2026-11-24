@@ -27,7 +27,7 @@ function drawActors(ctx, state, images) {
     const screenY = Math.round(actor.y - camera.y);
     if (screenX < -32 || screenX > state.viewport.width + 32 || screenY < -48 || screenY > state.viewport.height + 48) continue;
 
-    // Health bar above living actors (e.java:1723-1734)
+    // Health bar + dynamic ground shadow for living actors (e.java:1723-1734)
     if (actor.status === 1) {
       const barW = Math.max(12, actor.width || 13);
       const halfW = barW >> 1;
@@ -38,17 +38,41 @@ function drawActors(ctx, state, images) {
       ctx.fillRect(screenX - halfW + 1, barY + 1, fillW, 4);
       ctx.strokeStyle = actor.isPlayer ? '#ffffff' : '#000000';
       ctx.strokeRect(screenX - halfW, barY, barW, 5);
+
+      if (typeof actor.shadowY === 'number' && state.level) {
+        const dropDist = Math.max(0, actor.shadowY - actor.y);
+        const shadowW = Math.max(6, (actor.width || 14) - (dropDist >> 2));
+        const shadowScreenY = Math.round(actor.shadowY - camera.y);
+        if (shadowScreenY > -8 && shadowScreenY < state.viewport.height + 8 && dropDist < 96) {
+          ctx.fillStyle = 'rgba(0,0,0,0.45)';
+          ctx.fillRect(screenX - (shadowW >> 1), shadowScreenY - 1, shadowW, 3);
+        }
+      }
     }
 
     const pose = tables.poseForActor(actor);
     const facing = actor.facing === 0 ? 1 : actor.facing;
-    for (let part = 0; part + 2 < pose.length; part += 3) {
+    let poseLen = pose.length;
+    if (actor.weapon === 0 && !actor.bloodyTimer && actor.animation === 2 && actor.animationFrame > 0 && poseLen >= 3) {
+      poseLen -= 3; // Clean vs bloody chainsaw (e.java:1720-1722)
+    }
+    for (let part = 0; part + 2 < poseLen; part += 3) {
       const frame = pose[part + 2];
       const meta = tables.cu2[frame];
       if (!meta || meta[2] <= 0 || meta[3] <= 0) continue;
       const partX = screenX + (facing > 0 ? pose[part] : -pose[part]);
       const partY = screenY + pose[part + 1] - meta[3];
       drawFrame(ctx, images, meta, partX, partY, facing);
+    }
+
+    // Animated fire / plasma burn overlay on hit fighters (e.java:1755-1766)
+    if (actor.status === 1 && actor.burnTimer > 0) {
+      const burnFrameId = (actor.burnSprite || 43) + ((actor.burnFrame || 0) % 3);
+      const burnMeta = tables.cu2[burnFrameId];
+      if (burnMeta && burnMeta[2] > 0 && burnMeta[3] > 0) {
+        const burnY = screenY - burnMeta[3] - (actor.inAir ? 10 : 0);
+        drawFrame(ctx, images, burnMeta, screenX - (facing > 0 ? (burnMeta[2] >> 1) : -(burnMeta[2] >> 1)), burnY, facing);
+      }
     }
   }
 }

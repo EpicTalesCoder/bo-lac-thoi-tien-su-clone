@@ -218,6 +218,10 @@ export function respawnActor(match, index, tables) {
   actor.fireCooldown = 0;
   actor.quadTimer = 0;
   actor.burnTimer = 0;
+  actor.burnSprite = 43;
+  actor.burnFrame = 0;
+  actor.bloodyTimer = 0;
+  actor.shadowY = actor.y;
 
   // Reset weapons & ammo (e.java:2562-2588): chainsaw (0) infinite, machinegun (1) 100 ammo.
   actor.ownedWeapons = [1, 1, 0, 0, 0, 0];
@@ -317,6 +321,10 @@ export function createSourceMatch(tables, options = {}) {
       fireCooldown: 0,
       quadTimer: 0,
       burnTimer: 0,
+      burnSprite: 43,
+      burnFrame: 0,
+      bloodyTimer: 0,
+      shadowY: 64,
       inAir: 1,
       status: 1,
       respawnTimer: 0,
@@ -465,8 +473,19 @@ export function fireWeapon(match, actorIndex, tables) {
   const baseDamage = WEAPON_DAMAGE[weapon] ?? 10;
   const damage = actor.quadTimer > 0 ? baseDamage * 3 : baseDamage;
 
+  // Exact gun-barrel muzzle spawn from ca[n2] last triple (e.java:1428-1440)
   let projX = actor.x + dir * ((actor.width >> 1) + 4);
   let projY = actor.y - halfH - 2;
+  if (weapon !== 0 && tables?.effects && tables?.ca) {
+    const muaRow = tables.effects[weapon] || tables.effects[0];
+    let poseIdx = (muaRow?.[0] ?? 0) + (muaRow?.[11] ?? 0) + (actor.charOffset ?? 0);
+    if (actor.inAir === 1) poseIdx += 11;
+    const pose = tables.ca[clamp(poseIdx, 0, tables.ca.length - 1)];
+    if (pose && pose.length >= 3) {
+      projX = actor.x + pose[pose.length - 3] * dir;
+      projY = actor.y + pose[pose.length - 2] - (weapon !== 5 ? ((meta[3] >> 1) + 1) : 3);
+    }
+  }
   let vx = PROJECTILE_SPEED * dir;
   let life = 20;
   let width = Math.max(4, meta[2] || 8);
@@ -567,6 +586,18 @@ function handleActorDeath(match, victimIndex, killerIndex, damageSourceWeapon, k
 function applyDamage(match, victimIndex, killerIndex, rawDamage, weapon, knockDir) {
   const victim = match.actors[victimIndex];
   if (!victim || victim.status !== 1 || rawDamage <= 0) return;
+
+  // Fire / plasma burn status overlay on hit (e.java:1000-1019, 1215-1222)
+  if ((weapon === 3 || weapon === 5) && match.rng(2) === 0) {
+    victim.burnTimer = Math.min(200, (victim.burnTimer || 0) + 50);
+    victim.burnSprite = 43;
+  } else if (weapon === 4 && match.rng(2) === 0) {
+    victim.burnTimer = Math.min(100, (victim.burnTimer || 0) + 50);
+    victim.burnSprite = 46;
+  }
+  if (weapon === 0 && killerIndex >= 0 && match.actors[killerIndex]) {
+    match.actors[killerIndex].bloodyTimer = 25;
+  }
 
   // Exact armor/HP split from e.java:1030-1039
   victim.armor -= rawDamage >> 2;
@@ -905,19 +936,32 @@ export function tickSourceMatch(match, input = {}, tables = null) {
       stepBotAI(match, idx, tables);
     }
 
+    // Compute ground shadow Y directly below actor (e.java:712-716)
+    {
+      const stx = clamp(actor.x >> 4, 0, level.width - 1);
+      let sty = clamp(actor.y >> 4, 0, level.height - 1);
+      while (sty < level.height - 1 && getTileFloorOffset(tables, getTileAt(level, stx, sty)) === 0) {
+        sty += 1;
+      }
+      const sOff = getTileFloorOffset(tables, getTileAt(level, stx, sty));
+      actor.shadowY = sOff > 0 ? (sty << 4) + sOff : (level.height - 1) << 4;
+    }
+
     // Pending jump impulse & animation state machine (e.java:731-819)
     if (actor.jumpPending === 1) {
       actor.jumpPending = -1;
       actor.action = 1;
       actor.inAir = 1;
       actor.vy = JUMP_VELOCITY;
+      actor.animation = 4;
+      actor.animationFrame = 0;
     } else {
       switch (actor.action) {
         case -1: actor.animation = 1; break; // idle
         case 0: actor.animation = 0; actor.action = -1; break; // run
-        case 1: actor.animation = 4; actor.animationFrame = 0; break; // jump up
-        case 2: actor.animation = 4; actor.animationFrame = 1; break; // fall
-        case 3: actor.animation = 4; actor.animationFrame = 2; actor.action = -1; break; // land
+        case 1: actor.animation = 4; actor.animationFrame = 1; break; // jump up
+        case 2: actor.animation = 4; actor.animationFrame = 2; break; // fall
+        case 3: actor.animation = 4; actor.animationFrame = 3; actor.action = -1; break; // land
         case 4: actor.animation = 5; break; // dying
         case 5: actor.animation = 6; break; // gibbed
         default: break;
@@ -928,16 +972,18 @@ export function tickSourceMatch(match, input = {}, tables = null) {
     }
 
     // Advance animation frame within mua bounds.
-    // Death/gib animations (5 & 6) clamp on their final fallen frame (e.java:765-787) instead of looping!
+    // Death/gib animations (5 & 6) hold frame 0 while sliding/falling, then clamp on final fallen frame (e.java:765-787).
     const muaRow = tables?.effects?.[actor.weapon] || tables?.mua?.[actor.weapon];
     const animLen = Math.max(1, muaRow?.[8 + (actor.animation << 1)] ?? 1);
     if (actor.status === 0 || actor.animation === 5 || actor.animation === 6) {
-      if (actor.animationFrame < animLen - 1) {
+      if (actor.animation === 5 && (actor.vx !== 0 || actor.inAir !== 0)) {
+        actor.animationFrame = 0;
+      } else if (actor.animationFrame < animLen - 1) {
         actor.animationFrame += 1;
       } else {
         actor.animationFrame = animLen - 1;
       }
-    } else {
+    } else if (actor.animation !== 4) {
       actor.animationFrame = (actor.animationFrame + 1) % animLen;
     }
 
@@ -979,7 +1025,11 @@ export function tickSourceMatch(match, input = {}, tables = null) {
 
     if (actor.fireCooldown > 0) actor.fireCooldown -= 1;
     if (actor.quadTimer > 0) actor.quadTimer -= 1;
-    if (actor.burnTimer > 0) actor.burnTimer -= 1;
+    if (actor.bloodyTimer > 0) actor.bloodyTimer -= 1;
+    if (actor.burnTimer > 0) {
+      actor.burnTimer -= 1;
+      actor.burnFrame = ((actor.burnFrame || 0) + 1) % 3;
+    }
 
     // Mode win checks (e.java:902-907)
     if (match.mode === MODE.DEATHMATCH && actor.kills >= (match.settings.F ?? 15)) {

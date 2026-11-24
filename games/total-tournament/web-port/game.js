@@ -399,33 +399,36 @@ function drawConfigurationPage(ctx2d, labels, state) {
   const rowHeight = layout.optionRowHeight;
   const rowStart = layout.optionStartY;
   const selected = Math.max(0, Math.min(app.selection, 3));
-  const valueSpriteX = layout.statSpriteX ?? (WIDTH - 56);
+  const iconX = 198;
+  const leftArrowX = 122;
+  const valueCenterX = 154;
+  const rightArrowX = 182;
 
   // Mode title header at top
   const title = tr.modeTitles[mode] || '';
   if (title) {
     ctx2d.fillStyle = '#cc0000';
     ctx2d.fillRect(28, 4, WIDTH - 56, fontHeight + 6);
-    drawText(ctx2d, title, WIDTH >> 1, 7, 21);
+    drawFittedText(ctx2d, title, WIDTH >> 1, 7, WIDTH - 64);
   }
 
   for (let index = 0; index < Math.min(4, labels.length); index++) {
     const y = rowStart + index * rowHeight;
     const isSel = index === selected;
     ctx2d.fillStyle = isSel ? '#416700' : '#2d4700';
-    ctx2d.fillRect(2, y - 3, WIDTH - 4, rowHeight - 4);
+    ctx2d.fillRect(4, y - 3, WIDTH - 8, rowHeight - 4);
     if (isSel) {
       ctx2d.strokeStyle = '#b9b900';
-      ctx2d.strokeRect(1, y - 4, WIDTH - 3, rowHeight - 2);
+      ctx2d.strokeRect(3, y - 4, WIDTH - 6, rowHeight - 2);
     }
-    drawText(ctx2d, labels[index] || '', layout.leftTextX, y + 2, 20);
+    drawText(ctx2d, labels[index] || '', 12, y + 2, 20);
     const value = String(values[index] ?? '');
-    drawText(ctx2d, value, layout.valueX, y + 2, 21);
+    drawText(ctx2d, value, valueCenterX, y + 2, 21, isSel ? '#ffff66' : '#ffffff');
     const spriteId = index === 3 ? 40 : (index === 0 ? (mode === 2 ? 30 : mode === 3 ? 31 : 27) : 27 + index);
-    drawSprite(ctx2d, spriteId, valueSpriteX, y - 2);
+    drawSprite(ctx2d, spriteId, iconX, y - 2);
     if (isSel) {
-      drawSprite(ctx2d, app.selectionDirection < 0 ? 37 : 38, valueSpriteX - 10, y + 3);
-      drawSprite(ctx2d, app.selectionDirection > 0 ? 39 : 36, WIDTH - 14, y + 3);
+      drawSprite(ctx2d, app.selectionDirection < 0 ? 37 : 38, leftArrowX, y + 3);
+      drawSprite(ctx2d, app.selectionDirection > 0 ? 39 : 36, rightArrowX, y + 3);
     }
   }
 
