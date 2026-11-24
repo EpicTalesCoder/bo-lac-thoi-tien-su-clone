@@ -271,10 +271,12 @@ export function drawMenuFrame(ctx, assets, x, y, w, h, flags = 0, headerHeight =
   return { ix, iy, iw, ih };
 }
 
-// Port of d.java:500-552, 668-726, 1078-1135: AE2 circular rotating Ring Menu
+// Port of d.java:500-552, 668-726, 1078-1135: AE2 circular rotating Ring Menu (continuous 60/120fps easing + optional 4-slot action ring)
 export class RingMenu {
   constructor(opts = {}) {
     this.items = opts.items ?? [];
+    this.minSlots = opts.minSlots ?? 0;
+    this.slotCount = Math.max(this.minSlots, this.items.length, 1);
     this.centerX = opts.centerX ?? 120;
     this.centerY = opts.centerY ?? 200;
     this.radius = opts.radius ?? 58;
@@ -285,10 +287,12 @@ export class RingMenu {
     this.titleY = opts.titleY ?? null;
     this.titleX = opts.titleX ?? null;
     this.titleW = opts.titleW ?? 240;
+    this.showTitleArrows = opts.showTitleArrows ?? false;
     this.selectedIndex = Math.max(0, Math.min(Math.max(0, this.items.length - 1), opts.selectedIndex ?? 0));
     this.rotOffset = 0;
-    this.openRadius = opts.immediate ? this.radius : Math.max(8, Math.round(this.radius * 0.2));
+    this.openRadius = opts.immediate ? this.radius : Math.max(4, Math.round(this.radius * 0.12));
     this.sparkTick = 0;
+    this.sparkTimerMs = 0;
     this.sparks = [
       { dx: -10, dy: -9, phase: 0 },
       { dx: 11, dy: -4, phase: 2 },
@@ -304,35 +308,56 @@ export class RingMenu {
   move(delta) {
     const n = this.items.length;
     if (n <= 1) return;
-    const step = 360 / n;
-    this.selectedIndex = (this.selectedIndex + delta + n * 4) % n;
-    this.rotOffset += delta * step;
+    const step = 360 / this.slotCount;
+    const oldIdx = this.selectedIndex;
+    const newIdx = (oldIdx + delta + n * 4) % n;
+    this.selectedIndex = newIdx;
+    if (this.slotCount === n) {
+      this.rotOffset += delta * step;
+    } else {
+      // Action ring (`d.java:509-514` 4-slot layout): smoothly rotate across actual angular delta
+      let diff = ((newIdx * step - oldIdx * step + 540) % 360) - 180;
+      if (diff === -180) diff = delta > 0 ? 180 : -180;
+      this.rotOffset += diff;
+    }
   }
 
   selectIndex(targetIdx) {
     const n = this.items.length;
     if (n === 0 || targetIdx < 0 || targetIdx >= n) return;
-    const diffRaw = targetIdx - this.selectedIndex;
-    let delta = diffRaw;
-    if (delta > n / 2) delta -= n;
-    if (delta < -n / 2) delta += n;
-    this.selectedIndex = targetIdx;
-    this.rotOffset += delta * (360 / n);
+    const step = 360 / this.slotCount;
+    if (this.slotCount === n) {
+      let delta = targetIdx - this.selectedIndex;
+      if (delta > n / 2) delta -= n;
+      if (delta < -n / 2) delta += n;
+      this.selectedIndex = targetIdx;
+      this.rotOffset += delta * step;
+    } else {
+      const oldDeg = this.selectedIndex * step;
+      const newDeg = targetIdx * step;
+      const diff = ((newDeg - oldDeg + 540) % 360) - 180;
+      this.selectedIndex = targetIdx;
+      this.rotOffset += diff;
+    }
   }
 
-  tick() {
+  tick(dtMs = 50) {
+    const dt = Math.max(1, Math.min(100, dtMs));
     if (this.openRadius < this.radius) {
-      const step = Math.max(4, Math.ceil(this.radius / 4));
-      this.openRadius = Math.min(this.radius, this.openRadius + step);
+      this.openRadius = Math.min(this.radius, this.openRadius + (this.radius * dt) / 145);
     }
-    if (Math.abs(this.rotOffset) > 0.6) {
-      this.rotOffset *= 0.52;
+    if (Math.abs(this.rotOffset) > 0.35) {
+      // Smooth exponential damping matching J2ME `-T/2` per ~42ms across any frame rate (60Hz/120Hz+)
+      this.rotOffset *= Math.pow(0.5, dt / 42);
+      if (Math.abs(this.rotOffset) <= 0.35) this.rotOffset = 0;
     } else {
       this.rotOffset = 0;
     }
-    this.sparkTick++;
-    if (this.sparkTick % 3 === 0) {
-      const s = this.sparks[(this.sparkTick / 3) % this.sparks.length];
+    this.sparkTimerMs += dt;
+    while (this.sparkTimerMs >= 75) {
+      this.sparkTimerMs -= 75;
+      this.sparkTick++;
+      const s = this.sparks[this.sparkTick % this.sparks.length];
       if (s) s.phase = (s.phase + 1) % 5;
     }
   }
@@ -340,7 +365,7 @@ export class RingMenu {
   getNodePositions() {
     const n = this.items.length;
     if (n === 0) return [];
-    const step = 360 / n;
+    const step = 360 / this.slotCount;
     const baseRot = -this.selectedIndex * step + this.rotOffset;
     const m = this.openRadius;
     return this.items.map((item, index) => {
@@ -369,7 +394,7 @@ export class RingMenu {
     }
     const tb = this.getTitleBox();
     if (py >= tb.y - 2 && py <= tb.y + tb.h + 2 && px >= tb.x && px <= tb.x + tb.w) {
-      if (this.items.length > 1) {
+      if (this.showTitleArrows && this.items.length > 1) {
         if (px <= tb.x + 26) return { type: 'prev' };
         if (px >= tb.x + tb.w - 26) return { type: 'next' };
       }
@@ -382,12 +407,13 @@ export class RingMenu {
     const nodes = this.getNodePositions();
     // Draw unselected circles first, selected circle on top
     const ordered = [...nodes.filter(n => !n.selected), ...nodes.filter(n => n.selected)];
+    const settled = Math.abs(this.rotOffset) < 2.5 && this.openRadius >= this.radius - 1;
     for (const node of ordered) {
       drawSpriteFrame(ctx, assets, this.circleSprite, node.selected ? 1 : 0, node.x, node.y, MIDP.HCENTER | MIDP.VCENTER);
       if (node.item?.icon != null) {
         drawSpriteFrame(ctx, assets, this.iconSprite, node.item.icon, node.x, node.y, MIDP.HCENTER | MIDP.VCENTER);
       }
-      if (node.selected) {
+      if (node.selected && settled) {
         for (let s = 0; s < this.sparks.length; s++) {
           const sp = this.sparks[s];
           const frame = (sp.phase + (this.sparkTick >> 1) + s) % 5;
@@ -408,7 +434,7 @@ export class RingMenu {
         ctx.fillRect(tb.x, tb.y, 1, tb.h);
         ctx.fillRect(tb.x + tb.w - 1, tb.y, 1, tb.h);
       }
-      if (this.items.length > 1) {
+      if (this.showTitleArrows && this.items.length > 1) {
         drawSpriteFrame(ctx, assets, 'side_arrow', 0, tb.x + 8, tb.y + (tb.h >> 1), MIDP.HCENTER | MIDP.VCENTER);
         drawSpriteFrame(ctx, assets, 'side_arrow', 1, tb.x + tb.w - 8, tb.y + (tb.h >> 1), MIDP.HCENTER | MIDP.VCENTER);
       }
@@ -416,7 +442,7 @@ export class RingMenu {
         font: 'bold 10px Arial, sans-serif',
         color: UI_COLORS.textActive,
         align: 'center',
-        maxWidth: tb.w - 30,
+        maxWidth: tb.w - 12,
       });
     }
   }

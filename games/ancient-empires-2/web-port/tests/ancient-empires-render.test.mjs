@@ -426,3 +426,59 @@ test('drawRecruitDialog displays real Soldier ATK/DEF/MOV stats from units.bin r
   // Expect digits for "50-55", "5", "5" => frames [5,0,10,5,5, 5, 5]
   assert.deepEqual(charFramesDrawn, [5, 0, 10, 5, 5, 5, 5]);
 });
+
+test('Action RingMenu uses 4-slot 90-degree quadrant angles, supports 60fps 16ms damping, and renderOriginalBoard honors sub-tile px/py', async () => {
+  const [mapBytes, tilesBytes, buildingsBytes, propertyBytes, unitIconsBytes] = await Promise.all([
+    readFile(asset('m0')), readFile(asset('tiles0.sprite')), readFile(asset('buildings.sprite')), readFile(asset('tiles0.prop')),
+    readFile(asset('unit_icons.sprite')),
+  ]);
+  const map = decodeMap(new Uint8Array(mapBytes));
+  const assets = {
+    terrain: decodeTerrainProperties(new Uint8Array(propertyBytes)),
+    sprites: {
+      tiles0: decodeSprite(new Uint8Array(tilesBytes)),
+      buildings: decodeSprite(new Uint8Array(buildingsBytes)),
+      unit_icons: decodeSprite(new Uint8Array(unitIconsBytes)),
+    },
+    images: { buildings: { name: 'b', naturalWidth: 48, naturalHeight: 24 }, unit_icons: { name: 'ui', naturalWidth: 288, naturalHeight: 48 } },
+    unitIconPalettes: [null, { name: 'ui1', naturalWidth: 288, naturalHeight: 48 }],
+    frameImages: { tiles0: Array.from({ length: 37 }, (_, i) => ({ name: `t${i}`, naturalWidth: 24, naturalHeight: 24 })) },
+  };
+
+  // 2-item action menu with minSlots=4 should place items at 0 deg (top) and 90 deg (right), NOT 180 deg opposite
+  const actionRing = new RingMenu({
+    items: [{ label: 'END MOVE', icon: 6 }, { label: 'CANCEL', icon: 5 }],
+    minSlots: 4,
+    centerX: 60,
+    centerY: 220,
+    radius: 36,
+    immediate: true,
+  });
+  const nodes = actionRing.getNodePositions();
+  assert.deepEqual([nodes[0].x, nodes[0].y], [60, 184]);
+  assert.deepEqual([nodes[1].x, nodes[1].y], [96, 220]);
+
+  // 16ms 60fps tick smoothly decays rotOffset without locking or jumping
+  actionRing.move(1);
+  const startOff = Math.abs(actionRing.rotOffset);
+  assert.ok(startOff > 80);
+  actionRing.tick(16);
+  const afterOneFrame = Math.abs(actionRing.rotOffset);
+  assert.ok(afterOneFrame < startOff && afterOneFrame > startOff * 0.6);
+  for (let i = 0; i < 40; i++) actionRing.tick(16);
+  assert.equal(actionRing.rotOffset, 0);
+
+  // Smooth pixel unit.px / unit.py rendering
+  const { ctx, calls } = makeContext();
+  renderOriginalBoard(ctx, {
+    map,
+    assets,
+    viewportWidth: 96,
+    viewportHeight: 96,
+    units: [{ type: 0, palette: 1, action: 0, hp: 100, x: 1, y: 1, px: 30, py: 36 }],
+  });
+  const unitCall = calls.find(c => c[0] === 'drawImage' && c[1].name === 'ui1');
+  assert.ok(unitCall);
+  assert.equal(unitCall[6], 30);
+  assert.equal(unitCall[7], 36);
+});

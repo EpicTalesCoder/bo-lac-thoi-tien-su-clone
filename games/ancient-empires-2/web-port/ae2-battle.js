@@ -196,10 +196,10 @@ export class BattleScene {
     }
   }
 
-  renderSideFigures(ctx, side, isAttacking, isHit) {
+  renderSideFigures(ctx, side, lungeRatio, isAttackPose, isHit) {
     const isLeft = side.sideIndex === 0;
-    const lunge = isAttacking ? (isLeft ? 14 : -14) : 0;
-    const seqFrame = isAttacking ? 2 : ((Math.floor(this.elapsed / 220)) % 2);
+    const lunge = Math.round((isLeft ? 16 : -16) * lungeRatio);
+    const seqFrame = isAttackPose ? 2 : ((Math.floor(this.elapsed / 220)) % 2);
     for (let i = 0; i < side.slots; i++) {
       const fig = side.figures[i];
       if (i >= side.visibleCount) {
@@ -210,7 +210,7 @@ export class BattleScene {
         }
         continue;
       }
-      const jitterX = isHit ? ((Math.floor(this.elapsed / 45) % 2 === 0) ? -3 : 3) : 0;
+      const jitterX = isHit ? Math.round(Math.sin(this.elapsed * 0.14) * 3) : 0;
       const fx = fig.baseX + lunge + jitterX;
       const fy = fig.baseY;
       ctx.fillStyle = 'rgba(0, 0, 0, 0.32)';
@@ -267,8 +267,21 @@ export class BattleScene {
     const inAttackerImpact = this.elapsed >= 480 && this.elapsed < 860;
     const inCounterImpact = this.hasCounter && this.elapsed >= this.counterStart + 420 && this.elapsed < this.counterStart + 800;
     const shake = inAttackerImpact || inCounterImpact;
-    const shakeX = shake ? ((Math.floor(this.elapsed / 40) % 2 === 0) ? -3 : 3) : 0;
-    const shakeY = shake ? ((Math.floor(this.elapsed / 60) % 2 === 0) ? -1 : 1) : 0;
+    const shakeX = shake ? Math.round(Math.sin(this.elapsed * 0.16) * 3) : 0;
+    const shakeY = shake ? Math.round(Math.cos(this.elapsed * 0.11) * 1.5) : 0;
+
+    const smoothStep = t => {
+      const c = Math.max(0, Math.min(1, t));
+      return c * c * (3 - 2 * c);
+    };
+    const lungeCurve = localMs => {
+      if (localMs < 140 || localMs > 900) return 0;
+      if (localMs < 380) return smoothStep((localMs - 140) / 240);
+      if (localMs <= 640) return 1;
+      return 1 - smoothStep((localMs - 640) / 260);
+    };
+    const leftLunge = lungeCurve(this.elapsed);
+    const rightLunge = this.hasCounter ? lungeCurve(this.elapsed - this.counterStart) : 0;
 
     // Left arena panel (Attacker)
     ctx.save();
@@ -276,7 +289,7 @@ export class BattleScene {
     ctx.rect(0, 0, this.halfW - 1, this.arenaH);
     ctx.clip();
     this.renderHalfTerrain(ctx, this.attackerTerrain, 0, this.halfW, shakeX, shakeY);
-    this.renderSideFigures(ctx, this.leftSide, this.elapsed >= 220 && this.elapsed < 760, inCounterImpact);
+    this.renderSideFigures(ctx, this.leftSide, leftLunge, this.elapsed >= 220 && this.elapsed < 760, inCounterImpact);
     if (this.hasCounter && this.elapsed >= this.counterStart) {
       this.renderImpactEffect(ctx, this.leftSide, this.res.counterDamage, this.elapsed - this.counterStart);
     }
@@ -288,7 +301,7 @@ export class BattleScene {
     ctx.rect(this.halfW + 1, 0, this.halfW - 1, this.arenaH);
     ctx.clip();
     this.renderHalfTerrain(ctx, this.defenderTerrain, this.halfW, this.halfW, shakeX, shakeY);
-    this.renderSideFigures(ctx, this.rightSide, this.hasCounter && this.elapsed >= this.counterStart + 160 && this.elapsed < this.counterStart + 700, inAttackerImpact);
+    this.renderSideFigures(ctx, this.rightSide, rightLunge, this.hasCounter && this.elapsed >= this.counterStart + 160 && this.elapsed < this.counterStart + 700, inAttackerImpact);
     if (this.elapsed < this.counterStart) {
       this.renderImpactEffect(ctx, this.rightSide, this.res.damage, this.elapsed);
     }
@@ -298,12 +311,14 @@ export class BattleScene {
     ctx.fillStyle = '#000000';
     ctx.fillRect(this.halfW - 1, 0, 2, this.arenaH);
 
-    // Bottom Battle HUD Strip (i.java:6404-6421)
+    // Bottom Battle HUD Strip matching AE2 navy #242a45 & team gradient stripes
     const hudY = this.arenaH;
-    ctx.fillStyle = '#18141c';
+    ctx.fillStyle = '#242a45';
     ctx.fillRect(0, hudY, this.width, this.hudH);
-    ctx.fillStyle = '#caa568';
-    ctx.fillRect(0, hudY, this.width, 2);
+    ctx.fillStyle = '#555d86';
+    ctx.fillRect(0, hudY, this.width, 1);
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(0, hudY + 1, this.width, 1);
 
     this.renderSideHud(ctx, this.leftSide, this.attackerName, 4, hudY + 4, this.halfW - 8);
     ctx.fillStyle = '#000000';
@@ -319,21 +334,21 @@ export class BattleScene {
   }
 
   renderSideHud(ctx, side, label, x, y, w) {
-    const teamColors = ['#888', '#3c96ee', '#e03c68', '#52c444', '#6d7a94'];
+    const teamColors = ['#888888', '#3c96ee', '#e03c68', '#52c444', '#6d7a94'];
     const barColor = teamColors[side.palette] ?? '#3c96ee';
     ctx.fillStyle = barColor;
     ctx.fillRect(x, y, 4, 20);
-    ctx.font = 'bold 8px monospace';
-    ctx.fillStyle = '#f4dfb3';
+    ctx.font = 'bold 8px Arial, sans-serif';
+    ctx.fillStyle = '#ffffff';
     ctx.textAlign = 'left';
     ctx.fillText(label.slice(0, 11), x + 7, y + 7);
     const hp = Math.max(0, Math.round(side.displayHp));
-    ctx.fillStyle = '#2a222e';
+    ctx.fillStyle = '#191b3a';
     ctx.fillRect(x + 7, y + 11, w - 42, 6);
     ctx.fillStyle = hp > 50 ? '#68d468' : hp > 25 ? '#f5b841' : '#e84a4a';
     ctx.fillRect(x + 7, y + 11, Math.round(((w - 42) * hp) / 100), 6);
-    ctx.font = 'bold 8px monospace';
-    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 8px Arial, sans-serif';
+    ctx.fillStyle = '#ffd84d';
     ctx.textAlign = 'right';
     ctx.fillText(`${hp}/100`, x + w, y + 16);
   }

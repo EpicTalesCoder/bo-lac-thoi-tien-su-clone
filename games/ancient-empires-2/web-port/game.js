@@ -257,7 +257,10 @@ class AncientEmpiresWeb {
     this.recruitCursor = 0;
     this.aiPending = false;
     this.aiTimer = 0;
+    this.aiTask = null;
     this.animTick = 0;
+    this.animTickAcc = 0;
+    this.spriteAnimAcc = 0;
     this.waterAnimFrame = 0;
     this.floatTexts = [];
     this.mapEffects = [];
@@ -316,19 +319,22 @@ class AncientEmpiresWeb {
   }
 
   initMainRing() {
+    // Port of i.java:2197 & d.java:538-545, 1128: full ring below logo at y=87..320 with subtle wide radius
     const items = this.getMainMenuItems();
     this.mainRing = new RingMenu({
       items,
       selectedIndex: Math.min(items.length - 1, Math.max(0, this.menuCursor)),
       centerX: 120,
-      centerY: 214,
-      radius: 58,
+      centerY: 205,
+      radius: 70,
       circleSprite: 'big_circle',
       iconSprite: 'menu_icons',
       maxW: WIDTH,
       maxH: HEIGHT,
-      titleW: WIDTH,
-      titleY: 104,
+      titleX: 2,
+      titleW: WIDTH - 4,
+      titleY: 87,
+      showTitleArrows: false,
     });
   }
 
@@ -336,10 +342,12 @@ class AncientEmpiresWeb {
     this.subMenuReturnState = returnState;
     this.state = state;
     this.aiPending = false;
+    this.aiTask = null;
     this.moveAnim = null;
     this.battleScene = null;
     this.scriptState = null;
     this.mapEffects = [];
+    for (const u of this.units) { u.px = null; u.py = null; }
     this.selected = null;
     this.moveOrigin = null;
     this.reachable = null;
@@ -476,6 +484,8 @@ class AncientEmpiresWeb {
     this.floatTexts = [];
     this.mapEffects = [];
     this.scriptState = null;
+    this.aiTask = null;
+    this.aiPending = false;
     this.stageBannerPrompt = 'TAP OR ENTER TO BEGIN';
     const rawUnits = stageCfg?.removeInitialCrystals
       ? mapData.units.filter(u => u.type !== 11)
@@ -676,7 +686,7 @@ class AncientEmpiresWeb {
     if (step.kind === 'moveGroup') {
       step._movers = (step.moves || []).map(m => {
         const u = this.unitAt(m.from[0], m.from[1]);
-        const path = [];
+        const path = [[m.from[0], m.from[1]]];
         let cx = m.from[0];
         let cy = m.from[1];
         while (cx !== m.to[0]) {
@@ -687,9 +697,9 @@ class AncientEmpiresWeb {
           cy += Math.sign(m.to[1] - cy);
           path.push([cx, cy]);
         }
-        return { unit: u, path, idx: 0 };
+        if (u) { u.px = m.from[0] * 24; u.py = m.from[1] * 24; }
+        return { unit: u, path, segIdx: 0, segMs: 0, stepMs: 135 };
       }).filter(item => item.unit);
-      step._tickCount = 0;
       step._pauseLeft = step.pauseMs ?? 200;
       return;
     }
@@ -697,13 +707,13 @@ class AncientEmpiresWeb {
     if (step.kind === 'spawnMove') {
       let u = this.unitAt(step.from[0], step.from[1]);
       if (!u) u = this.spawnStageUnit(step.type, step.playerSelector, step.from[0], step.from[1]);
-      const path = [];
+      const path = [[step.from[0], step.from[1]]];
       let cx = step.from[0];
       let cy = step.from[1];
       while (cx !== step.to[0]) { cx += Math.sign(step.to[0] - cx); path.push([cx, cy]); }
       while (cy !== step.to[1]) { cy += Math.sign(step.to[1] - cy); path.push([cx, cy]); }
-      step._movers = u ? [{ unit: u, path, idx: 0 }] : [];
-      step._tickCount = 0;
+      if (u) { u.px = step.from[0] * 24; u.py = step.from[1] * 24; }
+      step._movers = u ? [{ unit: u, path, segIdx: 0, segMs: 0, stepMs: 135 }] : [];
       step._pauseLeft = step.pauseMs ?? 200;
       return;
     }
@@ -711,14 +721,14 @@ class AncientEmpiresWeb {
     if (step.kind === 'escortRetreat') {
       step._movers = (step.units || []).map(spec => {
         const u = this.spawnStageUnit(spec.type, spec.playerSelector, spec.from[0], spec.from[1], { tempEscort: true, role: spec.role });
-        const path = [];
+        const path = [[spec.from[0], spec.from[1]]];
         let cx = spec.from[0];
         let cy = spec.from[1];
         while (cy !== spec.to[1]) { cy += Math.sign(spec.to[1] - cy); path.push([cx, cy]); }
         while (cx !== spec.to[0]) { cx += Math.sign(spec.to[0] - cx); path.push([cx, cy]); }
-        return { unit: u, path, idx: 0, removeOnArrive: spec.to[1] <= 0 };
+        if (u) { u.px = spec.from[0] * 24; u.py = spec.from[1] * 24; }
+        return { unit: u, path, segIdx: 0, segMs: 0, stepMs: 135, removeOnArrive: spec.to[1] <= 0 };
       }).filter(item => item.unit);
-      step._tickCount = 0;
       step._pauseLeft = step.pauseMs ?? 300;
       return;
     }
@@ -764,7 +774,7 @@ class AncientEmpiresWeb {
     this.advanceScriptStep();
   }
 
-  tickScript() {
+  tickScript(dtMs = 50) {
     const st = this.scriptState;
     if (!st || !st.active) return;
     const step = st.active;
@@ -774,48 +784,62 @@ class AncientEmpiresWeb {
       const { cx, cy } = step._targetCam;
       const dx = cx - this.cameraX;
       const dy = cy - this.cameraY;
-      if (Math.abs(dx) > 2 || Math.abs(dy) > 2) {
-        this.cameraX += Math.abs(dx) <= 14 ? dx : Math.sign(dx) * 14;
-        this.cameraY += Math.abs(dy) <= 14 ? dy : Math.sign(dy) * 14;
+      if (Math.abs(dx) > 1.2 || Math.abs(dy) > 1.2) {
+        const blend = 1 - Math.exp((-10 * dtMs) / 1000);
+        this.cameraX += dx * blend;
+        this.cameraY += dy * blend;
       } else {
         this.cameraX = cx;
         this.cameraY = cy;
-        step._pauseLeft -= 50;
+        step._pauseLeft -= dtMs;
         if (step._pauseLeft <= 0) this.advanceScriptStep();
       }
       return;
     }
 
     if (step.kind === 'moveGroup' || step.kind === 'spawnMove' || step.kind === 'escortRetreat') {
-      step._tickCount++;
       let allDone = true;
       for (const m of step._movers) {
-        if (m.idx < m.path.length) allDone = false;
+        if (m.segIdx < m.path.length - 1) {
+          allDone = false;
+          m.segMs += dtMs;
+          while (m.segMs >= m.stepMs && m.segIdx < m.path.length - 1) {
+            m.segMs -= m.stepMs;
+            m.segIdx++;
+            const cur = m.path[m.segIdx];
+            m.unit.x = cur[0];
+            m.unit.y = cur[1];
+            this.cursor = { x: cur[0], y: cur[1] };
+            this.sfx('select');
+          }
+          if (m.segIdx >= m.path.length - 1) {
+            const last = m.path[m.path.length - 1];
+            m.unit.x = last[0];
+            m.unit.y = last[1];
+            m.unit.px = null;
+            m.unit.py = null;
+            if (m.removeOnArrive) m.unit.action = 4;
+          } else {
+            const a = m.path[m.segIdx];
+            const b = m.path[m.segIdx + 1];
+            const t = m.segMs / m.stepMs;
+            m.unit.px = (a[0] + (b[0] - a[0]) * t) * 24;
+            m.unit.py = (a[1] + (b[1] - a[1]) * t) * 24;
+          }
+        }
       }
       if (!allDone) {
-        if (step._tickCount % 3 === 1) {
-          for (const m of step._movers) {
-            if (m.idx < m.path.length) {
-              const [nx, ny] = m.path[m.idx++];
-              m.unit.x = nx;
-              m.unit.y = ny;
-              this.cursor = { x: nx, y: ny };
-              if (m.removeOnArrive && m.idx >= m.path.length) {
-                m.unit.action = 4;
-              }
-            }
-          }
-          this.sfx('select');
-        }
+        const lead = step._movers.find(m => m.unit.px != null);
+        if (lead) this.smoothCameraToPixel(lead.unit.px + 12, lead.unit.py + 12, dtMs);
         return;
       }
-      step._pauseLeft -= 50;
+      step._pauseLeft -= dtMs;
       if (step._pauseLeft <= 0) this.advanceScriptStep();
       return;
     }
 
     if (step.kind === 'fx' || step.kind === 'fxBurst') {
-      step._pauseLeft -= 50;
+      step._pauseLeft -= dtMs;
       if (step._pauseLeft <= 0) this.advanceScriptStep();
     }
   }
@@ -838,6 +862,8 @@ class AncientEmpiresWeb {
         for (const m of step._movers) {
           const last = m.path[m.path.length - 1];
           if (last) { m.unit.x = last[0]; m.unit.y = last[1]; }
+          m.unit.px = null;
+          m.unit.py = null;
           if (m.removeOnArrive) m.unit.action = 4;
         }
       }
@@ -858,11 +884,11 @@ class AncientEmpiresWeb {
       if (s.kind === 'moveGroup') {
         for (const m of (s.moves || [])) {
           const u = this.unitAt(m.from[0], m.from[1]);
-          if (u) { u.x = m.to[0]; u.y = m.to[1]; }
+          if (u) { u.x = m.to[0]; u.y = m.to[1]; u.px = null; u.py = null; }
         }
       } else if (s.kind === 'spawnMove') {
         const existing = this.unitAt(s.to[0], s.to[1]) || this.unitAt(s.from[0], s.from[1]);
-        if (existing) { existing.x = s.to[0]; existing.y = s.to[1]; }
+        if (existing) { existing.x = s.to[0]; existing.y = s.to[1]; existing.px = null; existing.py = null; }
         else this.spawnStageUnit(s.type, s.playerSelector, s.to[0], s.to[1]);
       } else if (s.kind === 'fxBurst') {
         if (s.removeUnitAt) {
@@ -872,6 +898,7 @@ class AncientEmpiresWeb {
       }
     }
     this.units = this.units.filter(u => !u.tempEscort);
+    for (const u of this.units) { u.px = null; u.py = null; }
     this.mapEffects = [];
     const fn = st.onDone;
     this.scriptState = null;
@@ -968,20 +995,27 @@ class AncientEmpiresWeb {
 
   loop(time) {
     if (this.lastTick === 0) this.lastTick = time;
-    this.accumulator += Math.min(time - this.lastTick, 200);
+    // Continuous native display refresh rate (60Hz / 120Hz+) delta-time simulation
+    const dtMs = Math.min(40, Math.max(1, time - this.lastTick));
     this.lastTick = time;
-    // Port of e.java:429-460: 50ms simulation cadence
-    while (this.accumulator >= 50) {
-      this.tick();
-      this.accumulator -= 50;
-    }
+    this.update(dtMs);
     this.paint();
     requestAnimationFrame(next => this.loop(next));
   }
 
   tick() {
-    this.animTick++;
-    if (this.animTick % 6 === 0) {
+    this.update(50);
+  }
+
+  update(dtMs) {
+    this.animTickAcc += dtMs;
+    while (this.animTickAcc >= 50) {
+      this.animTick++;
+      this.animTickAcc -= 50;
+    }
+    this.spriteAnimAcc += dtMs;
+    while (this.spriteAnimAcc >= 300) {
+      this.spriteAnimAcc -= 300;
       this.waterAnimFrame = (this.waterAnimFrame + 1) % 4;
       for (const u of this.units) {
         if (u.action !== 3 && u.action !== 4) u.frameIndex = (u.frameIndex + 1) % 2;
@@ -989,20 +1023,21 @@ class AncientEmpiresWeb {
     }
     if (this.state === 'splash' || this.state === 'menu') {
       const logoW = this.assets.images.logo?.naturalWidth || 238;
-      this.glowX = this.glowX >= WIDTH * 3 ? -(this.assets.images.glow?.naturalWidth || 67) : this.glowX + Math.floor(logoW / 8);
-      if (this.state === 'menu') this.mainRing?.tick();
+      this.glowX += (logoW * dtMs) / 420;
+      if (this.glowX >= WIDTH * 2.8) this.glowX = -(this.assets.images.glow?.naturalWidth || 67);
+      if (this.state === 'menu') this.mainRing?.tick(dtMs);
       return;
     }
     if (this.state === 'actionMenu') {
-      this.actionRing?.tick();
+      this.actionRing?.tick(dtMs);
       return;
     }
     if (this.mapEffects.length > 0) {
       for (let i = this.mapEffects.length - 1; i >= 0; i--) {
         const fx = this.mapEffects[i];
-        fx.remainingMs -= 50;
-        fx.timer += 50;
-        if (fx.timer >= fx.stepMs) {
+        fx.remainingMs -= dtMs;
+        fx.timer += dtMs;
+        while (fx.timer >= fx.stepMs) {
           fx.timer -= fx.stepMs;
           fx.frame = Math.min(fx.maxFrames - 1, fx.frame + 1);
         }
@@ -1012,18 +1047,18 @@ class AncientEmpiresWeb {
     if (this.floatTexts.length > 0) {
       for (let i = this.floatTexts.length - 1; i >= 0; i--) {
         const ft = this.floatTexts[i];
-        ft.offsetY = (ft.offsetY ?? 0) + 0.45;
-        ft.timer -= 50;
+        ft.offsetY = (ft.offsetY ?? 0) + (9 * dtMs) / 1000;
+        ft.timer -= dtMs;
         if (ft.timer <= 0) this.floatTexts.splice(i, 1);
       }
     }
     if (this.state === 'script') {
-      this.tickScript();
+      this.tickScript(dtMs);
       return;
     }
     if (this.state === 'cutscene') {
       if (this.cutsceneScroll < this.cutsceneMaxScroll) {
-        this.cutsceneScroll += 0.9;
+        this.cutsceneScroll += (18 * dtMs) / 1000;
       }
       return;
     }
@@ -1031,7 +1066,7 @@ class AncientEmpiresWeb {
       return;
     }
     if (this.state === 'battle' && this.battleScene) {
-      this.battleScene.tick(50);
+      this.battleScene.tick(dtMs);
       if (this.battleScene.finished) {
         this.finishBattleScene();
       }
@@ -1039,32 +1074,49 @@ class AncientEmpiresWeb {
     }
     if (this.state === 'moveAnim' && this.moveAnim) {
       const anim = this.moveAnim;
-      const nextTile = anim.path[anim.stepIndex];
-      if (!nextTile) {
+      anim.segProgressMs += dtMs;
+      while (anim.segProgressMs >= anim.stepDurationMs && anim.segIndex < anim.path.length - 1) {
+        anim.segProgressMs -= anim.stepDurationMs;
+        anim.segIndex++;
+        const stepped = anim.path[anim.segIndex];
+        anim.unit.x = stepped[0];
+        anim.unit.y = stepped[1];
+        this.cursor = { x: stepped[0], y: stepped[1] };
+        this.sfx('select');
+      }
+      if (anim.segIndex >= anim.path.length - 1) {
+        const dest = anim.path[anim.path.length - 1];
+        if (dest) {
+          anim.unit.x = dest[0];
+          anim.unit.y = dest[1];
+          this.cursor = { x: dest[0], y: dest[1] };
+        }
+        anim.unit.px = null;
+        anim.unit.py = null;
         this.moveAnim = null;
         this.state = 'play';
         anim.onDone?.();
         return;
       }
-      anim.unit.x = nextTile[0];
-      anim.unit.y = nextTile[1];
-      this.cursor = { x: nextTile[0], y: nextTile[1] };
-      this.centerCameraOn(nextTile[0], nextTile[1]);
-      anim.stepIndex++;
-      if (anim.stepIndex >= anim.path.length) {
-        this.moveAnim = null;
-        this.state = 'play';
-        anim.onDone?.();
-      }
+      const a = anim.path[anim.segIndex];
+      const b = anim.path[anim.segIndex + 1];
+      const frac = anim.segProgressMs / anim.stepDurationMs;
+      anim.unit.px = (a[0] + (b[0] - a[0]) * frac) * 24;
+      anim.unit.py = (a[1] + (b[1] - a[1]) * frac) * 24;
+      this.smoothCameraToPixel(anim.unit.px + 12, anim.unit.py + 12, dtMs);
       return;
     }
     if (this.state === 'dialog' && this.dialogTimer > 0) {
-      this.dialogTimer -= 50;
+      this.dialogTimer -= dtMs;
       if (this.dialogTimer <= 0) this.state = 'play';
     }
     if (this.state === 'play' && this.aiPending) {
-      this.aiTimer -= 50;
-      if (this.aiTimer <= 0) this.runAiStep();
+      if (this.aiTask) {
+        this.tickAiTask(dtMs);
+      } else {
+        this.aiTimer -= dtMs;
+        if (this.aiTimer <= 0) this.startNextAiUnit();
+      }
     }
   }
 
@@ -1660,10 +1712,44 @@ class AncientEmpiresWeb {
     this.cameraY = Math.max(0, Math.min(maxCamY, ty * 24 - (boardH >> 1) + 12));
   }
 
+  smoothCameraToPixel(px, py, dtMs) {
+    const boardH = HEIGHT - 32;
+    const maxCamX = Math.max(0, this.assets.map.width * 24 - WIDTH);
+    const maxCamY = Math.max(0, this.assets.map.height * 24 - boardH);
+    const targetX = Math.max(0, Math.min(maxCamX, px - (WIDTH >> 1)));
+    const targetY = Math.max(0, Math.min(maxCamY, py - (boardH >> 1)));
+    const blend = 1 - Math.exp((-12 * dtMs) / 1000);
+    this.cameraX += (targetX - this.cameraX) * blend;
+    this.cameraY += (targetY - this.cameraY) * blend;
+  }
+
+  startUnitMoveAnim(unit, path, onDone, stepDurationMs = 95) {
+    if (!unit || !path || path.length <= 1) {
+      if (path?.length === 1 && unit) { unit.x = path[0][0]; unit.y = path[0][1]; }
+      if (unit) { unit.px = null; unit.py = null; }
+      onDone?.();
+      return;
+    }
+    this.moveAnim = {
+      unit,
+      path,
+      segIndex: 0,
+      segProgressMs: 0,
+      stepDurationMs,
+      onDone,
+    };
+    unit.px = path[0][0] * 24;
+    unit.py = path[0][1] * 24;
+    this.state = 'moveAnim';
+    this.paint();
+  }
+
   cancelSelection() {
     if (this.selected && this.moveOrigin) {
       this.selected.x = this.moveOrigin.x;
       this.selected.y = this.moveOrigin.y;
+      this.selected.px = null;
+      this.selected.py = null;
       this.selected.movedThisTurn = false;
       this.cursor = { x: this.moveOrigin.x, y: this.moveOrigin.y };
       this.centerCameraOn(this.cursor.x, this.cursor.y);
@@ -1712,26 +1798,13 @@ class AncientEmpiresWeb {
         this.openActionMenu(this.selected);
         return;
       }
-      // Step-by-step walk along traceRoute to reachable destination
+      // Smooth pixel step-by-step walk along traceRoute to reachable destination
       if (this.reachable?.costs.has(`${x},${y}`)) {
         const path = traceRoute(this.reachable, this.selected.x, this.selected.y, x, y);
         const unit = this.selected;
         unit.movedThisTurn = true;
         this.previewPath = null;
-        if (path.length <= 2) {
-          unit.x = x;
-          unit.y = y;
-          this.openActionMenu(unit);
-        } else {
-          this.moveAnim = {
-            unit,
-            path,
-            stepIndex: 1,
-            onDone: () => this.openActionMenu(unit),
-          };
-          this.state = 'moveAnim';
-          this.paint();
-        }
+        this.startUnitMoveAnim(unit, path, () => this.openActionMenu(unit), 95);
         return;
       }
       this.cancelSelection();
@@ -1801,22 +1874,24 @@ class AncientEmpiresWeb {
     this.actionCursor = 0;
     this.attackTargets = [...targets, ...townTargets];
 
-    // Port of i.java:974-978: bottom-left ring if cursor in upper half, else top-right ring
+    // Port of i.java:974-978 & d.java:509-514: 4-slot 90deg corner quadrant ring anchored away from unit
     const boardH = HEIGHT - 32;
     const upperHalf = this.cursor.y * 24 <= (boardH >> 1) - 24;
     this.actionRing = new RingMenu({
       items: opts,
+      minSlots: 4,
       selectedIndex: 0,
-      centerX: upperHalf ? 64 : 176,
-      centerY: upperHalf ? 222 : 82,
-      radius: 40,
+      centerX: upperHalf ? 56 : 184,
+      centerY: upperHalf ? 230 : 78,
+      radius: 36,
       circleSprite: 'big_circle',
       iconSprite: 'action_icons',
       maxW: WIDTH,
       maxH: boardH,
       titleX: upperHalf ? 4 : 118,
       titleW: 118,
-      titleY: upperHalf ? 142 : 4,
+      titleY: upperHalf ? 156 : 4,
+      showTitleArrows: false,
     });
     this.state = 'actionMenu';
     this.paint();
@@ -2134,10 +2209,18 @@ class AncientEmpiresWeb {
 
     if (this.playerModes[this.playerIndex] === 0) {
       this.aiPending = true;
-      this.aiTimer = 350;
+      this.aiTask = null;
+      this.aiTimer = 280;
       this.status.textContent = `P${this.playerIndex + 1} CPU · +${res.income}G`;
     } else {
       this.aiPending = false;
+      this.aiTask = null;
+      const hero = this.units.find(u => u.playerSelector === 1 + this.playerIndex && u.type === 9 && u.action !== 3 && u.action !== 4 && u.hp > 0)
+        || this.units.find(u => u.playerSelector === 1 + this.playerIndex && u.action !== 3 && u.action !== 4 && u.hp > 0);
+      if (hero) {
+        this.cursor = { x: hero.x, y: hero.y };
+        this.centerCameraOn(hero.x, hero.y);
+      }
       this.status.textContent = `ROUND ${roundNum} · P${this.playerIndex + 1} +${res.income}G`;
       const meta = CAMPAIGN_STAGE_META[this.currentMapId];
       const turnScripts = meta?.turnDialogs?.[roundNum];
@@ -2157,7 +2240,44 @@ class AncientEmpiresWeb {
   }
 
   runAiStep() {
-    if (this.state !== 'play') return;
+    this.startNextAiUnit();
+  }
+
+  tickAiTask(dtMs) {
+    const task = this.aiTask;
+    if (!task) return;
+    if (task.phase === 'focus' && task.unit) {
+      this.smoothCameraToPixel(task.unit.x * 24 + 12, task.unit.y * 24 + 12, dtMs);
+      task.timerMs -= dtMs;
+      if (task.timerMs <= 0) {
+        this.aiTask = null;
+        this.startUnitMoveAnim(task.unit, task.path, () => this.finishAiUnitMove(task.unit, task.act), 100);
+      }
+    } else if (task.phase === 'aiming' && task.target) {
+      this.smoothCameraToPixel(task.target.x * 24 + 12, task.target.y * 24 + 12, dtMs);
+      task.timerMs -= dtMs;
+      if (task.timerMs <= 0) {
+        this.aiTask = null;
+        this.performAttack(task.unit, task.target, () => this.afterAiCombat(task.unit));
+      }
+    } else if (task.phase === 'postAction') {
+      task.timerMs -= dtMs;
+      if (task.timerMs <= 0) {
+        this.aiTask = null;
+        this.startNextAiUnit();
+      }
+    } else if (task.phase === 'endTurn') {
+      task.timerMs -= dtMs;
+      if (task.timerMs <= 0) {
+        this.aiTask = null;
+        this.aiPending = false;
+        this.endTurn();
+      }
+    }
+  }
+
+  startNextAiUnit() {
+    if (this.state !== 'play' || !this.aiPending) return;
     const mySelector = 1 + this.playerIndex;
     const myPal = this.playerPalette[mySelector] ?? mySelector;
     const idleUnit = this.units.find(
@@ -2174,47 +2294,20 @@ class AncientEmpiresWeb {
         myPalette: myPal,
         ownerTeamForTile: raw => this.ownerTeamForTile(raw),
       });
-      idleUnit.x = act.x;
-      idleUnit.y = act.y;
-      if (act.kind === 'capture' || act.kind === 'repair') {
-        this.assets.map.tiles[act.x][act.y] = encodeBuildingTile(this.rawTile(act.x, act.y), myPal);
-        this.sfx('capture');
-      } else if (act.kind === 'destroyTown') {
-        this.assets.map.tiles[act.targetX][act.targetY] = 27;
-        this.floatTexts.push({ x: act.targetX, y: act.targetY, text: 'RUINED!', color: '#ff9248', offsetY: 0, timer: 1100 });
-        this.sfx('hit');
-      } else if (act.kind === 'raise') {
-        const tomb = this.units.find(u => u.id === act.tombId && u.action === 3 && u.type !== 9);
-        if (tomb) {
-          const stats = computeUnitStats(this.assets.unitRecords[10], 0);
-          Object.assign(tomb, {
-            ...stats, type: 10, playerSelector: mySelector, palette: myPal,
-            hp: 100, xp: 0, level: 0, status: 0, action: 1, tombTimer: 0,
-          });
-          this.sfx('raise');
-        }
-      } else if (act.kind === 'attack') {
-        const target = this.units.find(u => u.id === act.targetId);
-        if (target && target.hp > 0) {
-          this.aiTimer = 260;
-          this.performAttack(idleUnit, target, () => {
-            if (this.state === 'dialog') this.state = 'play';
-            this.centerCameraOn(idleUnit.x, idleUnit.y);
-          });
-          return;
-        }
-      }
-      idleUnit.action = 1;
-      this.centerCameraOn(idleUnit.x, idleUnit.y);
-      this.aiTimer = 260;
-      this.checkMatchOutcome();
+      const reach = this.showRange(idleUnit);
+      const path = (act.x === idleUnit.x && act.y === idleUnit.y)
+        ? [[idleUnit.x, idleUnit.y]]
+        : (traceRoute(reach, idleUnit.x, idleUnit.y, act.x, act.y) || [[idleUnit.x, idleUnit.y], [act.x, act.y]]);
+      this.cursor = { x: idleUnit.x, y: idleUnit.y };
+      this.aiTask = { phase: 'focus', unit: idleUnit, act, path, timerMs: 220 };
       this.paint();
       return;
     }
 
-    // AI Castle Recruitment (i.java:3774-3850) — including Commander revival
+    // AI Castle Recruitment (i.java:3774-3850) — visible camera focus & spark feedback
     const gold = this.balances[this.playerIndex] ?? 0;
     const fallenKing = this.getFallenKingFor(mySelector);
+    let recruitedAt = null;
     if (gold >= 150) {
       for (let x = 0; x < this.assets.map.width; x++) {
         for (let y = 0; y < this.assets.map.height; y++) {
@@ -2223,11 +2316,14 @@ class AncientEmpiresWeb {
               this.balances[this.playerIndex] -= (fallenKing.reviveCost ?? 200);
               fallenKing.x = x;
               fallenKing.y = y;
+              fallenKing.px = null;
+              fallenKing.py = null;
               fallenKing.hp = 100;
               fallenKing.action = 1;
               fallenKing.status = 0;
               fallenKing.movedThisTurn = false;
               fallenKing.palette = myPal;
+              recruitedAt = [x, y];
               break;
             }
             const pickType = gold >= 450 ? 3 : gold >= 250 ? 1 : 0;
@@ -2235,15 +2331,90 @@ class AncientEmpiresWeb {
             if (rec && (this.balances[this.playerIndex] ?? 0) >= rec.shortValue) {
               this.balances[this.playerIndex] -= rec.shortValue;
               this.spawnStageUnit(pickType, mySelector, x, y, { action: 1 });
+              recruitedAt = [x, y];
               break;
             }
           }
         }
+        if (recruitedAt) break;
       }
     }
 
+    if (recruitedAt) {
+      this.cursor = { x: recruitedAt[0], y: recruitedAt[1] };
+      this.centerCameraOn(recruitedAt[0], recruitedAt[1]);
+      this.spawnMapEffect('spark', recruitedAt[0], recruitedAt[1], 360, 70);
+      this.sfx('recruit');
+      this.aiTask = { phase: 'endTurn', timerMs: 320 };
+      this.paint();
+      return;
+    }
+
+    this.aiTask = null;
     this.aiPending = false;
     this.endTurn();
+  }
+
+  finishAiUnitMove(unit, act) {
+    const mySelector = 1 + this.playerIndex;
+    const myPal = this.playerPalette[mySelector] ?? mySelector;
+    unit.x = act.x;
+    unit.y = act.y;
+    unit.px = null;
+    unit.py = null;
+    this.cursor = { x: act.x, y: act.y };
+
+    if (act.kind === 'attack') {
+      const target = this.units.find(u => u.id === act.targetId);
+      if (target && target.hp > 0) {
+        this.cursor = { x: target.x, y: target.y };
+        this.aiTask = { phase: 'aiming', unit, act, target, timerMs: 220 };
+        this.paint();
+        return;
+      }
+    }
+
+    if (act.kind === 'capture' || act.kind === 'repair') {
+      this.assets.map.tiles[act.x][act.y] = encodeBuildingTile(this.rawTile(act.x, act.y), myPal);
+      this.sfx('capture');
+      this.floatTexts.push({ x: act.x, y: act.y, text: act.kind === 'capture' ? 'OCCUPIED!' : 'REPAIRED!', color: '#ff8a8a', offsetY: 0, timer: 900 });
+    } else if (act.kind === 'destroyTown') {
+      this.assets.map.tiles[act.targetX][act.targetY] = 27;
+      this.floatTexts.push({ x: act.targetX, y: act.targetY, text: 'RUINED!', color: '#ff9248', offsetY: 0, timer: 1100 });
+      this.sfx('hit');
+    } else if (act.kind === 'raise') {
+      const tomb = this.units.find(u => u.id === act.tombId && u.action === 3 && u.type !== 9);
+      if (tomb) {
+        const stats = computeUnitStats(this.assets.unitRecords[10], 0);
+        Object.assign(tomb, {
+          ...stats, type: 10, playerSelector: mySelector, palette: myPal,
+          hp: 100, xp: 0, level: 0, status: 0, action: 1, tombTimer: 0,
+        });
+        this.spawnMapEffect('spark', tomb.x, tomb.y, 400, 70);
+        this.sfx('raise');
+      }
+    }
+
+    unit.action = 1;
+    this.centerCameraOn(unit.x, unit.y);
+    this.checkMatchOutcome();
+    if (this.state === 'victory' || this.state === 'defeat' || this.state === 'script' || this.state === 'storyDialog') {
+      this.aiTask = null;
+      return;
+    }
+    this.aiTask = { phase: 'postAction', timerMs: 220 };
+    this.paint();
+  }
+
+  afterAiCombat(unit) {
+    if (this.state === 'dialog') this.state = 'play';
+    this.centerCameraOn(unit.x, unit.y);
+    if (this.state === 'victory' || this.state === 'defeat' || this.state === 'script' || this.state === 'storyDialog') {
+      this.aiTask = null;
+      return;
+    }
+    this.aiTask = { phase: 'postAction', timerMs: 240 };
+    this.paint();
   }
 
   hasLivingUnit(playerSelector) {
@@ -2367,6 +2538,7 @@ class AncientEmpiresWeb {
     const galamarDefeat = !!cfg?.galamarSurvival && !galamarAlive;
     if (galamarDefeat || crystalMissing || humanSurvivors === 0) {
       this.aiPending = false;
+      this.aiTask = null;
       this.sfx('defeat');
       this.state = 'defeat';
       this.status.textContent = 'DEFEAT!';
@@ -2377,6 +2549,7 @@ class AncientEmpiresWeb {
     if (this.currentMapId === 'm0' && this.settings.showStory && !this.m0Reinforced && !this.hasLivingUnit(2)) {
       this.m0Reinforced = true;
       this.aiPending = false;
+      this.aiTask = null;
       this.playStageScript(CAMPAIGN_STAGE_SCRIPTS.m0.wave2, () => {
         this.state = 'play';
         this.persistState();
@@ -2397,6 +2570,7 @@ class AncientEmpiresWeb {
 
     if (saethKilled || (!cpuStillStanding && activeSides <= 1) || (this.currentMapId.startsWith('m') && !cpuStillStanding)) {
       this.aiPending = false;
+      this.aiTask = null;
       this.sfx('victory');
       const meta = CAMPAIGN_STAGE_META[this.currentMapId];
       const showVic = () => {
@@ -2551,24 +2725,26 @@ class AncientEmpiresWeb {
   }
 
   paintTitleBackdrop(ctx) {
-    drawImageAt(ctx, this.assets.images.splash, 0, 0, WIDTH, HEIGHT);
+    // Port of i.java:3296-3303: draw logo -> sweeping glow -> splash cutout mask on top
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(0, 0, WIDTH, HEIGHT);
     const logo = this.assets.images.logo;
     if (logo) {
       const lx = (WIDTH - (logo.naturalWidth || 238)) >> 1;
-      const ly = 10;
       const lw = logo.naturalWidth || 238;
       const lh = logo.naturalHeight || 85;
       ctx.save();
       ctx.beginPath();
-      ctx.rect(lx, ly, lw, lh);
+      ctx.rect(lx, 0, lw, lh);
       ctx.clip();
-      ctx.drawImage(logo, lx, ly);
+      ctx.drawImage(logo, lx, 0);
       const glow = this.assets.images.glow;
       if (glow && this.glowX < lw) {
-        ctx.drawImage(glow, lx + this.glowX, ly + 4);
+        ctx.drawImage(glow, lx + Math.round(this.glowX), 4);
       }
       ctx.restore();
     }
+    drawImageAt(ctx, this.assets.images.splash, 0, 0, WIDTH, HEIGHT);
   }
 
   paint() {

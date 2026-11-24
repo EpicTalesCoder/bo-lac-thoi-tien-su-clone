@@ -68,11 +68,13 @@ export function renderOriginalBoard(ctx, {
 }) {
   if (!ctx || !map || !assets) throw new TypeError('renderOriginalBoard requires context, map and decoded assets');
   ctx.imageSmoothingEnabled = false;
+  const drawCamX = Math.round(cameraX);
+  const drawCamY = Math.round(cameraY);
   withMIDPClip(ctx, 0, 0, viewportWidth, viewportHeight, () => {
     const visibleColumns = Math.ceil(viewportWidth / 24) + 1;
     const visibleRows = Math.ceil(viewportHeight / 24) + 1;
-    const startX = Math.max(0, Math.floor(cameraX / 24));
-    const startY = Math.max(0, Math.floor(cameraY / 24));
+    const startX = Math.max(0, Math.floor(drawCamX / 24));
+    const startY = Math.max(0, Math.floor(drawCamY / 24));
     const endX = Math.min(map.width, startX + visibleColumns);
     const endY = Math.min(map.height, startY + visibleRows);
     for (let y = startY; y < endY; y++) {
@@ -81,8 +83,8 @@ export function renderOriginalBoard(ctx, {
         const animTile = (rawTile === 1 || rawTile === 2) && (waterAnimFrame & 1) !== 0
           ? (rawTile === 1 ? 2 : 1)
           : rawTile;
-        const drawX = x * 24 - cameraX;
-        const drawY = y * 24 - cameraY;
+        const drawX = x * 24 - drawCamX;
+        const drawY = y * 24 - drawCamY;
         drawMapTile(ctx, assets, animTile, drawX, drawY);
         if (rawTile === 27 && assets.sprites?.smoke && (assets.images?.smoke || assets.frameImages?.smoke)) {
           // Port of i.java:2497: ruined village emits rising smoke until repaired
@@ -173,8 +175,8 @@ export function renderOriginalBoard(ctx, {
     // overlay for King (type === 9), and HP text when hp < 100.
     for (const unit of units) {
       if (unit.action === 4) continue;
-      const drawX = unit.x * 24 - cameraX;
-      const drawY = unit.y * 24 - cameraY;
+      const drawX = (unit.px != null ? Math.round(unit.px) : unit.x * 24) - drawCamX;
+      const drawY = (unit.py != null ? Math.round(unit.py) : unit.y * 24) - drawCamY;
       if (unit.action === 3 || unit.hp <= 0) {
         if (unit.type !== 9 && unit.type !== 10 && unit.type !== 11 && unit.x >= 0 && unit.y >= 0) {
           const tomb = assets.images?.tombstone;
@@ -263,7 +265,7 @@ export function renderOriginalBoard(ctx, {
 
     if (cursor) {
       drawFrame(ctx, assets, 'cursor', cursor.frameIndex ?? 0,
-        cursor.x * 24 - cameraX, cursor.y * 24 - cameraY, MIDP.LEFT | MIDP.TOP);
+        cursor.x * 24 - drawCamX, cursor.y * 24 - drawCamY, MIDP.LEFT | MIDP.TOP);
     }
 
     // Port of i.java:4958-4970, 5163-5176, 5350-5388: scripted/map spell & smoke effects (redspark, spark, b_smoke)
@@ -272,8 +274,8 @@ export function renderOriginalBoard(ctx, {
         const meta = assets.sprites?.[fx.sprite];
         if (!meta) continue;
         const fxFrame = Math.min(Math.max(0, fx.frame ?? 0), Math.max(0, (meta.frames?.length ?? 1) - 1));
-        const px = fx.x * 24 + 12 - cameraX + (fx.offsetX ?? 0);
-        const py = fx.y * 24 + 12 - cameraY + (fx.offsetY ?? 0);
+        const px = fx.x * 24 + 12 - drawCamX + (fx.offsetX ?? 0);
+        const py = fx.y * 24 + 12 - drawCamY + (fx.offsetY ?? 0);
         drawFrame(ctx, assets, fx.sprite, fxFrame, px, py, MIDP.HCENTER | MIDP.VCENTER);
       }
     }
@@ -287,8 +289,8 @@ export function renderOriginalBoard(ctx, {
       ctx.lineWidth = 2.5;
       ctx.lineJoin = 'round';
       for (const ft of floatTexts) {
-        const fx = ft.x * 24 - cameraX + 12;
-        const fy = ft.y * 24 - cameraY + 6 - (ft.offsetY ?? 0);
+        const fx = ft.x * 24 - drawCamX + 12;
+        const fy = ft.y * 24 - drawCamY + 6 - (ft.offsetY ?? 0);
         ctx.strokeStyle = '#120d16';
         ctx.strokeText(ft.text, fx, fy);
         ctx.fillStyle = ft.color || '#7dff7d';
