@@ -292,7 +292,7 @@ function drawChoicePage(ctx2d, labels, state) {
     const activeX = app.selection === 0 ? leftX : rightX;
     const activeImg = app.selection === 0 ? f1 : f2;
     ctx2d.fillStyle = '#162400';
-    ctx2d.fillRect(0, (HEIGHT >> 2) - 46, WIDTH, 92);
+    ctx2d.fillRect(0, (HEIGHT >> 2) - 52, WIDTH, 108);
     if (activeImg) {
       ctx2d.fillStyle = '#445800';
       ctx2d.fillRect(activeX - 9, portraitY - 4, activeImg.width + 18, activeImg.height + 8);
