@@ -640,6 +640,35 @@ class AncientEmpiresWeb {
     this.mapEffects.push({ sprite, x, y, frame: 0, timer: 0, stepMs, remainingMs: durationMs, maxFrames });
   }
 
+  // Port of c.java:547-572: spawn trailing b_smoke dust puff behind walking unit along (dx, dy)
+  spawnStepSmoke(unit, dx, dy) {
+    if (!unit) return;
+    const ux = unit.px ?? (unit.x * 24);
+    const uy = unit.py ?? (unit.y * 24);
+    let px = ux + 12;
+    let py = uy + 18;
+    if (dx < 0) { px = ux + 23; py = uy + 18; }
+    else if (dx > 0) { px = ux + 1; py = uy + 18; }
+    else if (dy < 0) { px = ux + 12; py = uy + 23; }
+    else if (dy > 0) { px = ux + 12; py = uy + 3; }
+    const meta = this.assets.sprites?.b_smoke;
+    const maxFrames = Math.max(1, meta?.frames?.length ?? 4);
+    this.mapEffects.push({
+      sprite: 'b_smoke',
+      x: unit.x,
+      y: unit.y,
+      px,
+      py,
+      vx: -Math.sign(dx) * 0.008,
+      vy: -0.014,
+      frame: 0,
+      timer: 0,
+      stepMs: 60,
+      remainingMs: 240,
+      maxFrames,
+    });
+  }
+
   targetCameraFor(tx, ty) {
     const boardH = HEIGHT - 32;
     const maxCamX = Math.max(0, this.assets.map.width * 24 - WIDTH);
@@ -825,6 +854,11 @@ class AncientEmpiresWeb {
             const t = m.segMs / m.stepMs;
             m.unit.px = (a[0] + (b[0] - a[0]) * t) * 24;
             m.unit.py = (a[1] + (b[1] - a[1]) * t) * 24;
+            const sKey = `${m.segIdx}:${t >= 0.45 ? 1 : 0}`;
+            if (m._smokeKey !== sKey) {
+              m._smokeKey = sKey;
+              this.spawnStepSmoke(m.unit, b[0] - a[0], b[1] - a[1]);
+            }
           }
         }
       }
@@ -1037,6 +1071,8 @@ class AncientEmpiresWeb {
         const fx = this.mapEffects[i];
         fx.remainingMs -= dtMs;
         fx.timer += dtMs;
+        if (fx.px != null && fx.vx) fx.px += fx.vx * dtMs;
+        if (fx.py != null && fx.vy) fx.py += fx.vy * dtMs;
         while (fx.timer >= fx.stepMs) {
           fx.timer -= fx.stepMs;
           fx.frame = Math.min(fx.maxFrames - 1, fx.frame + 1);
@@ -1103,6 +1139,11 @@ class AncientEmpiresWeb {
       const frac = anim.segProgressMs / anim.stepDurationMs;
       anim.unit.px = (a[0] + (b[0] - a[0]) * frac) * 24;
       anim.unit.py = (a[1] + (b[1] - a[1]) * frac) * 24;
+      const smokeKey = `${anim.segIndex}:${frac >= 0.45 ? 1 : 0}`;
+      if (anim.lastSmokeKey !== smokeKey) {
+        anim.lastSmokeKey = smokeKey;
+        this.spawnStepSmoke(anim.unit, b[0] - a[0], b[1] - a[1]);
+      }
       this.smoothCameraToPixel(anim.unit.px + 12, anim.unit.py + 12, dtMs);
       return;
     }
@@ -2935,6 +2976,13 @@ class AncientEmpiresWeb {
     this.boardCtx.fillRect(0, 0, WIDTH, boardH);
     this.boardCtx.save();
     this.boardCtx.translate(offsetX, offsetY);
+    const cursorFrame = this.state === 'targetSelect'
+      ? (2 + (Math.floor(this.animTick / 3) % 3))
+      : (Math.floor(this.animTick / 4) % 2);
+    const selBracket = (this.state === 'play' && this.selected)
+      ? { x: this.selected.x, y: this.selected.y, frameIndex: 0 }
+      : null;
+
     renderOriginalBoard(this.boardCtx, {
       map: this.assets.map,
       assets: this.assets,
@@ -2945,7 +2993,8 @@ class AncientEmpiresWeb {
       units: this.units,
       cursor: this.state === 'script'
         ? null
-        : { ...this.cursor, frameIndex: this.state === 'targetSelect' ? (this.animTick % 4 < 2 ? 1 : 0) : 0 },
+        : { ...this.cursor, frameIndex: cursorFrame },
+      selectedCursor: selBracket,
       rangeCells: (this.state === 'play' || this.state === 'moveAnim') ? this.reachable?.cells : null,
       targetCells: (this.state === 'play' || this.state === 'targetSelect')
         ? (this.state === 'targetSelect' ? this.targetCandidates.map(t => [t.x, t.y]) : this.attackTargets.map(t => [t.x, t.y]))

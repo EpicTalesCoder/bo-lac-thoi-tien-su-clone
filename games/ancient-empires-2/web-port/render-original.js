@@ -16,6 +16,8 @@ function drawAssetFrame(ctx, assets, family, frameIndex, x, y, anchor) {
   let image = sheet;
   let sx = 0;
   let sy = 0;
+  let sw = meta.frameWidth;
+  let sh = meta.frameHeight;
   if (sheet) {
     const sheetColumns = Math.floor(sheet.naturalWidth / meta.frameWidth);
     if (sheetColumns < 1) return false;
@@ -24,10 +26,12 @@ function drawAssetFrame(ctx, assets, family, frameIndex, x, y, anchor) {
   } else {
     image = assets.frameImages?.[family]?.[frame.sourceFrame];
     if (!image) return false;
+    sw = image.naturalWidth || meta.frameWidth;
+    sh = image.naturalHeight || meta.frameHeight;
   }
   const anchorX = x + frame.offsetX + (frame.anchorOffset?.[0] ?? 0);
   const anchorY = y + frame.offsetY + (frame.anchorOffset?.[1] ?? 0);
-  drawRegionMIDP(ctx, image, sx, sy, meta.frameWidth, meta.frameHeight,
+  drawRegionMIDP(ctx, image, sx, sy, sw, sh,
     frame.transform, anchorX, anchorY, anchor);
   return true;
 }
@@ -62,7 +66,7 @@ function drawMapTile(ctx, assets, rawTile, x, y) {
 // range highlights (alpha.png), movement path (i.java:3434), units, and cursor.
 export function renderOriginalBoard(ctx, {
   map, assets, cameraX = 0, cameraY = 0, viewportWidth = 240, viewportHeight = 288,
-  units = map.units, cursor = null, overlays = [],
+  units = map.units, cursor = null, selectedCursor = null, overlays = [],
   rangeCells = null, targetCells = null, path = null,
   waterAnimFrame = 0, floatTexts = null, mapEffects = null,
 }) {
@@ -263,19 +267,29 @@ export function renderOriginalBoard(ctx, {
         mapped.transform, drawX + offsetX, drawY + offsetY, MIDP.LEFT | MIDP.TOP);
     }
 
-    if (cursor) {
-      drawFrame(ctx, assets, 'cursor', cursor.frameIndex ?? 0,
-        cursor.x * 24 - drawCamX, cursor.y * 24 - drawCamY, MIDP.LEFT | MIDP.TOP);
+    // Port of i.java:3485 & cursor_00..05 (26x26 / 40x41 centered at tile center +12,+12)
+    if (selectedCursor && (!cursor || selectedCursor.x !== cursor.x || selectedCursor.y !== cursor.y)) {
+      drawFrame(ctx, assets, 'cursor', selectedCursor.frameIndex ?? 0,
+        selectedCursor.x * 24 + 12 - drawCamX, selectedCursor.y * 24 + 12 - drawCamY, MIDP.HCENTER | MIDP.VCENTER);
     }
 
-    // Port of i.java:4958-4970, 5163-5176, 5350-5388: scripted/map spell & smoke effects (redspark, spark, b_smoke)
+    if (cursor) {
+      drawFrame(ctx, assets, 'cursor', cursor.frameIndex ?? 0,
+        cursor.x * 24 + 12 - drawCamX, cursor.y * 24 + 12 - drawCamY, MIDP.HCENTER | MIDP.VCENTER);
+    }
+
+    // Port of i.java:4958-4970, c.java:547-572: scripted spell VFX & walking b_smoke dust puffs
     if (mapEffects && mapEffects.length > 0) {
       for (const fx of mapEffects) {
         const meta = assets.sprites?.[fx.sprite];
         if (!meta) continue;
         const fxFrame = Math.min(Math.max(0, fx.frame ?? 0), Math.max(0, (meta.frames?.length ?? 1) - 1));
-        const px = fx.x * 24 + 12 - drawCamX + (fx.offsetX ?? 0);
-        const py = fx.y * 24 + 12 - drawCamY + (fx.offsetY ?? 0);
+        const px = fx.px != null
+          ? Math.round(fx.px - drawCamX)
+          : (fx.x * 24 + 12 - drawCamX + (fx.offsetX ?? 0));
+        const py = fx.py != null
+          ? Math.round(fx.py - drawCamY)
+          : (fx.y * 24 + 12 - drawCamY + (fx.offsetY ?? 0));
         drawFrame(ctx, assets, fx.sprite, fxFrame, px, py, MIDP.HCENTER | MIDP.VCENTER);
       }
     }

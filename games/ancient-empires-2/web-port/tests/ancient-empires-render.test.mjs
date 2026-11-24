@@ -482,3 +482,53 @@ test('Action RingMenu uses 4-slot 90-degree quadrant angles, supports 60fps 16ms
   assert.equal(unitCall[6], 30);
   assert.equal(unitCall[7], 36);
 });
+
+test('renderOriginalBoard draws full 26x26 4-corner red cursor centered at (+12,+12), selectedCursor, and walking b_smoke pixels', async () => {
+  const [mapBytes, tilesBytes, buildingsBytes, propertyBytes, cursorBytes, smokeBytes] = await Promise.all([
+    readFile(asset('m0')), readFile(asset('tiles0.sprite')), readFile(asset('buildings.sprite')), readFile(asset('tiles0.prop')),
+    readFile(asset('cursor.sprite')), readFile(asset('b_smoke.sprite')),
+  ]);
+  const map = decodeMap(new Uint8Array(mapBytes));
+  const assets = {
+    terrain: decodeTerrainProperties(new Uint8Array(propertyBytes)),
+    sprites: {
+      tiles0: decodeSprite(new Uint8Array(tilesBytes)),
+      buildings: decodeSprite(new Uint8Array(buildingsBytes)),
+      cursor: decodeSprite(new Uint8Array(cursorBytes)),
+      b_smoke: decodeSprite(new Uint8Array(smokeBytes)),
+    },
+    images: {
+      buildings: { name: 'b', naturalWidth: 48, naturalHeight: 24 },
+      b_smoke: { name: 'b_smoke', naturalWidth: 52, naturalHeight: 10 },
+    },
+    frameImages: {
+      tiles0: Array.from({ length: 37 }, (_, i) => ({ name: `t${i}`, naturalWidth: 24, naturalHeight: 24 })),
+      cursor: [
+        { name: 'cursor_00', naturalWidth: 26, naturalHeight: 26 },
+        { name: 'cursor_01', naturalWidth: 26, naturalHeight: 26 },
+        { name: 'cursor_02', naturalWidth: 40, naturalHeight: 41 },
+      ],
+    },
+  };
+  const { ctx, calls } = makeContext();
+  renderOriginalBoard(ctx, {
+    map,
+    assets,
+    viewportWidth: 96,
+    viewportHeight: 96,
+    units: [],
+    selectedCursor: { x: 1, y: 1, frameIndex: 0 },
+    cursor: { x: 2, y: 1, frameIndex: 1 },
+    mapEffects: [{ sprite: 'b_smoke', x: 1, y: 1, px: 42, py: 40, frame: 0 }],
+  });
+  const selCall = calls.find(c => c[0] === 'drawImage' && c[1].name === 'cursor_00');
+  const curCall = calls.find(c => c[0] === 'drawImage' && c[1].name === 'cursor_01');
+  const smokeCall = calls.find(c => c[0] === 'drawImage' && c[1].name === 'b_smoke');
+  assert.ok(selCall && curCall && smokeCall);
+  // Full 26x26 sprite centered at tile (1,1) -> 36 - 13 = 23
+  assert.deepEqual([selCall[4], selCall[5], selCall[6], selCall[7]], [26, 26, 23, 23]);
+  // Full 26x26 sprite centered at tile (2,1) -> 60 - 13 = 47, 36 - 13 = 23
+  assert.deepEqual([curCall[4], curCall[5], curCall[6], curCall[7]], [26, 26, 47, 23]);
+  // b_smoke pixel centered at (42, 40) with 13x10 -> (36, 35)
+  assert.deepEqual([smokeCall[6], smokeCall[7]], [36, 35]);
+});
