@@ -297,6 +297,8 @@ export function respawnActor(match, index, tables) {
   actor.y = tables && hasTileFloor(tables, spawnTile)
     ? tileSurfaceY(tables, spawnTile, spawn.x, spawnTy, actor.x)
     : spawnTy * 16;
+  actor.prevX = actor.x;
+  actor.prevY = actor.y;
   actor.inAir = tables && hasTileFloor(tables, spawnTile) ? 0 : 1;
   actor.facing = match.mode === MODE.CAPTURE_FLAG && actor.team === 0 ? 1 : (actor.x < match.level.worldWidth / 2 ? 1 : -1);
   actor.health = actor.maxHealth;
@@ -309,6 +311,9 @@ export function respawnActor(match, index, tables) {
   if (index === match.playerIndex) {
     match.camera.x = clamp(actor.x - (VIEWPORT_WIDTH >> 1), 0, Math.max(0, match.level.worldWidth - VIEWPORT_WIDTH));
     match.camera.y = clamp(actor.y - (VIEWPORT_HEIGHT - actor.height - 48), 0, Math.max(0, match.level.worldHeight - VIEWPORT_HEIGHT));
+    match.camera.prevX = match.camera.x;
+    match.camera.prevY = match.camera.y;
+    match.interpValid = false;
   }
   spawnEffect(match, actor.x, actor.y + (actor.height >> 1), actor.charOffset > 0 ? 8 : 9, index);
 }
@@ -424,7 +429,9 @@ export function createSourceMatch(tables, options = {}) {
       { team: 0, baseX: spawns.base0.x, baseY: spawns.base0.y, x: spawns.base0.x, y: spawns.base0.y - 16, carrier: -1 },
       { team: 1, baseX: spawns.base1.x, baseY: spawns.base1.y, x: spawns.base1.x, y: spawns.base1.y - 16, carrier: -1 },
     ],
-    camera: { x: 0, y: 0 },
+    camera: { x: 0, y: 0, prevX: 0, prevY: 0 },
+    interpValid: false,
+    soundEvents: [],
     tickCount: 0,
     aiSlot: 0,
     timeMs: Math.max(1, settings.H ?? 5) * 60 * 1000,
@@ -570,6 +577,8 @@ export function fireWeapon(match, actorIndex, tables) {
   match.projectiles.push({
     x: projX,
     y: projY,
+    prevX: projX,
+    prevY: projY,
     vx,
     damage,
     owner: actorIndex,
@@ -580,6 +589,11 @@ export function fireWeapon(match, actorIndex, tables) {
     animToggle: 0,
     facing: dir,
   });
+
+  if (actor.isPlayer && match.soundEvents) {
+    const sfxId = weapon === 0 ? 8 : weapon === 3 ? 1 : weapon === 5 ? 5 : 10;
+    match.soundEvents.push(sfxId);
+  }
 
   if (actor.ammo[weapon] === 0 && weapon > 0) {
     switchWeapon(actor, -1);
@@ -607,6 +621,7 @@ function handleActorDeath(match, victimIndex, killerIndex, damageSourceWeapon, k
   victim.animationFrame = 0;
   victim.respawnTimer = RESPAWN_TICKS;
   victim.deaths += 1;
+  if (victim.isPlayer && match.soundEvents) match.soundEvents.push(4);
   updateHealthBar(victim);
 
   if (killerIndex >= 0 && killerIndex !== victimIndex && match.actors[killerIndex]) {
@@ -673,6 +688,7 @@ function applyDamage(match, victimIndex, killerIndex, rawDamage, weapon, knockDi
 
 function triggerSplashExplosion(match, x, y, ownerIndex) {
   spawnEffect(match, x, y, 3, ownerIndex);
+  if (match.soundEvents) match.soundEvents.push(0);
   const radius = 48;
   for (let i = 0; i < match.actors.length; i++) {
     const target = match.actors[i];
@@ -882,6 +898,20 @@ export function tickSourceMatch(match, input = {}, tables = null) {
   const level = match.level;
   match.tickCount += 1;
   match.flagAnimFrame = (match.tickCount >> 1) & 3;
+  match.soundEvents.length = 0;
+
+  // Snapshot previous positions for zero-ghosting 60fps synchronized interpolation
+  match.camera.prevX = match.camera.x;
+  match.camera.prevY = match.camera.y;
+  for (const a of match.actors) {
+    a.prevX = a.x;
+    a.prevY = a.y;
+  }
+  for (const p of match.projectiles) {
+    p.prevX = p.x;
+    p.prevY = p.y;
+  }
+  match.interpValid = true;
   if (match.roundBannerTimer > 0) match.roundBannerTimer -= 1;
   for (let i = 0; i < 4; i++) {
     if (match.hudFlash[i] > 0) match.hudFlash[i] -= 1;
@@ -1073,6 +1103,7 @@ export function tickSourceMatch(match, input = {}, tables = null) {
         if (pickup.respawnTimer > 0) continue;
         if (Math.abs(pickup.tx - tx) <= 1 && Math.abs(pickup.ty - ty) <= 1) {
           pickup.respawnTimer = 80;
+          if (actor.isPlayer && match.soundEvents) match.soundEvents.push(6);
           const pType = pickup.type;
           if (pType > 1 && pType < 7) {
             const wSlot = pType - 1;

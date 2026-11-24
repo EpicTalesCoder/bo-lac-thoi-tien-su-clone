@@ -9,8 +9,9 @@ import {
 } from '../tt-loader.js';
 import { parseJ2meTextTable } from '../text-original.js';
 import {
-  app, handleSourceInput, adjustConfigSetting, menuLength, handleMenuBack,
+  app, handleSourceInput, adjustConfigSetting, menuLength, handleMenuBack, toggleLanguage,
 } from '../game.js';
+import { LANG } from '../storage-i18n.js';
 import { MODE } from '../tt-core.js';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -100,4 +101,17 @@ test('full menu flow advances Startup -> Title -> K=0 -> K=3 -> K=5 -> K=6 -> K=
   assert.equal(app.K, 1);
   handleMenuBack();
   assert.equal(app.screen, 'game');
+
+  // Language toggle switches VI <-> EN cleanly with complete dictionaries
+  const startLang = app.lang;
+  toggleLanguage();
+  assert.notEqual(app.lang, startLang);
+  toggleLanguage();
+  assert.equal(app.lang, startLang);
+  for (const code of ['vi', 'en']) {
+    assert.equal(LANG[code].mainMenu.length, 5);
+    assert.equal(LANG[code].modes.length, 6);
+    assert.equal(LANG[code].configRows.length, 5);
+    assert.equal(LANG[code].characters.length, 2);
+  }
 });

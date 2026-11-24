@@ -2,7 +2,8 @@ import { loadOriginalImages, loadOriginalTables } from './tt-loader.js';
 import { decodeJ2meText, parseJ2meTextTable, wrapJ2meText } from './text-original.js';
 import { decodeFontMetrics, createOriginalFont } from './font-original.js';
 import { renderOriginal } from './render-original.js';
-import { TICK_TARGET_MS, createEngineLoop, decodeGameplayKey, getUiSpriteRect, MODE } from './tt-core.js';
+import { TICK_TARGET_MS, createEngineLoop, decodeGameplayKey, getUiSpriteRect, lerpCoordRound, MODE } from './tt-core.js';
+import { playSourceSound } from './tt-audio.js';
 import { withMIDPClip } from './midp-graphics.js';
 import {
   createSourceMatch,
@@ -527,10 +528,10 @@ function drawOriginalUi(ctx2d) {
 }
 
 // Port of e.java:1614-1654 — CTF bases, animated flags & arena pickups.
-function drawMapProps(ctx2d) {
+function drawMapProps(ctx2d, renderCam) {
   const match = app.match;
   if (!match) return;
-  const cam = match.camera;
+  const cam = renderCam || match.camera;
 
   if (match.mode === MODE.CAPTURE_FLAG) {
     const ao = 103;
@@ -562,14 +563,17 @@ function drawMapProps(ctx2d) {
   }
 }
 
-// Port of e.java:1656-1677 — Projectiles & Railgun beam.
-function drawProjectiles(ctx2d) {
+// Port of e.java:1656-1677 — Projectiles & Railgun beam (synchronized 60fps lerp).
+function drawProjectiles(ctx2d, renderCam, alpha = 1) {
   const match = app.match;
   if (!match) return;
-  const cam = match.camera;
+  const cam = renderCam || match.camera;
+  const useInterp = Boolean(match.interpValid && app.screen === 'game');
   for (const proj of match.projectiles) {
-    const sx = Math.round(proj.x - cam.x);
-    const sy = Math.round(proj.y - cam.y);
+    const px = (useInterp && typeof proj.prevX === 'number') ? lerpCoordRound(proj.prevX, proj.x, alpha) : proj.x;
+    const py = (useInterp && typeof proj.prevY === 'number') ? lerpCoordRound(proj.prevY, proj.y, alpha) : proj.y;
+    const sx = Math.round(px - cam.x);
+    const sy = Math.round(py - cam.y);
     if (proj.weapon === 5) {
       ctx2d.fillStyle = '#ff0000';
       ctx2d.fillRect(sx - (proj.width >> 1), sy - (proj.height >> 1), proj.width, proj.height);
@@ -583,10 +587,10 @@ function drawProjectiles(ctx2d) {
 }
 
 // Port of e.java:1679-1694 — Hit sparks, rocket explosions, smoke, spawn flashes.
-function drawEffects(ctx2d) {
+function drawEffects(ctx2d, renderCam) {
   const match = app.match;
   if (!match) return;
-  const cam = match.camera;
+  const cam = renderCam || match.camera;
   for (const fx of match.effects) {
     const seq = EFFECT_FRAMES[fx.type];
     if (!seq) continue;
@@ -654,7 +658,20 @@ function drawOriginalHud(ctx2d) {
   }
 }
 
-function createRenderState() {
+function getRenderCamera(alpha = 1) {
+  const cam = app.match?.camera;
+  if (!cam) return { x: 0, y: 0 };
+  if (app.match.interpValid && typeof cam.prevX === 'number') {
+    return {
+      x: lerpCoordRound(cam.prevX, cam.x, alpha),
+      y: lerpCoordRound(cam.prevY, cam.y, alpha),
+    };
+  }
+  return { x: cam.x, y: cam.y };
+}
+
+function createRenderState(alpha = 1) {
+  const renderCam = getRenderCamera(alpha);
   return {
     screen: app.screen === 'startup' ? 'startup' : app.screen === 'title' ? 'title' : app.screen === 'game' ? 'game' : 'menu',
     viewport: { width: WIDTH, height: HEIGHT },
@@ -664,22 +681,24 @@ function createRenderState() {
     tilesetName: app.match?.tilesetName || 'l0',
     mode: app.match?.mode ?? app.mode,
     pausedMatch: app.screen === 'menu' && app.K === 1 && !!app.match,
-    camera: app.match?.camera || { x: 0, y: 0 },
+    camera: renderCam,
+    interpValid: Boolean(app.match?.interpValid && app.screen === 'game'),
+    interpAlpha: alpha,
     level: app.match?.level || null,
     actors: app.match?.actors || [],
     tables: { ...app.data, poseForActor: (actor) => poseForActor(actor, app.data) },
     drawOriginalUi,
     drawOriginalHud,
-    drawMapProps,
-    drawProjectiles,
-    drawEffects,
+    drawMapProps: (ctx2d) => drawMapProps(ctx2d, renderCam),
+    drawProjectiles: (ctx2d) => drawProjectiles(ctx2d, renderCam, alpha),
+    drawEffects: (ctx2d) => drawEffects(ctx2d, renderCam),
   };
 }
 
-function paint() {
+function paint(alpha = 1) {
   if (!ctx || !app.data) return;
   ctx.imageSmoothingEnabled = false;
-  renderOriginal(ctx, createRenderState(), { images: app.images });
+  renderOriginal(ctx, createRenderState(alpha), { images: app.images });
 }
 
 function resetMenuSelection(state) {
@@ -836,7 +855,12 @@ export function activateCurrentSelection() {
 }
 
 export function handleSourceInput(event) {
-  if (!app.data || event.type === 'source-tick' || !event.code) return;
+  if (!app.data || event.type === 'source-tick') return;
+  if (event.type === 'focus-lost') {
+    app.input = Object.create(null);
+    return;
+  }
+  if (!event.code) return;
   const code = event.code;
 
   // Startup / Title advance on any key press
@@ -1018,6 +1042,9 @@ async function boot() {
         handleSourceInput(event);
         if (event.type === 'source-tick' && app.screen === 'game' && app.match) {
           tickSourceMatch(app.match, app.input, app.data);
+          if (app.soundEnabled && app.match.soundEvents?.length) {
+            for (const sfxId of app.match.soundEvents) playSourceSound(sfxId, true);
+          }
           if (app.match.finished) {
             app.K = 22;
             app.selection = 0;

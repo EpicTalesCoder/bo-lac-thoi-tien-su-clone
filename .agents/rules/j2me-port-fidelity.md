@@ -38,3 +38,27 @@ When creating, fixing, or extending any J2ME web port under `games/<slug>/web-po
    - Add concise comments (`// Port of <Class>.java:<lines>`) on ported rendering passes, map/table decoders, state transitions, and combat/economy formulas.
    - **NEVER report a port complete** until `python3 tools/verify-port-parity.py <slug>` exits `0` (`RESULT: PASS`) and `python3 tools/build-portal.py` succeeds.
 5. **Never modify `games/<slug>/original/*.jar`**.
+
+## Deep Decompilation, Binary Integrity, UI & Runtime Parity Rules
+
+Extracted from `games/j2me-cpp-porter` & `games/port_java_to_switch_nro_plan.md` to prevent recurring J2ME porting bugs across Web (HTML5) and Native (Desktop C++17 SDL2 / Switch `.nro`) targets:
+
+1. **Dual-Decompiler + Bytecode Cross-Check (Offline Jars Available)**:
+   - Always decompile every `.jar` with **both** Vineflower and CFR (`games/j2me-cpp-porter/skills/jar-to-cpp-port/scripts/vineflower-1.12.0.jar` & `cfr-0.152.jar`, plus `javap -c -p -v`), read `META-INF/MANIFEST.MF`, and record `origW x origH`, fixed tick `frameDelayMs`, font format, binary `.ui`/map schemas, event opcodes, and `RecordStore` layout before coding.
+2. **Magic-Byte Asset Verification & Stripped-PNG Reconstruction**:
+   - **Never trust file extensions inside a `.jar`** (e.g. PNGs disguised as `.mid`/`.bin` or XOR-100 / length-prefixed XOR streams). Inspect magic bytes first.
+   - For stripped-header PNG blobs (`[w, h, bitDepth, colorType, PLTE, optional "tRNS", IDAT]`), reconstruct full `IHDR`/`PLTE`/`tRNS`/`IDAT`/`IEND` chunks with valid CRC32 and verify every extracted PNG with `zlib.decompress(IDAT)` (see `games/j2me-cpp-porter/skills/jar-to-cpp-port/resources/prepare_assets.py`).
+3. **Exact Java Arithmetic, Signed Tables & State Lifecycle**:
+   - **Signed byte/short & collision checks**: distinguish `s8` vs `u8`; never assume non-empty collision flags are `> 0` when source checks `!== 0` (e.g. negative slope/ramp offsets like `-1`).
+   - **Negative scroll shifts**: Java `x >> k` paired with `x & ((1 << k) - 1)` floors toward `-∞` — use floor division (`Math.floor(x / 16)` / `floorDivPow2`), **never** truncating `/` which stalls negative camera scrolling.
+   - **String indexing**: decode Modified UTF-8 into UTF-16 code units matching Java `charAt`/`substring` (never raw UTF-8 byte offsets).
+   - **Safe teardown & VM completeness**: clear child views holding references before resetting owning world state; verify 100% of state `switch` cases, cutscene opcode return values (`true` only on map change), inverted quality flags (`!lowQuality`), and autosave dirty-flag ownership.
+   - **Strip commercial locks**: remove SMS activation gates, trial caps (`Midlet.a`), IAP `+` prompts, and `"vnđ"` strings cleanly.
+4. **Vietnamese / Localized UI Layout Discipline**:
+   - Use **Lookahead Word-Boundary Wrapping** (strip color tags `#0..#7`/`#RRGGBB` from width math; never subtract `spaceRefWidth` early; only break mid-word if one word exceeds the full box width).
+   - **Separate `textBounds` from icon/background rects**: never shift button/icon frames when widening Vietnamese labels; fit or auto-scroll overflowing labels and resolve adjacent label overlaps by midpoint split (`textOverlaps === 0`).
+   - Include uppercase accented fallback glyphs (`À->A`, `Đ->D`) when using original bitmap fonts that lack Vietnamese diacritics, and verify with automated UI/menu tests.
+5. **Input Focus Hygiene & Zero-Ghosting Timing**:
+   - Drive fixed simulation ticks with a high-resolution accumulator (cap catch-up ticks `< 6`). If interpolating to 60 FPS, interpolate **both camera AND every world entity/projectile/particle/floating text** symmetrically with rounded lerp and snap (`valid = false`) on warp/map load.
+   - Clear input queues (`clearQueues + clearHeldInputs`) on menu/pause toggle without wiping physical key state; call full `resetAllState()` **only** on window blur / focus lost. Account for HiDPI scaling on pointer/mouse coordinates and track scancode ownership for shifted keys (`*`, `#`).
+   - Support full J2ME phone keypad (`0..9`, Numpad, `*` = `42`, `#` = `35`, Arrows/`WASD`, `Enter`/`Space` = FIRE, `Q`/`Tab` = LSK, `E`/`Backspace` = RSK) alongside mouse/touch.

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createEngineLoop, decodeGameplayKey, getUiSpriteRect, MODE, normalizeKey } from '../tt-core.js';
+import { createEngineLoop, decodeGameplayKey, getUiSpriteRect, lerpCoordRound, MODE, normalizeKey } from '../tt-core.js';
 
 test('browser keyboard aliases map to the J2ME numeric keypad contract', () => {
   for (const [key, code] of [
@@ -51,6 +51,39 @@ test('engine loop emits one source tick per budget and releases mapped key state
     assert.ok(paints >= 3);
     loop.stop();
     assert.equal(listeners.size, 0);
+  } finally {
+    globalThis.window = originalWindow;
+    globalThis.requestAnimationFrame = originalRAF;
+    globalThis.cancelAnimationFrame = originalCancelRAF;
+  }
+});
+
+test('lerpCoordRound and window blur focus-lost reset prevent ghosting and stuck keys', () => {
+  assert.equal(lerpCoordRound(100, 116, 0), 100);
+  assert.equal(lerpCoordRound(100, 116, 0.5), 108);
+  assert.equal(lerpCoordRound(100, 116, 1), 116);
+
+  const originalWindow = globalThis.window;
+  const originalRAF = globalThis.requestAnimationFrame;
+  const originalCancelRAF = globalThis.cancelAnimationFrame;
+  const listeners = new Map();
+  globalThis.window = {
+    addEventListener(name, cb) { listeners.set(name, cb); },
+    removeEventListener(name) { listeners.delete(name); },
+  };
+  globalThis.requestAnimationFrame = () => 1;
+  globalThis.cancelAnimationFrame = () => {};
+  try {
+    const events = [];
+    const loop = createEngineLoop({ tick: (e) => events.push(e), render: () => {}, now: () => 0 });
+    loop.start();
+    listeners.get('keydown')({ key: '*', code: 'Digit8', repeat: false });
+    listeners.get('keyup')({ key: '8', code: 'Digit8' }); // Shift released early
+    assert.equal(events.at(-1).code, 42, 'scancode ownership must release * even if Shift released first');
+    listeners.get('keydown')({ key: 'ArrowRight', code: 'ArrowRight', repeat: false });
+    listeners.get('blur')();
+    assert.equal(events.at(-1).type, 'focus-lost', 'window blur must clear held keys via focus-lost');
+    loop.stop();
   } finally {
     globalThis.window = originalWindow;
     globalThis.requestAnimationFrame = originalRAF;

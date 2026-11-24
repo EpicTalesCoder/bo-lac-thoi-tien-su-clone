@@ -1,4 +1,5 @@
 import { drawRegionMIDP, withMIDPClip } from './midp-graphics.js';
+import { lerpCoordRound } from './tt-core.js';
 
 // Port of e.java:1738-1753 (`d(Graphics)`). Actor limb positions use `ca` offsets
 // directly (`n8 = by * aH[n4][n6] + n2; if (by == -1) n8 -= width; n7 = aH[n4][n6+1] + n3 - height`).
@@ -21,10 +22,17 @@ function drawFrame(ctx, images, meta, x, y, facing) {
 // each `[offsetX, offsetY, frameId]` resolves through original cu2 metadata.
 function drawActors(ctx, state, images) {
   const { camera, actors, tables } = state;
+  const alpha = state.interpValid ? (state.interpAlpha ?? 1) : 1;
   for (const actor of actors) {
     if (actor.status !== 1 && actor.animation !== 5 && actor.animation !== 6) continue;
-    const screenX = Math.round(actor.x - camera.x);
-    const screenY = Math.round(actor.y - camera.y);
+    const renderX = (state.interpValid && typeof actor.prevX === 'number')
+      ? lerpCoordRound(actor.prevX, actor.x, alpha)
+      : actor.x;
+    const renderY = (state.interpValid && typeof actor.prevY === 'number')
+      ? lerpCoordRound(actor.prevY, actor.y, alpha)
+      : actor.y;
+    const screenX = Math.round(renderX - camera.x);
+    const screenY = Math.round(renderY - camera.y);
     if (screenX < -32 || screenX > state.viewport.width + 32 || screenY < -48 || screenY > state.viewport.height + 48) continue;
 
     // Health bar + dynamic ground shadow for living actors (e.java:1723-1734)

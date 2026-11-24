@@ -40,32 +40,59 @@ export function decodeGameplayKey(keyCode) {
 }
 
 // Port of e.java:1532-1546 and e.java:3110-3190. Keep input events separate
-// from source ticks; an update is scheduled at the source's 77ms render budget.
+// from source ticks; an update is scheduled at the source's 77ms render budget
+// with scancode-safe key release, window blur reset, and 60fps interpolation alpha.
+export function lerpCoordRound(prev, curr, alpha) {
+  return Math.round(prev + (curr - prev) * alpha);
+}
+
 export function createEngineLoop({ tick, render, now = () => performance.now(), frameBudget = TICK_TARGET_MS }) {
   let alive = false;
   let lastFrame = 0;
   let raf = 0;
   const input = new Set();
+  const scancodeOwner = new Map();
+
+  const shouldPreventDefault = (key) => (
+    key === 'ArrowUp' || key === 'ArrowDown' || key === 'ArrowLeft' || key === 'ArrowRight'
+    || key === ' ' || key === 'Tab'
+  );
+
   const onDown = (event) => {
     const code = normalizeKey(event.key);
-    if (!code || event.repeat) return;
+    if (!code) return;
+    if (shouldPreventDefault(event.key)) event.preventDefault?.();
+    if (event.repeat) return;
+    if (event.code) scancodeOwner.set(event.code, code);
     input.add(code);
     tick({ type: 'key-down', code });
   };
   const onUp = (event) => {
-    const code = normalizeKey(event.key);
+    const owned = event.code ? scancodeOwner.get(event.code) : 0;
+    const code = owned || normalizeKey(event.key);
+    if (event.code) scancodeOwner.delete(event.code);
     if (!code) return;
     input.delete(code);
     tick({ type: 'key-up', code });
   };
+  const onBlur = () => {
+    if (input.size === 0 && scancodeOwner.size === 0) return;
+    input.clear();
+    scancodeOwner.clear();
+    tick({ type: 'focus-lost' });
+  };
   const onFrame = () => {
     if (!alive) return;
     const start = now();
-    if (start - lastFrame >= frameBudget) {
+    let ticks = 0;
+    while (start - lastFrame >= frameBudget && ticks < 6) {
       tick({ type: 'source-tick', input: new Set(input) });
-      lastFrame = start;
+      lastFrame += frameBudget;
+      ticks += 1;
     }
-    render();
+    if (ticks === 6) lastFrame = start;
+    const alpha = Math.max(0, Math.min(1, (start - lastFrame) / frameBudget));
+    render(alpha);
     raf = requestAnimationFrame(onFrame);
   };
   return {
@@ -75,6 +102,7 @@ export function createEngineLoop({ tick, render, now = () => performance.now(), 
       lastFrame = now();
       window.addEventListener('keydown', onDown);
       window.addEventListener('keyup', onUp);
+      window.addEventListener('blur', onBlur);
       raf = requestAnimationFrame(onFrame);
     },
     stop() {
@@ -82,7 +110,9 @@ export function createEngineLoop({ tick, render, now = () => performance.now(), 
       cancelAnimationFrame(raf);
       window.removeEventListener('keydown', onDown);
       window.removeEventListener('keyup', onUp);
+      window.removeEventListener('blur', onBlur);
       input.clear();
+      scancodeOwner.clear();
     },
   };
 }

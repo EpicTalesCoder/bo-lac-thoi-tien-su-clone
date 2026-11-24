@@ -88,3 +88,9 @@ For detailed bug case studies and concrete code patterns, read:
 - [references/decompile-to-source-parity.md](./references/decompile-to-source-parity.md) — exact Java MIDP 2.0 → JS translation helpers (`drawRegionMIDP`, signed byte/short, BSprite/Macrospace/HandyGames pack patterns, citation discipline).
 - [references/pitfalls-and-patterns.md](./references/pitfalls-and-patterns.md) — real bugs encountered in this monorepo and their verified fixes.
 - [docs/J2ME_DECOMPILE_FIDELITY_GUIDE.md](../../../docs/J2ME_DECOMPILE_FIDELITY_GUIDE.md) — full Vietnamese guide for humans & AI agents.
+- **Bundled Offline Decompilers & Native C++/QA References** (`games/j2me-cpp-porter/`):
+  - `games/j2me-cpp-porter/skills/jar-to-cpp-port/scripts/decompile_jar.sh` (with local `vineflower-1.12.0.jar` + `cfr-0.152.jar`)
+  - `games/j2me-cpp-porter/skills/jar-to-cpp-port/resources/prepare_assets.py` (magic-byte inspection, stripped-header PNG `IHDR`/`PLTE`/`tRNS`/`IDAT` CRC reconstruction & `zlib` verification)
+  - `games/j2me-cpp-porter/skills/jar-to-cpp-port/references/vietnamese-ui-layout.md` (lookahead word-wrap, `textBounds` separation, midpoint anti-overlap, calm auto-scroll)
+  - `games/j2me-cpp-porter/skills/jar-to-cpp-port/references/desktop-pitfalls-and-qa.md` (floor-div negative scroll `>> k`, zero-ghosting camera+entity sync lerp, keypad scancode ownership, focus-lost vs menu-toggle input clearing, ASan+UBSan QA)
+  - `games/port_java_to_switch_nro_plan.md` (cross-platform C++17 `SDL2` + `libnx` Nintendo Switch `.nro` architecture & gamepad/widescreen mapping)
