@@ -22,17 +22,20 @@ export function normalizeKey(key) {
   if (key === 'Enter' || key === ' ') return 53;
   if (/^[0-9]$/.test(key)) return key.charCodeAt(0);
   if (key === '*') return 42;
-  if (key === '#') return 35;
+  if (key === '#' || key === 'Escape' || key === 'p' || key === 'P') return 35;
+  if (key === 'q' || key === 'Q' || key === 'Tab') return 48;
+  if (key === 'Backspace') return -7;
   return 0;
 }
 
-// Port of e.java:3221-3242. Numeric keypad 2/4/5/6/8 have source meanings.
+// Port of e.java:3221-3242. Numeric keypad 2/4/5/6/8/0 have source meanings.
 export function decodeGameplayKey(keyCode) {
   if (keyCode === 50) return 'jump';
   if (keyCode === 52) return 'left';
   if (keyCode === 53) return 'fire';
   if (keyCode === 54) return 'right';
   if (keyCode === 56) return 'drop';
+  if (keyCode === 48) return 'switchWeapon';
   return null;
 }
 
