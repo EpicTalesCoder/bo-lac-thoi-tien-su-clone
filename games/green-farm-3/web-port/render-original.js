@@ -193,11 +193,12 @@ export function drawBSpriteTileMap(ctx, tileMap, sprite, moduleImages, { x = 0, 
               resolved.transform, startX + resolved.offsetX, startY + resolved.offsetY, MIDP_ANCHOR.LEFT | MIDP_ANCHOR.TOP);
           } else if (module.type === 0xfe && (fmodule.flags & 0x10) === 0) {
             // Port of d.java:1903-1923: module type FE is a source solid rectangle.
+            // Expand by +0.6px to prevent sub-pixel hairline seams when worldZoom != 1.0.
             const color = module.colorOrParameter >>> 0;
             const alpha = color >>> 24;
             if (alpha === 0xff || alpha === 0) {
               ctx.fillStyle = `#${(color & 0xffffff).toString(16).padStart(6, '0')}`;
-              ctx.fillRect(startX + resolved.offsetX, startY + resolved.offsetY, resolved.width, resolved.height);
+              ctx.fillRect(startX + resolved.offsetX, startY + resolved.offsetY, resolved.width + 0.6, resolved.height + 0.6);
             }
           } else if (module.type === 0xfd) {
             // Port of d.java:252-257, 1934-1958: marker modules have no source draw operation.

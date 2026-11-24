@@ -191,7 +191,7 @@ function renderOpeningEvidence(ctx) {
 
 // Port of a.java:1853-1865, a.java:1881-1991, a.java:9553-9621 (a.M(1)), e.java:468-595
 function renderFarmWorld(ctx) {
-  ctx.fillStyle = '#2d4c1e';
+  ctx.fillStyle = '#70e038';
   ctx.fillRect(0, 0, SCREEN_W, SCREEN_H);
   const s = app.session;
   const tm = sourceWorld?.tileMap;
@@ -230,6 +230,8 @@ function renderFarmWorld(ctx) {
       for (const ent of vn.entities || []) {
         // Hide interior cutaway rooms (0..8) overlapping exterior Manor roof (18/19)
         if (ent.category === 50 && ent.entityId >= 0 && ent.entityId <= 8) continue;
+        // Skip static player-spawn marker (cat 42, entityId === -1) so we don't draw a duplicate clone of our Farmer!
+        if (ent.category === 42 && ent.entityId === -1) continue;
         const sx = ent.x + ox;
         const sy = ent.y + oy;
         if (sx < -140 || sy < -140 || sx > viewW + 140 || sy > viewH + 140) continue;
@@ -256,7 +258,15 @@ function renderFarmWorld(ctx) {
           draw: () => {
             const entry = getSpriteBlock(ent.block, ent.paletteIndex);
             if (!entry) return;
-            if (ent.useAnim && entry.sprite.animations?.length > 0) {
+            if (ent.category === 42 && ent.entityId >= 0) {
+              // Neighbor host character stands calmly in idle animation (anim 2 — e.java:1113), never wobbling!
+              const idleAnim = entry.sprite.animations?.length > 2 ? 2 : 0;
+              if (entry.sprite.animations?.length > 0) {
+                drawBSpriteBlockAnim(ctx, entry.sprite, entry.moduleImages, idleAnim, Math.floor(animTick * 0.35), sx, sy, 0);
+              } else {
+                drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, 0, sx, sy, 0);
+              }
+            } else if (ent.useAnim && entry.sprite.animations?.length > 0) {
               drawBSpriteBlockAnim(ctx, entry.sprite, entry.moduleImages, 0, animTick, sx, sy, 0);
             } else {
               drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, ent.frame, sx, sy, 0);
@@ -430,25 +440,30 @@ function renderFarmWorld(ctx) {
 
   ctx.restore();
 
-  // --- 1:1 ORIGINAL GAMELOFT /6[1] HUD (ALWAYS 100% CRISP SCREEN SPACE) ---
+  // --- 1:1 ORIGINAL GAMELOFT /6[1] HUD (NO IAP '+' TOP-UP BUTTONS) ---
   const hudWidgets = getUIScreen(1);
   drawOriginalUIScreen(ctx, hudWidgets, getAnySpriteBlock, {
     filterWidget: (w) => {
       if (w.type !== 205) return false;
+      // Remove green IAP '+' buttons (spr 41 frm 3) and their star badges (spr 20 frm 183)
+      if (w.spriteId === 41 && w.frameIndex === 3) return false;
+      if (w.spriteId === 20 && w.frameIndex === 183) return false;
       if (w.y < 60 && w.spriteId !== 31) return true;
+      if (vn && w.index === 67) return false; // Hide Market Stand under VỀ NHÀ when visiting a neighbor
       return w.index === 52 || w.index === 63 || w.index === 67;
     },
   });
 
   const xpNeed = xpForNextLevel(s);
-  const drawHudNum = (val, x, y, color) => {
-    drawText(ctx, val, x + 1, y + 1, { align: 'center', size: 8, color: '#2b1505', bold: true });
+  const drawHudNum = (val, x, y, color, shadow = '#2b1505') => {
+    drawText(ctx, val, x + 1, y + 1, { align: 'center', size: 8, color: shadow, bold: true });
     drawText(ctx, val, x, y, { align: 'center', size: 8, color, bold: true });
   };
   drawHudNum(`${s.level}`, 25, 19, '#fff8c8');
   drawHudNum(`${s.xp}/${xpNeed} XP`, 103, 17, '#ffffff');
-  drawHudNum(`${s.coins}`, 57, 44, '#fff4b8');
-  drawHudNum(`${s.cash}`, 157, 44, '#d2ffd8');
+  // Crisp dark-brown numbers on the bright white Coins pill & green Cash bar
+  drawText(ctx, `${s.coins}`, 57, 44, { align: 'center', size: 8, color: '#4a2508', bold: true });
+  drawHudNum(`${s.cash}`, 157, 44, '#eaffed');
   drawText(ctx, `⚡${s.energy}/${s.maxEnergy}`, 15, 61, { size: 8, color: '#2b1505', bold: true });
   drawText(ctx, `⚡${s.energy}/${s.maxEnergy}`, 14, 60, { size: 8, color: '#ffe97d', bold: true });
 

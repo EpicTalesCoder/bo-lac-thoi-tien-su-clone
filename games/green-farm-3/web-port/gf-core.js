@@ -530,7 +530,7 @@ export function createFarmSession(worldResources, textData = {}) {
     maxEnergy: 30,
     energyRegenMs: 0,
     animTimeMs: 0,
-    worldZoom: 0.85, // Balanced overview zoom (a.J = 85%), toggleable 75% <-> 100%
+    worldZoom: 1.0, // Exact 1:1 integer pixel rendering (zero tile seams); user can toggle 75% <-> 100%
     visitingNeighbor: null, // null = own farm (N=0), or { index, id, name, entities, helpedKeys, helpsToday, maxHelps }
     homeFarmerPos: null,
     barnCapacity: 40,
