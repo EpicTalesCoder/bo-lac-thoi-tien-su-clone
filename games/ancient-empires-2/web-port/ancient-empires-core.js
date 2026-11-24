@@ -405,6 +405,17 @@ export function chooseAiUnitAction({ unit, units, map, terrainAt, unitAt, teamFo
       if (!best || score > best.score) best = { kind: tileAct, x: cx, y: cy, score };
     }
 
+    // 1b. Sorceress (type 3) Raise Skeleton from adjacent tombstone (i.java:2515-2530)
+    if (unit.type === 3) {
+      const tomb = units.find(
+        u => u.action === 3 && Math.abs(u.x - cx) + Math.abs(u.y - cy) === 1 && !unitAt(u.x, u.y)
+      );
+      if (tomb) {
+        const score = 1550 + defBonus;
+        if (!best || score > best.score) best = { kind: 'raise', x: cx, y: cy, tombId: tomb.id, score };
+      }
+    }
+
     // 2. Attack any enemy reachable from (cx, cy)
     const virtualUnit = { ...unit, x: cx, y: cy, movedThisTurn: moved };
     const targets = getAttackableTargets(virtualUnit, units, teamForPlayer);

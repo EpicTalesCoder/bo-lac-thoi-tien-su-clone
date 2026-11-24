@@ -11,6 +11,7 @@ import {
   getTileActionForUnit,
 } from './ancient-empires-core.js';
 import { drawRegionMIDP, renderOriginalBoard } from './render-original.js';
+import { playAe2Sfx } from './ae2-audio.js';
 
 const WIDTH = 240;
 const HEIGHT = 320;
@@ -391,8 +392,9 @@ class AncientEmpiresWeb {
       return;
     }
     if (this.state === 'recruitMenu') {
-      if (code === 'ArrowUp' || code === 'KeyW') this.recruitCursor = (this.recruitCursor + 8) % 9;
-      else if (code === 'ArrowDown' || code === 'KeyS') this.recruitCursor = (this.recruitCursor + 1) % 9;
+      const len = this.getRecruitList().length;
+      if (code === 'ArrowUp' || code === 'KeyW') this.recruitCursor = (this.recruitCursor + len - 1) % len;
+      else if (code === 'ArrowDown' || code === 'KeyS') this.recruitCursor = (this.recruitCursor + 1) % len;
       else if (code === 'Enter' || code === 'Space' || code === 'Digit5') this.confirmRecruit(this.recruitCursor);
       else if (code === 'Escape') { this.state = 'play'; this.recruitCastle = null; }
       this.paint();
@@ -526,8 +528,12 @@ class AncientEmpiresWeb {
   openActionMenu(unit) {
     const opts = [];
     const targets = getAttackableTargets(unit, this.units, p => this.teamFor(p));
-    if (targets.length > 0) {
-      opts.push({ kind: 'attack', label: `ATTACK (${targets.length})`, targets });
+    for (const target of targets) {
+      opts.push({
+        kind: 'attack',
+        label: targets.length > 1 ? `ATK ${this.unitName(target.type).slice(0, 8)} (${target.hp})` : `ATTACK (${target.hp} HP)`,
+        target,
+      });
     }
     const myPal = this.playerPalette[unit.playerSelector] ?? unit.playerSelector;
     const tileAct = getTileActionForUnit(unit, this.rawTile(unit.x, unit.y), this.tileProperty(unit.x, unit.y), myPal);
@@ -555,15 +561,15 @@ class AncientEmpiresWeb {
     const unit = this.selected;
     if (!opt || !unit) { this.cancelSelection(); return; }
 
-    if (opt.kind === 'attack') {
-      const bestTarget = opt.targets[0];
-      this.performAttack(unit, bestTarget);
+    if (opt.kind === 'attack' && opt.target) {
+      this.performAttack(unit, opt.target);
       return;
     }
     if (opt.kind === 'capture' || opt.kind === 'repair') {
       const myPal = this.playerPalette[unit.playerSelector] ?? unit.playerSelector;
       this.assets.map.tiles[unit.x][unit.y] = encodeBuildingTile(this.rawTile(unit.x, unit.y), myPal);
       unit.action = 1;
+      playAe2Sfx('capture');
       this.showToast(opt.kind === 'capture' ? 'CAPTURED!' : 'REPAIRED!', 900);
     } else if (opt.kind === 'raise' && opt.tomb) {
       const stats = computeUnitStats(this.assets.unitRecords[10], 0);
@@ -580,6 +586,7 @@ class AncientEmpiresWeb {
         tombTimer: 0,
       });
       unit.action = 1;
+      playAe2Sfx('raise');
       this.showToast('RAISED SKELETON!', 900);
     } else {
       unit.action = 1;
@@ -610,14 +617,23 @@ class AncientEmpiresWeb {
     const msg = res.counterDamage > 0
       ? `HIT -${res.damage} · COUNTER -${res.counterDamage}${res.attackerLeveled ? ' · LV UP!' : ''}`
       : `HIT -${res.damage}${res.attackerLeveled ? ' · LV UP!' : ''}`;
+    playAe2Sfx(res.attackerLeveled ? 'levelup' : 'attack');
     this.showToast(msg, 1200);
     this.persistState();
     this.checkMatchOutcome();
   }
 
+  getRecruitList() {
+    const mySelector = 1 + this.playerIndex;
+    const hasKing = this.units.some(u => u.type === 9 && u.playerSelector === mySelector && u.action !== 3 && u.hp > 0);
+    return hasKing ? [0, 1, 2, 3, 4, 5, 6, 7, 8] : [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+  }
+
   confirmRecruit(unitType) {
     if (!this.recruitCastle) return;
-    const rec = this.assets.unitRecords[unitType];
+    const list = this.getRecruitList();
+    const actualType = list[unitType] ?? unitType;
+    const rec = this.assets.unitRecords[actualType];
     const cost = rec?.shortValue ?? 9999;
     const gold = this.balances[this.playerIndex] ?? 0;
     if (gold < cost || this.unitAt(this.recruitCastle.x, this.recruitCastle.y)) {
@@ -628,7 +644,7 @@ class AncientEmpiresWeb {
     const stats = computeUnitStats(rec, 0);
     this.units.push({
       id: this.nextUnitId++,
-      type: unitType,
+      type: actualType,
       playerSelector: 1 + this.playerIndex,
       palette: this.playerPalette[1 + this.playerIndex] ?? (1 + this.playerIndex),
       x: this.recruitCastle.x,
@@ -642,6 +658,7 @@ class AncientEmpiresWeb {
       action: 1,
       movedThisTurn: false,
     });
+    playAe2Sfx('recruit');
     this.recruitCastle = null;
     this.state = 'play';
     this.persistState();
@@ -723,6 +740,17 @@ class AncientEmpiresWeb {
       idleUnit.y = act.y;
       if (act.kind === 'capture' || act.kind === 'repair') {
         this.assets.map.tiles[act.x][act.y] = encodeBuildingTile(this.rawTile(act.x, act.y), myPal);
+        playAe2Sfx('capture');
+      } else if (act.kind === 'raise') {
+        const tomb = this.units.find(u => u.id === act.tombId && u.action === 3);
+        if (tomb) {
+          const stats = computeUnitStats(this.assets.unitRecords[10], 0);
+          Object.assign(tomb, {
+            ...stats, type: 10, playerSelector: mySelector, palette: myPal,
+            hp: 100, xp: 0, level: 0, status: 0, action: 1, tombTimer: 0,
+          });
+          playAe2Sfx('raise');
+        }
       } else if (act.kind === 'attack') {
         const target = this.units.find(u => u.id === act.targetId);
         if (target && target.hp > 0) {
@@ -732,6 +760,7 @@ class AncientEmpiresWeb {
             terrainAt: (x, y) => this.tileProperty(x, y) ?? 0,
             rawTileAt: (x, y) => this.rawTile(x, y),
           });
+          playAe2Sfx('attack');
         }
       }
       idleUnit.action = 1;
@@ -954,25 +983,29 @@ class AncientEmpiresWeb {
         centerText(ctx, opt.label, y + 9, { font: 'bold 9px monospace', color: i === this.actionCursor ? '#ffd84d' : '#f1e7d2' });
       });
     } else if (this.state === 'recruitMenu') {
+      const list = this.getRecruitList();
+      const panelH = 26 + list.length * 20;
+      const panelY = Math.max(24, (HEIGHT - panelH) >> 1);
       ctx.fillStyle = '#14101a';
-      ctx.fillRect(20, 52, 200, 224);
+      ctx.fillRect(20, panelY, 200, panelH);
       ctx.strokeStyle = '#ffd84d';
-      ctx.strokeRect(20, 52, 200, 224);
-      centerText(ctx, `RECRUIT · GOLD: ${this.balances[this.playerIndex] ?? 0}`, 64, { font: 'bold 9px monospace', color: '#ffd84d' });
-      for (let i = 0; i < 9; i++) {
-        const y = 74 + i * 22;
-        const cost = this.assets.unitRecords[i]?.shortValue ?? 999;
+      ctx.strokeRect(20, panelY, 200, panelH);
+      centerText(ctx, `RECRUIT · GOLD: ${this.balances[this.playerIndex] ?? 0}`, panelY + 12, { font: 'bold 9px monospace', color: '#ffd84d' });
+      for (let i = 0; i < list.length; i++) {
+        const uType = list[i];
+        const y = panelY + 22 + i * 20;
+        const cost = this.assets.unitRecords[uType]?.shortValue ?? 999;
         const canAfford = (this.balances[this.playerIndex] ?? 0) >= cost;
         if (i === this.recruitCursor) {
           ctx.fillStyle = '#3b2e1b';
-          ctx.fillRect(26, y, 188, 20);
+          ctx.fillRect(26, y, 188, 18);
         }
-        ctx.fillStyle = canAfford ? '#f1e7d2' : '#777';
+        ctx.fillStyle = canAfford ? (uType === 9 ? '#ffd84d' : '#f1e7d2') : '#777';
         ctx.font = '8px monospace';
         ctx.textAlign = 'left';
-        ctx.fillText(`${this.unitName(i)}`, 32, y + 13);
+        ctx.fillText(uType === 9 ? `★ ${this.unitName(uType)}` : `${this.unitName(uType)}`, 32, y + 12);
         ctx.textAlign = 'right';
-        ctx.fillText(`${cost}G`, 208, y + 13);
+        ctx.fillText(`${cost}G`, 208, y + 12);
       }
     } else if (this.state === 'dialog' || this.state === 'victory' || this.state === 'defeat') {
       ctx.fillStyle = '#150d18';
