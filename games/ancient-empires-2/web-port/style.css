@@ -49,17 +49,20 @@ html, body {
 .floating-toolbar {
   position: fixed;
   bottom: 10px;
-  right: 12px;
+  right: 10px;
   z-index: 30;
   display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   align-items: center;
-  gap: 6px;
-  padding: 4px 8px;
+  max-width: min(260px, calc(100vw - 20px));
+  gap: 4px;
+  padding: 4px 7px;
   border: 1px solid #caa56855;
-  border-radius: 999px;
-  background: rgba(18, 16, 26, 0.78);
+  border-radius: 12px;
+  background: rgba(18, 16, 26, 0.8);
   backdrop-filter: blur(6px);
-  opacity: 0.78;
+  opacity: 0.82;
   transition: opacity .15s ease;
 }
 
@@ -68,10 +71,10 @@ html, body {
 .runtime-badge {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 2px 6px;
+  gap: 5px;
+  padding: 2px 5px;
   color: #f4dfb3;
-  font: 500 11px monospace;
+  font: 500 10px monospace;
   white-space: nowrap;
 }
 
@@ -85,12 +88,12 @@ html, body {
 
 .floating-toolbar a,
 .floating-toolbar button {
-  padding: 4px 9px;
+  padding: 3px 8px;
   border: 1px solid #ffffff24;
   border-radius: 999px;
   background: #ffffff12;
   color: #f4dfb3;
-  font: 600 11px monospace;
+  font: 600 10px monospace;
   text-decoration: none;
   cursor: pointer;
 }

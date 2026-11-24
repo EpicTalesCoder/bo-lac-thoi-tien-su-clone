@@ -44,3 +44,61 @@ test('original renderer uses decoded tiles, map encoding, and frame data without
   assert.deepEqual(draws.slice(0, 4).map(call => call[1].name), ['tile-17', 'tile-15', 'tile-17', 'tile-15']);
   assert.equal(calls.some(call => call[0] === 'fillRect'), false);
 });
+
+test('original renderer draws 24x24 unit_icons, grayscale acted units, king heads, tombstones, and HP without battle sprite overflow', async () => {
+  const [mapBytes, tilesBytes, buildingsBytes, propertyBytes, unitIconsBytes, kingHeadBytes] = await Promise.all([
+    readFile(asset('m0')), readFile(asset('tiles0.sprite')), readFile(asset('buildings.sprite')), readFile(asset('tiles0.prop')),
+    readFile(asset('unit_icons.sprite')), readFile(asset('king_head_icons.sprite')),
+  ]);
+  const map = decodeMap(new Uint8Array(mapBytes));
+  const tilesSprite = decodeSprite(new Uint8Array(tilesBytes));
+  const buildingsSprite = decodeSprite(new Uint8Array(buildingsBytes));
+  const unitIconsSprite = decodeSprite(new Uint8Array(unitIconsBytes));
+  const kingHeadSprite = decodeSprite(new Uint8Array(kingHeadBytes));
+  const terrain = decodeTerrainProperties(new Uint8Array(propertyBytes));
+  const tileImages = await Promise.all(Array.from({ length: tilesSprite.frameCount }, (_, index) => readFile(asset(`tiles0_${String(index).padStart(2, '0')}.png`))));
+  const image = (name, width, height) => ({ name, naturalWidth: width, naturalHeight: height });
+  const assets = {
+    terrain,
+    sprites: { tiles0: tilesSprite, buildings: buildingsSprite, unit_icons: unitIconsSprite, king_head_icons: kingHeadSprite },
+    images: {
+      buildings: image('buildings', 48, 24),
+      unit_icons: image('unit_icons_p1', 288, 48),
+      king_head_icons: image('king_heads_color', 52, 12),
+      tombstone: image('tombstone', 24, 24),
+    },
+    unitIconPalettes: [image('unit_icons_gray', 288, 48), image('unit_icons_p1', 288, 48), image('unit_icons_p2', 288, 48)],
+    kingHeadPalettes: [image('king_heads_gray', 52, 12), image('king_heads_color', 52, 12)],
+    frameImages: { tiles0: tileImages.map((_, index) => image(`tile-${index}`, 24, 24)) },
+    unitRecords: [],
+    unitFamilies: [],
+  };
+
+  const { ctx, calls } = makeContext();
+  ctx.strokeText = (...args) => calls.push(['strokeText', ...args]);
+  ctx.fillText = (...args) => calls.push(['fillText', ...args]);
+
+  renderOriginalBoard(ctx, {
+    map,
+    assets,
+    viewportWidth: 96,
+    viewportHeight: 48,
+    units: [
+      { type: 0, palette: 1, frameIndex: 1, action: 0, hp: 100, x: 0, y: 0 },
+      { type: 9, palette: 2, frameIndex: 0, action: 1, hp: 75, x: 1, y: 0 },
+      { type: 2, palette: 2, frameIndex: 0, action: 3, hp: 0, x: 2, y: 0 },
+    ],
+    cursor: null,
+  });
+
+  const draws = calls.filter(c => c[0] === 'drawImage');
+  const unitDraws = draws.filter(c => !c[1].name.startsWith('tile-') && c[1].name !== 'buildings');
+  assert.deepEqual(unitDraws.map(d => [d[1].name, d[2], d[3], d[4], d[5], d[6], d[7]]), [
+    ['unit_icons_p1', 0, 24, 24, 24, 0, 0],
+    ['unit_icons_gray', 216, 0, 24, 24, 24, 0],
+    ['king_heads_gray', 13, 0, 13, 12, 31, 0],
+    ['tombstone', 0, 0, 24, 24, 48, 0],
+  ]);
+  assert.deepEqual(calls.filter(c => c[0] === 'fillText').map(c => c[1]), ['75']);
+  assert.equal(calls.some(call => call[0] === 'fillRect'), false);
+});

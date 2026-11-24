@@ -36,6 +36,17 @@ function drawFrame(ctx, assets, family, frameIndex, x, y, anchor) {
   return drawAssetFrame(ctx, assets, family, frameIndex, x, y, anchor);
 }
 
+function drawSheetFrame(ctx, image, meta, frame, drawX, drawY) {
+  if (!image || !meta || !frame) return false;
+  const cols = Math.floor(image.naturalWidth / meta.frameWidth);
+  if (cols < 1) return false;
+  const sx = (frame.sourceFrame % cols) * meta.frameWidth;
+  const sy = Math.floor(frame.sourceFrame / cols) * meta.frameHeight;
+  drawRegionMIDP(ctx, image, sx, sy, meta.frameWidth, meta.frameHeight,
+    frame.transform ?? 0, drawX + (frame.offsetX ?? 0), drawY + (frame.offsetY ?? 0), MIDP.LEFT | MIDP.TOP);
+  return true;
+}
+
 function drawMapTile(ctx, assets, rawTile, x, y) {
   if (rawTile < 37) return drawFrame(ctx, assets, 'tiles0', rawTile, x, y, MIDP_ANCHOR.LEFT | MIDP_ANCHOR.TOP);
   const encodedBuilding = rawTile - 37;
@@ -77,10 +88,62 @@ export function renderOriginalBoard(ctx, { map, assets, cameraX = 0, cameraY = 0
       }
     }
 
-    // Port of i.java:3268-3277: render map entities after terrain. The encoded
-    // unit type is retained as data; frame offsets come from units.bin records.
+    // Port of i.java:548-608, 3421-3425 and c.java:657-682: strategic map units
+    // render from 24x24 unit_icons (palette 0 grayscale when acted, else team
+    // palette 1..4), tombstone when killed (action === 3), king_head_icons
+    // overlay for King (type === 9), and HP text when hp < 100.
     for (const unit of units) {
-      const record = assets.unitRecords[unit.type];
+      const drawX = unit.x * 24 - cameraX;
+      const drawY = unit.y * 24 - cameraY;
+      if (unit.action === 3) {
+        const tomb = assets.images?.tombstone;
+        if (tomb) drawRegionMIDP(ctx, tomb, 0, 0, 24, 24, 0, drawX, drawY, MIDP.LEFT | MIDP.TOP);
+        continue;
+      }
+
+      const acted = unit.action === 1 || unit.action === 2;
+      const teamPalette = Math.max(1, unit.palette ?? 1);
+      const renderPalette = acted ? 0 : teamPalette;
+      const animFrame = (unit.frameIndex ?? 0) & 1;
+
+      const iconMeta = assets.sprites?.unit_icons;
+      const unitIconsImg = assets.unitIconPalettes?.[renderPalette]
+        ?? assets.coloredPalettes?.[renderPalette]?.unit_icons
+        ?? (renderPalette === 1 ? assets.images?.unit_icons : null)
+        ?? assets.images?.unit_icons;
+
+      if (iconMeta && unitIconsImg) {
+        drawSheetFrame(ctx, unitIconsImg, iconMeta, iconMeta.frames?.[animFrame * 12 + (unit.type ?? 0)], drawX, drawY);
+
+        if (unit.type === 9) {
+          const headMeta = assets.sprites?.king_head_icons;
+          const headImg = acted
+            ? (assets.kingHeadPalettes?.[0] ?? assets.images?.king_head_icons)
+            : (assets.images?.king_head_icons ?? assets.kingHeadPalettes?.[1]);
+          const headTeam = Number.isInteger(unit.kingHead)
+            ? unit.kingHead
+            : Math.max(0, Math.min(3, teamPalette - 1));
+          drawSheetFrame(ctx, headImg, headMeta, headMeta?.frames?.[headTeam * 2 + animFrame], drawX, drawY);
+        }
+
+        if (typeof unit.hp === 'number' && unit.hp < 100 && typeof ctx.fillText === 'function') {
+          ctx.save();
+          ctx.font = 'bold 8px monospace';
+          ctx.textAlign = 'left';
+          ctx.textBaseline = 'bottom';
+          ctx.lineWidth = 2;
+          ctx.lineJoin = 'round';
+          ctx.strokeStyle = '#120d16';
+          ctx.strokeText(String(unit.hp), drawX + 1, drawY + 23);
+          ctx.fillStyle = '#fff5cf';
+          ctx.fillText(String(unit.hp), drawX + 1, drawY + 23);
+          ctx.restore();
+        }
+        continue;
+      }
+
+      // Fallback only when unit_icons sheet is unavailable (isolated test fixtures).
+      const record = assets.unitRecords?.[unit.type];
       const family = assets.unitFamilies?.[unit.type];
       if (!family || !record) continue;
       const frameIndex = unit.frameIndex ?? 0;
@@ -100,7 +163,7 @@ export function renderOriginalBoard(ctx, { map, assets, cameraX = 0, cameraY = 0
       const sx = imageFrames ? 0 : (mapped.sourceFrame % columns) * familyMeta.frameWidth;
       const sy = imageFrames ? 0 : Math.floor(mapped.sourceFrame / columns) * familyMeta.frameHeight;
       drawRegionMIDP(ctx, selectedImage, sx, sy, familyMeta.frameWidth, familyMeta.frameHeight,
-        mapped.transform, unit.x * 24 - cameraX + offsetX, unit.y * 24 - cameraY + offsetY, MIDP.LEFT | MIDP.TOP);
+        mapped.transform, drawX + offsetX, drawY + offsetY, MIDP.LEFT | MIDP.TOP);
     }
 
     if (cursor) {
