@@ -14,11 +14,41 @@ import {
   createFarmSession, stepFarmSession, sellGood,
   sellAllGoods, claimQuestReward, serializeFarmSession, restoreFarmSession,
   xpForNextLevel, sourceFrame, sourceText, sourceTileAt,
-  setFarmerWalkTarget, moveFarmerByVector, clampWorldCamera, snapPlotToIso4x4,
+  setFarmerWalkTarget, moveFarmerByVector, clampWorldCamera, snapPlotToIso4x4, isWalkBlocked,
   buyLandZone, startKitchenRecipe, collectKitchenDish, repairManorRoom,
-  upgradeBarn, claimMail, sellCollectible, collectOrFeedAnimal,
+  upgradeBarn, upgradeCoop, claimMail, sellCollectible, collectOrFeedAnimal,
   visitNeighborFarm, returnHomeFarm,
 } from './gf-core.js';
+
+const BUILDING_INTERACT_SPECS = {
+  10: { cyOff: -12, tapRx: 40, tapRy: 36, keyRx: 44, keyRy: 46, approachDy: 46 }, // Barn
+  11: { cyOff: -14, tapRx: 38, tapRy: 36, keyRx: 44, keyRy: 44, approachDy: 42 }, // Chicken coop
+  12: { cyOff: -14, tapRx: 38, tapRy: 36, keyRx: 44, keyRy: 44, approachDy: 42 }, // Livestock shed
+  13: { cyOff: -14, tapRx: 32, tapRy: 32, keyRx: 38, keyRy: 38, approachDy: 32 }, // Silos
+  15: { cyOff: -10, tapRx: 20, tapRy: 20, keyRx: 26, keyRy: 26, approachDy: 20 }, // Mailbox
+  17: { cyOff: -2, tapRx: 52, tapRy: 38, keyRx: 58, keyRy: 48, approachDy: 44 },  // Pond
+  18: { cyOff: 12, tapRx: 56, tapRy: 58, keyRx: 56, keyRy: 76, approachDy: 78 },  // Manor
+  19: { cyOff: 12, tapRx: 56, tapRy: 58, keyRx: 56, keyRy: 76, approachDy: 78 },  // Manor
+};
+
+function findTargetBuilding(entities, wx, wy, mode = 'tap') {
+  let best = null;
+  let bestSpec = null;
+  let bestScore = Infinity;
+  for (const e of entities || []) {
+    if (e.category !== 50 || (e.entityId >= 0 && e.entityId <= 8) || e.entityId === 16) continue;
+    const spec = BUILDING_INTERACT_SPECS[e.entityId] || { cyOff: -14, tapRx: 36, tapRy: 36, keyRx: 44, keyRy: 44, approachDy: 40 };
+    const rx = mode === 'key' ? spec.keyRx : spec.tapRx;
+    const ry = mode === 'key' ? spec.keyRy : spec.tapRy;
+    const score = Math.hypot((wx - e.x) / rx, (wy - (e.y + spec.cyOff)) / ry);
+    if (score <= 1 && score < bestScore) {
+      bestScore = score;
+      best = e;
+      bestSpec = spec;
+    }
+  }
+  return best ? { entity: best, spec: bestSpec } : null;
+}
 
 const SAVE_KEY = 'gf3-farm-save-v5';
 const canvasEl = typeof document !== 'undefined' ? document.getElementById('game') : null;
@@ -37,6 +67,84 @@ let previousFrameAt = 0;
 const spriteBlockCache = new Map();
 const uiSpriteCache = new Map();
 const uiScreenCache = new Map();
+const PAUSE_BADGE_SKIP = new Set([190]);
+let worldCanvas = null;
+let worldCtx = null;
+
+const SFX_FILES = Object.freeze({
+  click: 'assets/audio/gf3_b055.mp3',
+  harvest: 'assets/audio/gf3_b056.mp3',
+  plow: 'assets/audio/gf3_b057.mp3',
+  clear: 'assets/audio/gf3_b057.mp3',
+  plant: 'assets/audio/gf3_b059.mp3',
+  water: 'assets/audio/gf3_b059.mp3',
+  coin: 'assets/audio/gf3_b060.mp3',
+  cook: 'assets/audio/gf3_b048.mp3',
+  level: 'assets/audio/gf3_b049.mp3',
+  help: 'assets/audio/gf3_b063.mp3',
+});
+const sfxAudioPool = new Map();
+
+function playSfx(kind) {
+  if (!app?.audioEnabled || typeof Audio === 'undefined') return;
+  const rel = SFX_FILES[kind];
+  if (!rel) return;
+  try {
+    let base = sfxAudioPool.get(kind);
+    if (!base) {
+      base = new Audio(new URL(rel, import.meta.url).href);
+      base.volume = 0.45;
+      sfxAudioPool.set(kind, base);
+    }
+    const inst = base.cloneNode();
+    inst.volume = 0.45;
+    inst.play().catch(() => {});
+  } catch { /* ignore */ }
+}
+
+function flushSfxQueue(session) {
+  if (!session?.sfxQueue?.length) return;
+  while (session.sfxQueue.length > 0) {
+    playSfx(session.sfxQueue.shift());
+  }
+}
+
+function drawRoundedPill(ctx, x, y, w, h, r, fill, stroke = null, lineWidth = 1) {
+  ctx.beginPath();
+  ctx.roundRect(x + 0.5, y + 0.5, w - 1, h - 1, r);
+  if (fill) {
+    ctx.fillStyle = fill;
+    ctx.fill();
+  }
+  if (stroke) {
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = lineWidth;
+    ctx.stroke();
+    ctx.lineWidth = 1;
+  }
+}
+
+function drawCleanArrowButton(ctx, cx, cy, dir) {
+  const r = 10;
+  ctx.save();
+  ctx.beginPath();
+  if (dir === 'left') {
+    ctx.moveTo(cx - r, cy);
+    ctx.lineTo(cx + r - 3, cy - r);
+    ctx.lineTo(cx + r - 3, cy + r);
+  } else {
+    ctx.moveTo(cx + r, cy);
+    ctx.lineTo(cx - r + 3, cy - r);
+    ctx.lineTo(cx - r + 3, cy + r);
+  }
+  ctx.closePath();
+  ctx.fillStyle = '#2588eb';
+  ctx.fill();
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.restore();
+}
 
 function getSpriteBlock(blockId, paletteIndex = 0) {
   if (!sourcePack5 || !Number.isInteger(blockId) || blockId < 0 || blockId >= 160) return null;
@@ -201,26 +309,40 @@ function renderFarmWorld(ctx) {
   const animTick = Math.floor((s.animTimeMs || 0) / 80); // Exact 12.5 FPS J2ME animation cadence!
   const vn = s.visitingNeighbor;
 
-  ctx.save();
-  ctx.scale(zoom, zoom);
+  if (typeof document !== 'undefined') {
+    if (!worldCanvas) {
+      worldCanvas = document.createElement('canvas');
+      worldCtx = worldCanvas.getContext('2d');
+    }
+    if (worldCanvas.width !== viewW || worldCanvas.height !== viewH) {
+      worldCanvas.width = viewW;
+      worldCanvas.height = viewH;
+    }
+  }
+  const wctx = worldCtx || ctx;
+  wctx.imageSmoothingEnabled = false;
+  wctx.fillStyle = '#70e038';
+  wctx.fillRect(0, 0, viewW, viewH);
 
+  const camX = Math.round(s.cameraX);
+  const camY = Math.round(s.cameraY);
   if (tm && sourceTileSprite && sourceTileImages) {
-    drawBSpriteTileMap(ctx, tm, sourceTileSprite, sourceTileImages, {
+    drawBSpriteTileMap(wctx, tm, sourceTileSprite, sourceTileImages, {
       x: 0,
       y: 0,
       width: viewW,
       height: viewH,
-      cameraX: s.cameraX,
-      cameraY: s.cameraY,
+      cameraX: camX,
+      cameraY: camY,
     });
   }
 
   const tw = tm?.tileWidth || 36;
   const th = tm?.tileHeight || 18;
-  const ox = -s.cameraX;
-  const oy = -s.cameraY;
+  const ox = -camX;
+  const oy = -camY;
 
-  withMIDPClip(ctx, 0, 0, viewW, viewH, () => {
+  withMIDPClip(wctx, 0, 0, viewW, viewH, () => {
     const soilEntry = getSpriteBlock(6, 0);
     const drawList = [];
 
@@ -237,16 +359,16 @@ function renderFarmWorld(ctx) {
         if (sx < -140 || sy < -140 || sx > viewW + 140 || sy > viewH + 140) continue;
 
         if (ent.category === 49) {
-          if (soilEntry) drawBSpriteBlockFrame(ctx, soilEntry.sprite, soilEntry.moduleImages, 0, sx, sy, 0);
+          if (soilEntry) drawBSpriteBlockFrame(wctx, soilEntry.sprite, soilEntry.moduleImages, 0, sx, sy, 0);
           if (ent.cropBlock >= 0) {
             const helped = helpedSet.has(ent.opaqueKey);
             drawList.push({
               sortY: ent.y + 1,
               draw: () => {
                 const ce = getSpriteBlock(ent.cropBlock, 0);
-                if (ce) drawBSpriteBlockFrame(ctx, ce.sprite, ce.moduleImages, helped ? 1 : 2, sx, sy, 0);
+                if (ce) drawBSpriteBlockFrame(wctx, ce.sprite, ce.moduleImages, helped ? 1 : 2, sx, sy, 0);
                 if (!helped && vn.helpsToday < vn.maxHelps) {
-                  drawText(ctx, '★', sx + 10, sy - 10, { size: 9, color: '#9cff7b', bold: true });
+                  drawText(wctx, '★', sx + 10, sy - 10, { size: 9, color: '#9cff7b', bold: true });
                 }
               },
             });
@@ -254,7 +376,7 @@ function renderFarmWorld(ctx) {
           continue;
         }
         drawList.push({
-          sortY: ent.y + (ent.layer >= 14 ? 40 : 0),
+          sortY: ent.y + (ent.layer >= 14 ? 40 : ent.category === 48 ? 4 : 2),
           draw: () => {
             const entry = getSpriteBlock(ent.block, ent.paletteIndex);
             if (!entry) return;
@@ -262,17 +384,17 @@ function renderFarmWorld(ctx) {
               // Neighbor host character stands calmly in idle animation (anim 2 — e.java:1113), never wobbling!
               const idleAnim = entry.sprite.animations?.length > 2 ? 2 : 0;
               if (entry.sprite.animations?.length > 0) {
-                drawBSpriteBlockAnim(ctx, entry.sprite, entry.moduleImages, idleAnim, Math.floor(animTick * 0.35), sx, sy, 0);
+                drawBSpriteBlockAnim(wctx, entry.sprite, entry.moduleImages, idleAnim, Math.floor(animTick * 0.35), sx, sy, 0);
               } else {
-                drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, 0, sx, sy, 0);
+                drawBSpriteBlockFrame(wctx, entry.sprite, entry.moduleImages, 0, sx, sy, 0);
               }
             } else if (ent.useAnim && entry.sprite.animations?.length > 0) {
-              drawBSpriteBlockAnim(ctx, entry.sprite, entry.moduleImages, 0, animTick, sx, sy, 0);
+              drawBSpriteBlockAnim(wctx, entry.sprite, entry.moduleImages, 0, animTick, sx, sy, 0);
             } else {
-              drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, ent.frame, sx, sy, 0);
+              drawBSpriteBlockFrame(wctx, entry.sprite, entry.moduleImages, ent.frame, sx, sy, 0);
             }
             if ((ent.category === 52 || ent.category === 54) && !helpedSet.has(ent.opaqueKey) && vn.helpsToday < vn.maxHelps) {
-              drawText(ctx, '★', sx + 10, sy - 16, { size: 9, color: '#9cff7b', bold: true });
+              drawText(wctx, '★', sx + 10, sy - 16, { size: 9, color: '#9cff7b', bold: true });
             }
           },
         });
@@ -287,7 +409,7 @@ function renderFarmWorld(ctx) {
         const sx = wx + ox;
         const sy = wy + oy;
         if (sx < -80 || sy < -60 || sx > viewW + 80 || sy > viewH + 60) continue;
-        if (soilEntry) drawBSpriteBlockFrame(ctx, soilEntry.sprite, soilEntry.moduleImages, 0, sx, sy, 0);
+        if (soilEntry) drawBSpriteBlockFrame(wctx, soilEntry.sprite, soilEntry.moduleImages, 0, sx, sy, 0);
       }
 
       // Pass 2a: World structures, props, fences, bushes (skip interior Manor cutaways 0..8 overlapping exterior Manor!)
@@ -300,22 +422,22 @@ function renderFarmWorld(ctx) {
         const sy = ent.y + oy;
         if (sx < -140 || sy < -140 || sx > viewW + 140 || sy > viewH + 140) continue;
         drawList.push({
-          sortY: ent.y + (ent.layer >= 14 ? 40 : 0),
+          sortY: ent.y + (ent.layer >= 14 ? 40 : ent.category === 48 ? 4 : ent.category === 50 ? 6 : 2),
           draw: () => {
             const entry = getSpriteBlock(ent.block, ent.paletteIndex);
             if (!entry) return;
             if (ent.useAnim && entry.sprite.animations?.length > 0) {
-              drawBSpriteBlockAnim(ctx, entry.sprite, entry.moduleImages, 0, animTick, sx, sy, 0);
+              drawBSpriteBlockAnim(wctx, entry.sprite, entry.moduleImages, 0, animTick, sx, sy, 0);
             } else {
-              drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, ent.frame, sx, sy, 0);
+              drawBSpriteBlockFrame(wctx, entry.sprite, entry.moduleImages, ent.frame, sx, sy, 0);
             }
             // Only show clean Gameloft alert bubbles when Kitchen dish is ready or Mailbox has unread mail
             if (ent.category === 50 && ent.entityId === 18 && (s.kitchenQueue || []).some(j => j.ready)) {
               const ui1 = getUiSpriteBlock(1);
-              if (ui1) drawBSpriteBlockFrame(ctx, ui1.sprite, ui1.moduleImages, 34, sx, sy - 42, 0);
+              if (ui1) drawBSpriteBlockFrame(wctx, ui1.sprite, ui1.moduleImages, 34, sx, sy - 42, 0);
             } else if (ent.category === 50 && ent.entityId === 15 && (s.neighborMail || []).some(m => !m.claimed)) {
               const ui1 = getUiSpriteBlock(1);
-              if (ui1) drawBSpriteBlockFrame(ctx, ui1.sprite, ui1.moduleImages, 8, sx, sy - 24, 0);
+              if (ui1) drawBSpriteBlockFrame(wctx, ui1.sprite, ui1.moduleImages, 8, sx, sy - 24, 0);
             }
           },
         });
@@ -327,10 +449,10 @@ function renderFarmWorld(ctx) {
         const sy = dec.worldY + oy;
         if (sx < -80 || sy < -80 || sx > viewW + 80 || sy > viewH + 80) continue;
         drawList.push({
-          sortY: dec.worldY,
+          sortY: dec.worldY + 2,
           draw: () => {
             const entry = getSpriteBlock(dec.worldBlock, dec.paletteIndex || 0);
-            if (entry) drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, dec.frame || 0, sx, sy, 0);
+            if (entry) drawBSpriteBlockFrame(wctx, entry.sprite, entry.moduleImages, dec.frame || 0, sx, sy, 0);
           },
         });
       }
@@ -341,11 +463,11 @@ function renderFarmWorld(ctx) {
         const sy = tree.worldY + oy;
         if (sx < -100 || sy < -100 || sx > viewW + 100 || sy > viewH + 100) continue;
         drawList.push({
-          sortY: tree.worldY,
+          sortY: tree.worldY + 2,
           draw: () => {
             const entry = getSpriteBlock(tree.worldBlock, 0);
-            if (entry) drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, tree.ready ? 1 : 0, sx, sy, 0);
-            if (tree.ready) drawText(ctx, '★', sx + 10, sy - 22, { size: 9, color: '#ffd84d', bold: true });
+            if (entry) drawBSpriteBlockFrame(wctx, entry.sprite, entry.moduleImages, tree.ready ? 1 : 0, sx, sy, 0);
+            if (tree.ready) drawText(wctx, '★', sx + 10, sy - 22, { size: 9, color: '#ffd84d', bold: true });
           },
         });
       }
@@ -366,8 +488,8 @@ function renderFarmWorld(ctx) {
           sortY: wy + 1,
           draw: () => {
             const entry = getSpriteBlock(cropBlock, 0);
-            if (entry) drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, frameIdx, sx, sy, 0);
-            if (plot.stage === 'ready') drawText(ctx, '★', sx + 14, sy - 12, { size: 9, color: '#ffd84d', bold: true });
+            if (entry) drawBSpriteBlockFrame(wctx, entry.sprite, entry.moduleImages, frameIdx, sx, sy, 0);
+            if (plot.stage === 'ready') drawText(wctx, '★', sx + 14, sy - 12, { size: 9, color: '#ffd84d', bold: true });
           },
         });
       }
@@ -379,7 +501,7 @@ function renderFarmWorld(ctx) {
         const sx = wx + ox;
         const sy = wy + oy;
         if (sx < -80 || sy < -80 || sx > viewW + 80 || sy > viewH + 80) continue;
-        const spec = s.catalog?.animals?.find(item => item.id === a.animalId);
+        const spec = (s.catalog?.allAnimals || s.catalog?.animals)?.find(item => item.id === a.animalId);
         const animalBlock = a.worldBlock ?? spec?.worldBlock ?? 8;
         const animalPal = a.paletteIndex ?? spec?.paletteIndex ?? 0;
         const idleFrame = a.idleFrame ?? spec?.idleFrame ?? 0;
@@ -391,13 +513,13 @@ function renderFarmWorld(ctx) {
               const flip = a.hFlip ? 1 : 0;
               if (entry.sprite.animations?.length > 0) {
                 const animId = a.walking && entry.sprite.animations.length > 3 ? 3 : 0;
-                drawBSpriteBlockAnim(ctx, entry.sprite, entry.moduleImages, animId, animTick + a.uid * 5, sx, sy, flip);
+                drawBSpriteBlockAnim(wctx, entry.sprite, entry.moduleImages, animId, animTick + a.uid * 5, sx, sy, flip);
               } else {
-                drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, idleFrame, sx, sy, flip);
+                drawBSpriteBlockFrame(wctx, entry.sprite, entry.moduleImages, idleFrame, sx, sy, flip);
               }
             }
-            if (a.ready) drawText(ctx, '★', sx + 12, sy - 18, { size: 9, color: '#ffd84d', bold: true });
-            else if (!a.fed) drawText(ctx, '!', sx + 12, sy - 18, { size: 9, color: '#ff6b6b', bold: true });
+            if (a.ready) drawText(wctx, '★', sx + 12, sy - 18, { size: 9, color: '#ffd84d', bold: true });
+            else if (!a.fed) drawText(wctx, '!', sx + 12, sy - 18, { size: 9, color: '#ff6b6b', bold: true });
           },
         });
       }
@@ -408,14 +530,14 @@ function renderFarmWorld(ctx) {
       const fx = s.farmer.x + ox;
       const fy = s.farmer.y + oy;
       drawList.push({
-        sortY: s.farmer.y + 3,
+        sortY: s.farmer.y,
         draw: () => {
           const entry = getSpriteBlock(2, 0);
           if (!entry) return;
           const flipFlag = s.farmer.hFlip ? 1 : 0;
           const pivotAdjust = flipFlag ? 5 : 0; // Compensate asymmetric bounds.x=-11,w=27 so flip stays centered
           const fTick = s.farmer.state === 'idle' ? Math.floor(animTick * 0.45) : animTick;
-          drawBSpriteBlockAnim(ctx, entry.sprite, entry.moduleImages, s.farmer.anim, fTick, fx + pivotAdjust, fy, flipFlag);
+          drawBSpriteBlockAnim(wctx, entry.sprite, entry.moduleImages, s.farmer.anim, fTick, fx + pivotAdjust, fy, flipFlag);
         },
       });
     }
@@ -425,7 +547,7 @@ function renderFarmWorld(ctx) {
 
     // Floating feedback popups
     for (const p of s.popups || []) {
-      drawText(ctx, p.text, p.x + ox, p.y + oy, { align: 'center', size: 9, color: p.color || '#ffd84d', bold: true });
+      drawText(wctx, p.text, p.x + ox, p.y + oy, { align: 'center', size: 9, color: p.color || '#ffd84d', bold: true });
     }
 
     // Authentic /5[14] frame 16 (72x36 4x4 plot cursor — e.java:573) when plowing or placing
@@ -433,19 +555,35 @@ function renderFarmWorld(ctx) {
       const curSnapped = snapPlotToIso4x4(s.cursorCol * tw + (tw >> 1), s.cursorRow * th + (th >> 1));
       const cursorSpr = getSpriteBlock(14, 0);
       if (cursorSpr) {
-        drawBSpriteBlockFrame(ctx, cursorSpr.sprite, cursorSpr.moduleImages, 16, curSnapped.wx + ox, curSnapped.wy + oy, 0);
+        drawBSpriteBlockFrame(wctx, cursorSpr.sprite, cursorSpr.moduleImages, 16, curSnapped.wx + ox, curSnapped.wy + oy, 0);
       }
     }
   });
 
-  ctx.restore();
+  if (worldCanvas && wctx !== ctx) {
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(worldCanvas, 0, 0, viewW, viewH, 0, 0, SCREEN_W, SCREEN_H);
+  }
 
-  // --- 1:1 ORIGINAL GAMELOFT /6[1] HUD (NO IAP '+' TOP-UP BUTTONS) ---
+  // --- 1:1 ORIGINAL GAMELOFT /6[1] HUD (CLEAN XP BAR, NO STRAY SLIVERS, NO '0' PAUSE BADGE) ---
+  const xpNeed = xpForNextLevel(s);
+  const xpRatio = Math.max(0, Math.min(1, s.xp / Math.max(1, xpNeed)));
+  // Authentic recessed XP bar behind the top-left Star icon (x=28..171, y=7..21)
+  drawRoundedPill(ctx, 29, 7, 143, 15, 7, 'rgba(20, 44, 16, 0.85)', '#f7f7f6', 1.5);
+  const xpFillW = Math.round(139 * xpRatio);
+  if (xpFillW > 0) {
+    drawRoundedPill(ctx, 31, 9, Math.max(6, xpFillW), 11, 5, '#48a4ff', null);
+  }
+
+  // Clean dark-green Cash pill behind the Cash amount (x=134..188, y=34..48)
+  drawRoundedPill(ctx, 134, 34, 54, 14, 7, '#1d5622', '#f7f7f5', 1.2);
+
   const hudWidgets = getUIScreen(1);
   const carouselOpen = !!s.seedCarousel && !vn;
   drawOriginalUIScreen(ctx, hudWidgets, getAnySpriteBlock, {
     filterWidget: (w) => {
       if (w.type !== 205) return false;
+      if (w.index === 23 || w.index === 18 || w.index === 41) return false;
       if (w.spriteId === 41 && w.frameIndex === 3) return false;
       if (w.spriteId === 20 && w.frameIndex === 183) return false;
       if (w.y < 60 && w.spriteId !== 31) return true;
@@ -455,6 +593,12 @@ function renderFarmWorld(ctx) {
       return w.index === 52 || w.index === 63 || w.index === 67;
     },
   });
+
+  // Clean Pause || button at (207, 8) skipping baked notification '0' circle (module 190)
+  const spr20Hud = getUiSpriteBlock(20);
+  if (spr20Hud) {
+    drawBSpriteBlockFrame(ctx, spr20Hud.sprite, spr20Hud.moduleImages, 102, 207, 8, 0, PAUSE_BADGE_SKIP);
+  }
 
   // --- 1:1 ON-WORLD SEED CAROUSEL (/6[1] widgets 73, 75..78, 82 — a.java:3804-3936) ---
   if (carouselOpen) {
@@ -469,22 +613,24 @@ function renderFarmWorld(ctx) {
       const spr20 = getUiSpriteBlock(20);
       if (spr20) drawBSpriteBlockFrame(ctx, spr20.sprite, spr20.moduleImages, 105, 45, 260, 0);
 
+      // Clean blue navigation arrows (no J2ME '4'/'6' keypad digits)
+      drawCleanArrowButton(ctx, 56, 283, 'left');
+      drawCleanArrowButton(ctx, 184, 283, 'right');
+
       // Widgets [76], [77], [78]: Left (80,281), Center (124,281), Right (170,282) crop seed icons
       const slots = [
-        { crop: fieldCrops[prevIdx], x: 80, y: 281 },
+        { crop: fieldCrops[prevIdx], x: 82, y: 281 },
         { crop: fieldCrops[idx], x: 124, y: 281 },
-        { crop: fieldCrops[nextIdx], x: 170, y: 282 },
+        { crop: fieldCrops[nextIdx], x: 166, y: 282 },
       ];
       const spr9 = getUiSpriteBlock(9);
       for (const sl of slots) {
         const unlocked = s.level >= (sl.crop.unlockLevel || 1);
         if (unlocked && spr9) {
-          // Port of a.java:3858: w[n3] = col4 - 12 (frames 0..11 of /7[9])
           const seedFrm = Math.max(0, Math.min(spr9.sprite.frames.length - 1, (sl.crop.iconFrame ?? 12) - 12));
-          drawBSpriteBlockFrameScaled(ctx, spr9.sprite, spr9.moduleImages, seedFrm, sl.x, sl.y, 28, 28);
+          drawBSpriteBlockFrameScaled(ctx, spr9.sprite, spr9.moduleImages, seedFrm, sl.x, sl.y, 26, 26);
         } else if (spr20) {
-          // Port of a.java:3861: locked padlock icon (/7[20] frame 123)
-          drawBSpriteBlockFrameScaled(ctx, spr20.sprite, spr20.moduleImages, 123, sl.x, sl.y, 24, 24);
+          drawBSpriteBlockFrameScaled(ctx, spr20.sprite, spr20.moduleImages, 123, sl.x, sl.y, 22, 22);
         }
       }
 
@@ -509,20 +655,15 @@ function renderFarmWorld(ctx) {
     }
   }
 
-  const xpNeed = xpForNextLevel(s);
   const drawHudNum = (val, x, y, color, shadow = '#2b1505') => {
     drawText(ctx, val, x + 1, y + 1, { align: 'center', size: 8, color: shadow, bold: true });
     drawText(ctx, val, x, y, { align: 'center', size: 8, color, bold: true });
   };
   drawHudNum(`${s.level}`, 25, 19, '#fff8c8');
   drawHudNum(`${s.xp}/${xpNeed} XP`, 103, 17, '#ffffff');
-  // Crisp dark-brown numbers on Coins pill & high-contrast pills for Cash & Energy
+  // Crisp dark-brown numbers on Coins pill & high-contrast green Cash pill
   drawText(ctx, `${s.coins}`, 57, 44, { align: 'center', size: 8, color: '#4a2508', bold: true });
-  ctx.fillStyle = 'rgba(26, 66, 26, 0.85)';
-  ctx.fillRect(138, 34, 38, 13);
-  ctx.strokeStyle = '#9be38a';
-  ctx.strokeRect(138.5, 34.5, 37, 12);
-  drawHudNum(`${s.cash}`, 157, 44, '#eaffed');
+  drawHudNum(`${s.cash}`, 161, 44, '#eaffed');
 
   ctx.fillStyle = 'rgba(46, 26, 9, 0.82)';
   ctx.fillRect(10, 51, 56, 13);
@@ -551,10 +692,12 @@ function renderFarmWorld(ctx) {
     ctx.strokeRect(156.5, SCREEN_H - 35.5, 77, 21);
     drawText(ctx, 'VỀ NHÀ', 195, SCREEN_H - 22, { align: 'center', size: 9, color: '#fff7d1', bold: true });
   } else if (s.activeTool !== 'auto') {
+    const cropSpec = s.selectedCropId ? s.catalog?.crops?.find(c => c.id === s.selectedCropId) : null;
     const toolNames = {
       plow: 'Cuốc đất: Chạm bãi cỏ để cày (Esc hủy)',
       clear: 'Dọn cỏ/đá: Chạm bụi cây/đá (Esc hủy)',
       place: `Đặt ${s.placementItem?.spec?.name || ''}: Chạm bãi cỏ (Esc hủy)`,
+      plant: `Gieo ${cropSpec?.name || 'hạt giống'}: Chạm ô đất trống (Esc hủy)`,
     };
     ctx.fillStyle = 'rgba(59, 34, 13, 0.88)';
     ctx.fillRect(12, 64, SCREEN_W - 24, 16);
@@ -605,50 +748,60 @@ function getShopItems(s) {
   return s.catalog.decorations || [];
 }
 
-// --- SCREEN A: 1:1 ORIGINAL GAMELOFT /6[2] SHOP (4 /7[4] TABS + 2x2 /7[20] CARDS!) ---
+// --- SCREEN A: 1:1 ORIGINAL GAMELOFT /6[2] SHOP (5 TABS WITH MATCHING ICONS + 2x2 CARDS!) ---
 function renderShop(ctx) {
   const s = app.session;
   ctx.fillStyle = '#3c2512';
   ctx.fillRect(0, 0, SCREEN_W, SCREEN_H);
 
-  // Render authentic /6[2] Shop backdrop, Coins/Cash pills, and 4 real /7[4] category icon tabs
+  // Render authentic /6[2] Shop backdrop (without raw 9-slice sliver tabs or bare pill endcaps)
   const w2 = getUIScreen(2);
   drawOriginalUIScreen(ctx, w2, getAnySpriteBlock, {
     filterWidget: (w) => {
       if (w.type !== 205) return false;
-      if (w.spriteId === 22 || w.spriteId === 33 || w.spriteId === 4) return true;
-      // Keep top Coins/Cash bars (y < 45, excluding IAP '+' [8,9]) and 4 tab backgrounds (y=50, frm=9)
-      if (w.spriteId === 20 && w.y < 45 && w.index !== 8 && w.index !== 9) return true;
-      if (w.spriteId === 20 && w.frameIndex === 9 && w.y === 50) return true;
+      if (w.spriteId === 22 || w.spriteId === 33) return true;
       return false;
     },
   });
 
-  // Live Coins & Cash inside /6[2]'s top bars (x=30..108, x=126..188, y=25)
-  drawText(ctx, `${s.coins}`, 70, 36, { align: 'center', size: 8, color: '#4a2508', bold: true });
-  drawText(ctx, `${s.cash}`, 158, 36, { align: 'center', size: 8, color: '#1c6b1c', bold: true });
+  // Clean Coins & Cash top pills (matching /6[2] x=30..114, x=126..210)
+  drawRoundedPill(ctx, 29, 25, 86, 18, 8, '#f7f7f5', '#c79b55', 1);
+  drawRoundedPill(ctx, 125, 25, 86, 18, 8, '#f7f7f5', '#c79b55', 1);
+  const spr20 = getUiSpriteBlock(20);
+  if (spr20) {
+    drawBSpriteBlockFrame(ctx, spr20.sprite, spr20.moduleImages, 104, 24, 25, 0);
+    drawBSpriteBlockFrame(ctx, spr20.sprite, spr20.moduleImages, 103, 118, 24, 0);
+  }
+  drawText(ctx, `${s.coins}`, 74, 37, { align: 'center', size: 8, color: '#4a2508', bold: true });
+  drawText(ctx, `${s.cash}`, 170, 37, { align: 'center', size: 8, color: '#1c6b1c', bold: true });
 
-  // Highlight active tab among the 4 original /6[2] tabs (x=31, 76, 121, 166, y=50)
-  const tabOrder = ['crops', 'trees', 'animals', 'decor'];
-  const activeTabIdx = Math.max(0, tabOrder.indexOf(s.shopTab === 'land' ? 'decor' : s.shopTab));
-  ctx.strokeStyle = '#ffd84d';
-  ctx.lineWidth = 2;
-  ctx.strokeRect(31 + activeTabIdx * 45 - 1, 49, 40, 31);
-  ctx.lineWidth = 1;
+  // 5 matching category tabs evenly inside x=24..216
+  const tabDefs = [
+    { id: 'crops', block: 4, frame: 0 },
+    { id: 'trees', block: 23, frame: 0 },
+    { id: 'animals', block: 4, frame: 1 },
+    { id: 'land', block: 4, frame: 2 },
+    { id: 'decor', block: 4, frame: 3 },
+  ];
+  tabDefs.forEach((td, i) => {
+    const tx = 24 + i * 39;
+    const active = s.shopTab === td.id;
+    drawRoundedPill(ctx, tx, 49, 36, 30, 5, active ? '#ffffff' : '#f4dfa8', active ? '#ffd84d' : '#9c6e3b', active ? 2 : 1);
+    const sp = getUiSpriteBlock(td.block);
+    if (sp) drawBSpriteBlockFrameScaled(ctx, sp.sprite, sp.moduleImages, td.frame, tx + 18, 64, 24, 24);
+  });
 
-  // 4 live items mapped 1:1 onto /6[2]'s exact 2x2 card coordinates:
-  // Top row cards: (31,85) & (126,85) -> icons at (73,134) & (168,134), prices at (75,172) & (170,172)
-  // Bottom row cards: (31,182) & (126,182) -> icons at (73,231) & (168,231), prices at (75,269) & (170,269)
+  // 4 live items mapped 1:1 onto /6[2]'s exact 2x2 card coordinates
   const list = getShopItems(s);
   const perPage = 4;
   const page = Math.floor(s.shopCursor / perPage);
   const totalPages = Math.max(1, Math.ceil(list.length / perPage));
   const start = page * perPage;
   const cardCoords = [
-    { x: 31, y: 85, ix: 78, iy: 126, px: 75, py: 168 },
-    { x: 126, y: 85, ix: 173, iy: 126, px: 170, py: 168 },
-    { x: 31, y: 182, ix: 78, iy: 223, px: 75, py: 265 },
-    { x: 126, y: 182, ix: 173, iy: 223, px: 170, py: 265 },
+    { x: 31, y: 85, ix: 75, iy: 125, px: 75, py: 167 },
+    { x: 126, y: 85, ix: 170, iy: 125, px: 170, py: 167 },
+    { x: 31, y: 182, ix: 75, iy: 222, px: 75, py: 264 },
+    { x: 126, y: 182, ix: 170, iy: 222, px: 170, py: 264 },
   ];
 
   for (let i = 0; i < perPage && start + i < list.length; i += 1) {
@@ -660,7 +813,6 @@ function renderShop(ctx) {
     const locked = !owned && ((item.unlockLevel || 1) > s.level);
     const price = s.shopTab === 'land' ? item.cost : item.buyPrice;
 
-    // Clean warm Gameloft parchment card at exact /6[2] 2x2 slot position
     ctx.fillStyle = selected ? '#fff1b8' : '#f7e6c0';
     ctx.fillRect(c.x, c.y, 88, 92);
     ctx.strokeStyle = selected ? '#c46210' : '#9c6e3b';
@@ -673,10 +825,16 @@ function renderShop(ctx) {
     ctx.strokeStyle = '#9c6e3b';
     ctx.strokeRect(c.x + 6.5, c.y + 72.5, 75, 14);
 
-    if (s.shopTab === 'crops' || s.shopTab === 'trees') {
-      const ui9 = getUiSpriteBlock(item.iconBlock ?? 9);
+    if (s.shopTab === 'crops') {
+      const ui9 = getAnySpriteBlock(item.iconBlock ?? 9);
       if (ui9 && item.iconFrame >= 0 && item.iconFrame < ui9.sprite.frames.length) {
         drawBSpriteBlockFrameScaled(ctx, ui9.sprite, ui9.moduleImages, item.iconFrame, c.ix, c.iy, 38, 34);
+      }
+    } else if (s.shopTab === 'trees') {
+      const treeSp = getAnySpriteBlock(item.iconBlock) || getSpriteBlock(item.worldBlock, 0);
+      if (treeSp) {
+        const frm = Math.max(0, Math.min(treeSp.sprite.frames.length - 1, item.iconFrame ?? 2));
+        drawBSpriteBlockFrameScaled(ctx, treeSp.sprite, treeSp.moduleImages, frm, c.ix, c.iy, 42, 38);
       }
     } else if (s.shopTab === 'animals' || s.shopTab === 'decor') {
       const sp = getSpriteBlock(item.worldBlock, item.paletteIndex || 0);
@@ -687,8 +845,8 @@ function renderShop(ctx) {
     }
 
     drawText(ctx, item.name, c.x + 44, c.y + 13, { align: 'center', size: 7, color: '#3a1f08', bold: true, maxWidth: 82 });
-    const rightTxt = owned ? 'ĐÃ MUA' : locked ? `Lv.${item.unlockLevel}` : `${price}`;
-    drawText(ctx, rightTxt, c.px, c.py, { align: 'center', size: 8, color: owned ? '#1c6b1c' : locked ? '#7a5c3d' : '#4a2508', bold: true });
+    const rightTxt = owned ? 'ĐÃ MUA' : locked ? `Lv.${item.unlockLevel}` : `${price} Xu`;
+    drawText(ctx, rightTxt, c.px, c.py, { align: 'center', size: 7, color: owned ? '#1c6b1c' : locked ? '#7a5c3d' : '#4a2508', bold: true, maxWidth: 72 });
   }
 
   // Bottom softkeys (/7[12]) & Land/Page bar
@@ -700,19 +858,19 @@ function renderShop(ctx) {
   drawText(ctx, `◀ Trang ${page + 1}/${totalPages} ▶`, SCREEN_W / 2, 306, { align: 'center', size: 8, color: '#4a2508', bold: true });
 }
 
-// --- SCREEN B: 1:1 ORIGINAL GAMELOFT /6[3] KITCHEN (3x2 RECIPE CARDS AT x=20, 88, 155!) ---
+// --- SCREEN B: 1:1 ORIGINAL GAMELOFT /6[3] KITCHEN (3x2 RECIPE CARDS + ACTIVE STOVES TAB!) ---
 function renderKitchen(ctx) {
   const s = app.session;
+  const tab = s.kitchenTab || 'recipes';
   ctx.fillStyle = '#3c2512';
   ctx.fillRect(0, 0, SCREEN_W, SCREEN_H);
 
-  // Render authentic /6[3] Kitchen backdrop & top 2 tabs (without stray dynamic overlay badges)
+  // Render authentic /6[3] Kitchen backdrop without stray 9-slice sliver tabs
   const w3 = getUIScreen(3);
   drawOriginalUIScreen(ctx, w3, getAnySpriteBlock, {
     filterWidget: (w) => {
       if (w.type !== 205) return false;
-      if (w.spriteId === 22 || w.spriteId === 33 || w.spriteId === 28) return true;
-      return w.spriteId === 20 && w.y < 65;
+      return w.spriteId === 22 || w.spriteId === 33;
     },
   });
 
@@ -730,6 +888,56 @@ function renderKitchen(ctx) {
       ? `Đang nấu: ${cookingJob.name} (${Math.ceil((cookingJob.cookMs - cookingJob.progressMs) / 1000)}s)`
       : 'Chạm thẻ món bên dưới để nấu';
   drawText(ctx, stoveHint, SCREEN_W / 2, 35, { align: 'center', size: 7, color: readyJob ? '#9cff7b' : '#ffe49e', bold: true });
+
+  // Clean 2 Kitchen tabs: Recipes (left) & Active Stoves (right)
+  drawRoundedPill(ctx, 62, 48, 52, 34, 6, tab === 'recipes' ? '#ffffff' : '#f4dfa8', tab === 'recipes' ? '#ffd84d' : '#9c6e3b', tab === 'recipes' ? 2 : 1);
+  const sp28 = getUiSpriteBlock(28);
+  if (sp28) drawBSpriteBlockFrameScaled(ctx, sp28.sprite, sp28.moduleImages, 6, 88, 65, 26, 26);
+
+  drawRoundedPill(ctx, 126, 48, 52, 34, 6, tab === 'stoves' ? '#ffffff' : '#f4dfa8', tab === 'stoves' ? '#ffd84d' : '#9c6e3b', tab === 'stoves' ? 2 : 1);
+  const sp20 = getUiSpriteBlock(20);
+  if (sp20) drawBSpriteBlockFrameScaled(ctx, sp20.sprite, sp20.moduleImages, 104, 152, 65, 22, 22);
+  if ((s.kitchenQueue?.length || 0) > 0) {
+    drawText(ctx, `${s.kitchenQueue.length}/4`, 170, 58, { align: 'right', size: 7, color: readyJob ? '#1c6b1c' : '#8c4b18', bold: true });
+  }
+
+  if (tab === 'stoves') {
+    const slots = s.kitchenQueue || [];
+    for (let i = 0; i < 4; i += 1) {
+      const col = i % 2;
+      const row = Math.floor(i / 2);
+      const cx = 24 + col * 98;
+      const cy = 92 + row * 90;
+      const job = slots[i];
+      ctx.fillStyle = job?.ready ? '#fff1b8' : '#f7e6c0';
+      ctx.fillRect(cx, cy, 92, 82);
+      ctx.strokeStyle = job?.ready ? '#2e7d32' : '#9c6e3b';
+      ctx.lineWidth = job?.ready ? 2 : 1;
+      ctx.strokeRect(cx + 0.5, cy + 0.5, 91, 81);
+      ctx.lineWidth = 1;
+      if (!job) {
+        drawText(ctx, `Bếp #${i + 1}`, cx + 46, cy + 28, { align: 'center', size: 8, color: '#7a5c3d', bold: true });
+        drawText(ctx, 'Đang trống', cx + 46, cy + 48, { align: 'center', size: 7, color: '#9c6e3b' });
+      } else {
+        drawText(ctx, job.name, cx + 46, cy + 13, { align: 'center', size: 7, color: '#3a1f08', bold: true, maxWidth: 84 });
+        const dishSp = getAnySpriteBlock(job.iconBlock ?? 50);
+        if (dishSp) drawBSpriteBlockFrameScaled(ctx, dishSp.sprite, dishSp.moduleImages, job.iconFrame ?? 0, cx + 46, cy + 36, 30, 26);
+        ctx.fillStyle = job.ready ? '#2e7d32' : '#d6be8a';
+        ctx.fillRect(cx + 8, cy + 58, 76, 17);
+        const remain = Math.max(0, Math.ceil((job.cookMs - job.progressMs) / 1000));
+        drawText(ctx, job.ready ? 'NHẬN MÓN' : `Còn ${remain}s`, cx + 46, cy + 69, {
+          align: 'center', size: 7, color: job.ready ? '#ffffff' : '#4a2508', bold: true,
+        });
+      }
+    }
+    const softkeys = getUiSpriteBlock(12);
+    if (softkeys) {
+      drawBSpriteBlockFrame(ctx, softkeys.sprite, softkeys.moduleImages, 2, 4, 289, 0);
+      drawBSpriteBlockFrame(ctx, softkeys.sprite, softkeys.moduleImages, 0, 208, 289, 0);
+    }
+    drawText(ctx, 'Chạm món xong để thu vào Kho', SCREEN_W / 2, 306, { align: 'center', size: 7, color: '#4a2508', bold: true });
+    return;
+  }
 
   // 6 live recipes per page mapped 1:1 onto /6[3]'s 3x2 card coordinates (x = 20, 88, 155; y = 92, 182)
   const recipes = s.catalog.recipes || [];
@@ -754,18 +962,24 @@ function renderKitchen(ctx) {
     ctx.lineWidth = sel ? 2 : 1;
     ctx.strokeRect(cx + 0.5, cy + 0.5, 61, 77);
     ctx.lineWidth = 1;
-    drawText(ctx, r.name, cx + 31, cy + 14, { align: 'center', size: 7, color: '#3a1f08', bold: true, maxWidth: 56 });
+    drawText(ctx, r.name, cx + 31, cy + 12, { align: 'center', size: 7, color: '#3a1f08', bold: true, maxWidth: 56 });
+    const dishSp = getAnySpriteBlock(r.iconBlock ?? 50);
+    if (dishSp) {
+      drawBSpriteBlockFrameScaled(ctx, dishSp.sprite, dishSp.moduleImages, r.iconFrame ?? 0, cx + 31, cy + 29, 26, 22);
+    }
     const ing0 = r.ingredients[0];
     if (ing0) {
       const have = s.inventory.get(ing0.goodId)?.qty || 0;
-      drawText(ctx, `${ing0.name.slice(0, 8)} ${have}/${ing0.qty}`, cx + 31, cy + 44, {
-        align: 'center', size: 6, color: have >= ing0.qty ? '#1c6b1c' : '#9c2c1c', bold: true, maxWidth: 56,
+      const missingOther = r.ingredients.slice(1).some(ig => (s.inventory.get(ig.goodId)?.qty || 0) < ig.qty);
+      const ingColor = (have >= ing0.qty && !missingOther) ? '#1c6b1c' : '#9c2c1c';
+      drawText(ctx, `${ing0.name} ${have}/${ing0.qty}`, cx + 31, cy + 50, {
+        align: 'center', size: 6, color: ingColor, bold: true, maxWidth: 56,
       });
     }
     ctx.fillStyle = canCook ? '#2e7d32' : '#d6be8a';
-    ctx.fillRect(cx + 6, cy + 56, 50, 16);
+    ctx.fillRect(cx + 6, cy + 58, 50, 15);
     const st = s.level < r.unlockLevel ? `Lv.${r.unlockLevel}` : canCook ? 'NẤU' : 'Thiếu';
-    drawText(ctx, st, cx + 31, cy + 67, { align: 'center', size: 7, color: canCook ? '#ffffff' : '#5c3314', bold: true });
+    drawText(ctx, st, cx + 31, cy + 68, { align: 'center', size: 7, color: canCook ? '#ffffff' : '#5c3314', bold: true });
   }
 
   const softkeys = getUiSpriteBlock(12);
@@ -830,8 +1044,8 @@ function renderQuestsOrNeighbors(ctx) {
   }
   if (qSel) {
     drawText(ctx, qSel.title, 76, 72, { size: 8, color: '#5c3314', bold: true, maxWidth: 140 });
-    wrapLines(qSel.description || 'Hoàn thành công việc trang trại để nhận thưởng!', 24).slice(0, 2).forEach((ln, i) => {
-      drawText(ctx, ln, 76, 85 + i * 11, { size: 7, color: '#3a1f08', maxWidth: 140 });
+    wrapLines(qSel.description || 'Hoàn thành công việc trang trại để nhận thưởng!', 28).slice(0, 2).forEach((ln, i) => {
+      drawText(ctx, ln, 76, 85 + i * 11, { size: 7, color: '#3a1f08', maxWidth: 142 });
     });
     drawText(ctx, `Tiến độ: ${qSel.progress}/${qSel.targetCount}`, 76, 112, { size: 8, color: '#8c4b18', bold: true });
     drawText(ctx, `Thưởng: +${qSel.rewardCoins} Xu, +${qSel.rewardXp} XP`, 76, 125, { size: 8, color: '#1c6b1c', bold: true });
@@ -906,18 +1120,42 @@ function renderSeedPicker(ctx) {
   renderCleanParchmentList(ctx, 22, 'CHỌN HẠT GIỐNG', `Xu: ${s.coins}  ·  Cấp: ${s.level}`, rows, s.panelCursor, 'Chạm hạt giống để gieo');
 }
 
-// --- 1:1 ORIGINAL GAMELOFT /6[8] BARN (TOP TABS + 3x2 ITEM GRID + LEFT/RIGHT ARROWS [207,206]!) ---
+// --- 1:1 ORIGINAL GAMELOFT /6[8] BARN (TOP TABS + 3x2 ITEM GRID + CLEAN ARROWS!) ---
 function renderBarn(ctx) {
   const s = app.session;
+  const tab = s.barnTab || 'goods';
   ctx.fillStyle = '#3c2512';
   ctx.fillRect(0, 0, SCREEN_W, SCREEN_H);
 
+  // Filter out 20[11] bare endcaps and 20[163,164] J2ME '4'/'6' arrows so we draw crisp equivalents
   const w8 = getUIScreen(8);
-  drawOriginalUIScreen(ctx, w8, getAnySpriteBlock, { filterWidget: (w) => w.type === 205 });
+  drawOriginalUIScreen(ctx, w8, getAnySpriteBlock, {
+    filterWidget: (w) => {
+      if (w.type !== 205) return false;
+      if (w.spriteId === 20 && (w.frameIndex === 11 || w.frameIndex === 163 || w.frameIndex === 164)) return false;
+      return true;
+    },
+  });
 
-  // Live Coins & Cash inside /6[8] top bars (x=138, y=27 & y=57)
-  drawText(ctx, `${s.coins}`, 176, 38, { align: 'center', size: 8, color: '#4a2508', bold: true });
-  drawText(ctx, `${s.cash}`, 176, 68, { align: 'center', size: 8, color: '#1c6b1c', bold: true });
+  // Clean Coins & Cash top pills (matching /6[8] x=138, y=27 & y=57)
+  drawRoundedPill(ctx, 136, 26, 86, 19, 8, '#f7f7f5', '#c79b55', 1);
+  drawRoundedPill(ctx, 136, 56, 86, 19, 8, '#f7f7f5', '#c79b55', 1);
+  const spr20 = getUiSpriteBlock(20);
+  if (spr20) {
+    drawBSpriteBlockFrame(ctx, spr20.sprite, spr20.moduleImages, 104, 131, 28, 0);
+    drawBSpriteBlockFrame(ctx, spr20.sprite, spr20.moduleImages, 103, 130, 57, 0);
+  }
+  drawText(ctx, `${s.coins}`, 181, 38, { align: 'center', size: 8, color: '#4a2508', bold: true });
+  drawText(ctx, `${s.cash}`, 181, 68, { align: 'center', size: 8, color: '#1c6b1c', bold: true });
+
+  // Highlight active Barn tab (Goods vs Upgrades)
+  ctx.strokeStyle = tab === 'goods' ? '#ffd84d' : '#9c6e3b';
+  ctx.lineWidth = tab === 'goods' ? 2 : 1;
+  ctx.strokeRect(15.5, 50.5, 52, 41);
+  ctx.strokeStyle = tab === 'upgrade' ? '#ffd84d' : '#9c6e3b';
+  ctx.lineWidth = tab === 'upgrade' ? 2 : 1;
+  ctx.strokeRect(69.5, 50.5, 52, 41);
+  ctx.lineWidth = 1;
 
   const items = [...s.inventory.values()];
   const totalQty = items.reduce((a, b) => a + b.qty, 0);
@@ -928,15 +1166,54 @@ function renderBarn(ctx) {
   ctx.strokeRect(14.5, 10.5, 107, 17);
   drawText(ctx, `KHO THÓC ${totalQty}/${s.barnCapacity}`, 68, 22, { align: 'center', size: 8, color: '#fff7d1', bold: true });
 
+  if (tab === 'upgrade') {
+    const coopCost = 200 + Math.floor(((s.coopCapacity || 6) - 6) * 40);
+    const shedCost = 200 + Math.floor(((s.shedCapacity || 6) - 6) * 40);
+    const cards = [
+      { title: '+20 Chỗ Kho thóc', sub: `Hiện tại: ${s.barnCapacity}`, btn: `${upCost} Xu`, blk: 82, frm: 0 },
+      { title: '+4 Chỗ Chuồng gà', sub: `Hiện tại: ${s.coopCapacity}`, btn: `${coopCost} Xu`, blk: 149, frm: 0 },
+      { title: '+4 Chỗ Chuồng thú', sub: `Hiện tại: ${s.shedCapacity}`, btn: `${shedCost} Xu`, blk: 103, frm: 0 },
+      { title: 'Bán hết nông sản', sub: `${totalQty} món trong kho`, btn: 'BÁN HẾT', blk: 4, frm: 1 },
+    ];
+    cards.forEach((cd, i) => {
+      const col = i % 2;
+      const row = Math.floor(i / 2);
+      const cx = 30 + col * 92;
+      const cy = 112 + row * 78;
+      ctx.fillStyle = i === (s.barnCursor % 4) ? '#fff1b8' : '#f7e6c0';
+      ctx.fillRect(cx, cy, 86, 70);
+      ctx.strokeStyle = i === (s.barnCursor % 4) ? '#c46210' : '#9c6e3b';
+      ctx.strokeRect(cx + 0.5, cy + 0.5, 85, 69);
+      const sp = getSpriteBlock(cd.blk, 0);
+      if (sp) drawBSpriteBlockFrameScaled(ctx, sp.sprite, sp.moduleImages, cd.frm, cx + 43, cy + 23, 34, 28);
+      drawText(ctx, cd.title, cx + 43, cy + 44, { align: 'center', size: 7, color: '#3a1f08', bold: true, maxWidth: 80 });
+      drawText(ctx, cd.btn, cx + 43, cy + 59, { align: 'center', size: 7, color: '#1c6b1c', bold: true });
+    });
+    drawText(ctx, 'Chạm thẻ để nâng cấp hoặc bán hết', SCREEN_W / 2, 306, { align: 'center', size: 7, color: '#4a2508', bold: true });
+    return;
+  }
+
   const allSlots = [
     { isUpgrade: true, name: '+20 Chỗ Kho', qty: 0, price: upCost },
-    ...items.map(it => ({ isUpgrade: false, id: it.id, name: it.name, qty: it.qty, price: it.sellPrice * it.qty })),
+    ...items.map(it => ({
+      isUpgrade: false,
+      id: it.id,
+      name: it.name,
+      qty: it.qty,
+      price: it.sellPrice * it.qty,
+      iconBlock: it.iconBlock ?? 2,
+      iconFrame: it.iconFrame ?? 0,
+    })),
   ];
   const perPage = 6;
   const page = Math.floor(s.barnCursor / perPage);
   const start = page * perPage;
 
-  // 3x2 grid cleanly centered inside /6[8]'s lower parchment panel (between Left arrow x=13 and Right arrow x=211)
+  // Clean left/right arrows without J2ME '4'/'6' keypad digits
+  drawCleanArrowButton(ctx, 16, 189, 'left');
+  drawCleanArrowButton(ctx, 224, 189, 'right');
+
+  // 3x2 grid cleanly centered inside /6[8]'s lower parchment panel
   for (let i = 0; i < perPage && start + i < allSlots.length; i += 1) {
     const idx = start + i;
     const it = allSlots[idx];
@@ -956,28 +1233,32 @@ function renderBarn(ctx) {
       const sp82 = getSpriteBlock(82, 0);
       if (sp82) drawBSpriteBlockFrameScaled(ctx, sp82.sprite, sp82.moduleImages, 0, cx + 28, cy + 24, 34, 30);
     } else {
-      const ui2 = getUiSpriteBlock(2);
-      if (ui2) drawBSpriteBlockFrameScaled(ctx, ui2.sprite, ui2.moduleImages, idx % ui2.sprite.frames.length, cx + 28, cy + 24, 30, 28);
+      const itemSp = getAnySpriteBlock(it.iconBlock);
+      if (itemSp) {
+        const frm = Math.max(0, Math.min(itemSp.sprite.frames.length - 1, it.iconFrame));
+        drawBSpriteBlockFrameScaled(ctx, itemSp.sprite, itemSp.moduleImages, frm, cx + 28, cy + 24, 30, 28);
+      }
     }
     drawText(ctx, it.name, cx + 28, cy + 50, { align: 'center', size: 6, color: '#3a1f08', bold: true, maxWidth: 52 });
     drawText(ctx, it.isUpgrade ? `${it.price} Xu` : `x${it.qty} · +${it.price} Xu`, cx + 28, cy + 63, {
       align: 'center', size: 6, color: it.isUpgrade ? '#8c4b18' : '#1c6b1c', bold: true, maxWidth: 52,
     });
   }
-  drawText(ctx, 'Q: Bán hết · Chạm ô bán', SCREEN_W / 2, 306, { align: 'center', size: 8, color: '#4a2508', bold: true });
+  drawText(ctx, 'Chạm ✔ Bán hết · Chạm ô để bán', SCREEN_W / 2, 306, { align: 'center', size: 7, color: '#4a2508', bold: true });
 }
 
 function getManorCards(s) {
   const rooms = (s.catalog.buildings || []).filter(b => b.isManorRoom);
   return [
     { kind: 'tool_plow', title: 'Cuốc cày đất', desc: 'Chạm bãi cỏ để cày ô đất trồng cây mới (10 Xu/ô).', btn: s.activeTool === 'plow' ? 'TẮT CUỐC' : 'DÙNG CUỐC', spriteBlock: 6, frame: 0 },
-    { kind: 'tool_clear', title: 'Rìu dọn cỏ & đá', desc: 'Dọn bụi cây & đá lấy đất trống (+15 Xu).', btn: s.activeTool === 'clear' ? 'TẮT RÌU' : 'DÙNG RÌU', spriteBlock: 14, frame: 16 },
+    { kind: 'tool_clear', title: 'Rìu dọn cỏ & đá', desc: 'Dọn bụi cây & đá lấy đất trống (+15 Xu).', btn: s.activeTool === 'clear' ? 'TẮT RÌU' : 'DÙNG RÌU', spriteBlock: 139, frame: 0 },
     { kind: 'open_kitchen', title: 'Nhà bếp (83 món)', desc: 'Chế biến nông sản thành bánh, súp, bột bán giá cao.', btn: 'VÀO BẾP', spriteBlock: 132, frame: 0 },
     { kind: 'open_barn', title: 'Kho thóc', desc: `Lưu trữ & bán nông sản (Sức chứa: ${s.barnCapacity} chỗ).`, btn: 'MỞ KHO', spriteBlock: 82, frame: 0 },
     { kind: 'open_neighbors', title: '10 Hàng xóm', desc: 'Sang thăm trực tiếp 10 trang trại bạn bè và giúp việc.', btn: 'ĐI THĂM', spriteBlock: 86, frame: 0 },
     { kind: 'open_collections', title: 'Phòng sưu tập', desc: 'Trưng bày & bán 15 cổ vật quý tìm được khi làm vườn.', btn: 'XEM TỦ ĐỒ', spriteBlock: 129, frame: 0 },
     { kind: 'open_mailbox', title: 'Hòm thư', desc: 'Nhận quà khởi nghiệp & giao đơn hàng cho hàng xóm.', btn: 'ĐỌC THƯ', spriteBlock: 83, frame: 0 },
-    { kind: 'open_land', title: 'Mở rộng đất', desc: `Đã mở ${s.unlockedZones?.length || 1}/6 khu đất trang trại.`, btn: 'MUA ĐẤT', spriteBlock: 6, frame: 0 },
+    { kind: 'open_land', title: 'Mở rộng đất', desc: `Đã mở ${s.unlockedZones?.length || 1}/6 khu đất trang trại.`, btn: 'MUA ĐẤT', uiBlock: 4, uiFrame: 2 },
+    { kind: 'toggle_audio', title: 'Nhạc & Âm thanh', desc: 'Bật hoặc tắt nhạc nền và hiệu ứng âm thanh.', btn: app.audioEnabled ? 'ĐANG BẬT (TẮT)' : 'ĐANG TẮT (BẬT)', uiBlock: 20, uiFrame: 109 },
     ...rooms.map((r) => {
       const done = !!s.unlockedRooms?.[r.entityId];
       const cost = Math.max(150, Math.min(5000, r.repairCost || 300));
@@ -994,16 +1275,16 @@ function getManorCards(s) {
   ];
 }
 
-// --- 1:1 ORIGINAL GAMELOFT /6[14] MANOR SHOWCASE SCREEN (CLEAN BANNER + CARD + ACTION BUTTON!) ---
+// --- 1:1 ORIGINAL GAMELOFT /6[14] MANOR & PAUSE MENU SCREEN ---
 function renderManor(ctx) {
   const s = app.session;
   ctx.fillStyle = '#3c2512';
   ctx.fillRect(0, 0, SCREEN_W, SCREEN_H);
 
-  // Render clean structural /6[14] widgets (parchment backdrop 22, ribbon 33, Manor banner 15, back button 12)
+  // Render clean structural /6[14] widgets (skip oversized clipped portrait 15 — draw it cleanly below header!)
   const w14 = getUIScreen(14);
   drawOriginalUIScreen(ctx, w14, getAnySpriteBlock, {
-    filterWidget: (w) => w.type === 205 && (w.spriteId === 22 || w.spriteId === 33 || w.spriteId === 15 || w.spriteId === 12),
+    filterWidget: (w) => w.type === 205 && (w.spriteId === 22 || w.spriteId === 33 || w.spriteId === 12),
   });
 
   const cards = getManorCards(s);
@@ -1015,7 +1296,15 @@ function renderManor(ctx) {
   ctx.fillRect(16, 6, 208, 26);
   ctx.strokeStyle = '#d4a259';
   ctx.strokeRect(16.5, 6.5, 207, 25);
-  drawText(ctx, `DINH THỰ & CÔNG CỤ (${idx + 1}/${cards.length})`, SCREEN_W / 2, 22, { align: 'center', size: 8, color: '#fff7d1', bold: true });
+  drawText(ctx, `MENU & DINH THỰ (${idx + 1}/${cards.length})`, SCREEN_W / 2, 22, { align: 'center', size: 8, color: '#fff7d1', bold: true });
+
+  // Farmer/Uncle portrait cleanly positioned BELOW title bar so hat & head are never clipped
+  const uncle = getUiSpriteBlock(15);
+  if (uncle) {
+    drawBSpriteBlockFrameScaled(ctx, uncle.sprite, uncle.moduleImages, 1, 44, 62, 44, 52);
+  }
+  drawText(ctx, `Cấp ${s.level} · ${s.coins} Xu`, 138, 60, { align: 'center', size: 8, color: '#4a2508', bold: true });
+  drawText(ctx, `Năng lượng: ${s.energy}/${s.maxEnergy}`, 138, 74, { align: 'center', size: 7, color: '#6b3e14', bold: true });
 
   // Clean parchment showcase card strictly inside x=24..216, y=94..256
   ctx.fillStyle = '#faebc8';
@@ -1028,8 +1317,13 @@ function renderManor(ctx) {
   drawText(ctx, cur.title, 120, 114, { align: 'center', size: 10, color: '#3a1f08', bold: true, maxWidth: 165 });
 
   // Original BSprite centered cleanly in showcase frame
-  const sp = getSpriteBlock(cur.spriteBlock, 0);
-  if (sp) drawBSpriteBlockFrameScaled(ctx, sp.sprite, sp.moduleImages, cur.frame, 120, 152, 72, 52);
+  if (cur.uiBlock != null) {
+    const uisp = getUiSpriteBlock(cur.uiBlock);
+    if (uisp) drawBSpriteBlockFrameScaled(ctx, uisp.sprite, uisp.moduleImages, cur.uiFrame ?? 0, 120, 152, 64, 48);
+  } else {
+    const sp = getSpriteBlock(cur.spriteBlock, 0);
+    if (sp) drawBSpriteBlockFrameScaled(ctx, sp.sprite, sp.moduleImages, cur.frame, 120, 152, 72, 52);
+  }
 
   wrapLines(cur.desc, 28).slice(0, 2).forEach((ln, i) => {
     drawText(ctx, ln, 120, 192 + i * 11, { align: 'center', size: 7, color: '#4a290c', bold: true });
@@ -1051,8 +1345,9 @@ function renderManor(ctx) {
 function renderCoop(ctx) {
   const s = app.session;
   const isChicken = s.coopFilter === 'chicken';
+  const lookup = s.catalog.allAnimals || s.catalog.animals || [];
   const animals = s.animals.filter(a => {
-    const spec = s.catalog.animals.find(sp => sp.id === a.animalId);
+    const spec = lookup.find(sp => sp.id === a.animalId);
     return isChicken ? (spec?.kind === 'chicken' || a.worldBlock === 8) : (spec?.kind !== 'chicken' && a.worldBlock !== 8);
   });
   const rows = [
@@ -1072,8 +1367,8 @@ function renderCoop(ctx) {
 function renderMailbox(ctx) {
   const s = app.session;
   const rows = (s.neighborMail || []).map(m => ({
-    left: `${m.from}: ${m.subject}`,
-    right: m.claimed ? 'ĐÃ NHẬN' : m.kind === 'gift' ? `+${m.giftCoins}G` : `GIAO +${m.giftCoins}G`,
+    left: m.kind === 'gift' ? `${m.from}: Quà khởi nghiệp` : `${m.from}: Giao ${m.needQty} nông sản`,
+    right: m.claimed ? 'ĐÃ NHẬN' : m.kind === 'gift' ? `+${m.giftCoins} Xu` : `GIAO +${m.giftCoins} Xu`,
     rightColor: m.claimed ? 'gold' : 'green',
     spriteBlock: 83,
     spriteFrame: 0,
@@ -1087,7 +1382,7 @@ function renderCollections(ctx) {
     const qty = s.collections?.[c.id] || 0;
     return {
       left: `${c.name} (Có: ${qty})`,
-      right: qty > 0 ? `Bán +${c.sellPrice}G` : `Lv.${c.minLevel}`,
+      right: qty > 0 ? `Bán +${c.sellPrice} Xu` : `Lv.${c.minLevel}`,
       locked: qty === 0,
       rightColor: qty > 0 ? 'green' : 'gold',
     };
@@ -1100,6 +1395,7 @@ function renderFrame(ctx, now) {
   previousFrameAt = timing.now;
   app.session.frame += 1;
   app.session.lastFrameAt = timing.now;
+  flushSfxQueue(app.session);
   const v = app.session.view;
   if (v === SOURCE_VIEW.OPENING_SCRIPT) renderOpeningEvidence(ctx);
   else if (v === SOURCE_VIEW.SHOP) renderShop(ctx);
@@ -1168,6 +1464,7 @@ function onPointerUp(event) {
 }
 
 function handlePanelAction(s, idx) {
+  playSfx('click');
   const v = s.view;
   if (v === SOURCE_VIEW.SHOP) {
     const list = getShopItems(s);
@@ -1179,8 +1476,10 @@ function handlePanelAction(s, idx) {
     } else if (s.shopTab === 'crops') {
       if (s.level >= item.unlockLevel) {
         s.selectedCropId = item.id;
-        s.toast = `Đã chọn giống ${item.name} — chạm ô đất để gieo!`;
-        s.toastMs = 2200;
+        s.activeTool = 'plant';
+        s.placementItem = null;
+        s.toast = `Đã chọn giống ${item.name} — chạm ô đất để gieo (Esc hủy)!`;
+        s.toastMs = 2600;
         s.view = SOURCE_VIEW.WORLD_LAYER;
       } else {
         s.toast = `${item.name} mở khóa ở Cấp ${item.unlockLevel}!`;
@@ -1218,14 +1517,32 @@ function handlePanelAction(s, idx) {
       saveSession();
     }
   } else if (v === SOURCE_VIEW.BARN) {
-    if (idx === 0) { upgradeBarn(s); saveSession(); }
-    else {
+    if (s.barnTab === 'upgrade') {
+      if (idx === 0) upgradeBarn(s);
+      else if (idx === 1) upgradeCoop(s, 'chicken');
+      else if (idx === 2) upgradeCoop(s, 'livestock');
+      else if (idx === 3) sellAllGoods(s);
+      saveSession();
+    } else if (idx === 0) {
+      upgradeBarn(s);
+      saveSession();
+    } else {
       const item = [...s.inventory.values()][idx - 1];
       if (item) { sellGood(s, item.id, item.qty); saveSession(); }
     }
   } else if (v === SOURCE_VIEW.KITCHEN) {
-    const recipe = (s.catalog.recipes || [])[idx];
-    if (recipe) { startKitchenRecipe(s, recipe.id); saveSession(); }
+    if (s.kitchenTab === 'stoves') {
+      const job = (s.kitchenQueue || [])[idx];
+      if (job?.ready) { collectKitchenDish(s, job.uid); saveSession(); }
+      else if (job) {
+        const rem = Math.max(0, Math.ceil((job.cookMs - job.progressMs) / 1000));
+        s.toast = `${job.name} đang nấu (còn ${rem}s)...`;
+        s.toastMs = 1500;
+      }
+    } else {
+      const recipe = (s.catalog.recipes || [])[idx];
+      if (recipe) { startKitchenRecipe(s, recipe.id); saveSession(); }
+    }
   } else if (v === SOURCE_VIEW.MANOR) {
     const cards = getManorCards(s);
     const cur = cards[((idx % cards.length) + cards.length) % cards.length];
@@ -1238,19 +1555,26 @@ function handlePanelAction(s, idx) {
       s.activeTool = s.activeTool === 'clear' ? 'auto' : 'clear';
       s.placementItem = null;
       s.view = SOURCE_VIEW.WORLD_LAYER;
-    } else if (cur.kind === 'open_barn') { s.barnCursor = 0; s.view = SOURCE_VIEW.BARN; }
-    else if (cur.kind === 'open_kitchen') { s.panelCursor = 0; s.view = SOURCE_VIEW.KITCHEN; }
-    else if (cur.kind === 'open_collections') { s.panelCursor = 0; s.view = SOURCE_VIEW.COLLECTIONS; }
-    else if (cur.kind === 'open_mailbox') { s.panelCursor = 0; s.view = SOURCE_VIEW.MAILBOX; }
-    else if (cur.kind === 'open_neighbors') { s.panelCursor = 0; s.view = SOURCE_VIEW.NEIGHBORS; }
-    else if (cur.kind === 'open_land') { s.shopTab = 'land'; s.shopCursor = 0; s.view = SOURCE_VIEW.SHOP; }
+    } else if (cur.kind === 'open_barn') { s.parentView = SOURCE_VIEW.MANOR; s.barnTab = 'goods'; s.barnCursor = 0; s.view = SOURCE_VIEW.BARN; }
+    else if (cur.kind === 'open_kitchen') { s.parentView = SOURCE_VIEW.MANOR; s.kitchenTab = 'recipes'; s.panelCursor = 0; s.view = SOURCE_VIEW.KITCHEN; }
+    else if (cur.kind === 'open_collections') { s.parentView = SOURCE_VIEW.MANOR; s.panelCursor = 0; s.view = SOURCE_VIEW.COLLECTIONS; }
+    else if (cur.kind === 'open_mailbox') { s.parentView = SOURCE_VIEW.MANOR; s.panelCursor = 0; s.view = SOURCE_VIEW.MAILBOX; }
+    else if (cur.kind === 'open_neighbors') { s.parentView = SOURCE_VIEW.MANOR; s.panelCursor = 0; s.view = SOURCE_VIEW.NEIGHBORS; }
+    else if (cur.kind === 'open_land') { s.parentView = SOURCE_VIEW.MANOR; s.shopTab = 'land'; s.shopCursor = 0; s.view = SOURCE_VIEW.SHOP; }
+    else if (cur.kind === 'toggle_audio') {
+      app.audioEnabled = !app.audioEnabled;
+      setAudioEnabled(app.audioEnabled);
+      s.toast = app.audioEnabled ? '🔊 Đã bật âm thanh & nhạc!' : '🔇 Đã tắt âm thanh!';
+      s.toastMs = 1600;
+    }
     else if (cur.kind === 'repair_room') { repairManorRoom(s, cur.entityId); saveSession(); }
   } else if (v === SOURCE_VIEW.COOP) {
-    if (idx === 0) { s.shopTab = 'animals'; s.shopCursor = 0; s.view = SOURCE_VIEW.SHOP; }
+    if (idx === 0) { s.parentView = SOURCE_VIEW.COOP; s.shopTab = 'animals'; s.shopCursor = 0; s.view = SOURCE_VIEW.SHOP; }
     else {
       const isChicken = s.coopFilter === 'chicken';
+      const lookup = s.catalog.allAnimals || s.catalog.animals || [];
       const list = s.animals.filter(a => {
-        const spec = s.catalog.animals.find(sp => sp.id === a.animalId);
+        const spec = lookup.find(sp => sp.id === a.animalId);
         return isChicken ? (spec?.kind === 'chicken' || a.worldBlock === 8) : (spec?.kind !== 'chicken' && a.worldBlock !== 8);
       });
       const animal = list[idx - 1];
@@ -1267,6 +1591,7 @@ function handlePanelAction(s, idx) {
     if (q) { claimQuestReward(s, q.id); saveSession(); }
   } else if (v === SOURCE_VIEW.NEIGHBORS) {
     // ACTUALLY TRAVEL TO THE NEIGHBOR'S REAL FARM (pack10[5..14])!
+    s.parentView = null;
     visitNeighborFarm(s, idx, sourceWorld);
     saveSession();
   }
@@ -1284,42 +1609,52 @@ function handleTap(x, y, event) {
   if (s.view !== SOURCE_VIEW.WORLD_LAYER) {
     // Bottom-right original ⬅ Back button (x >= 196, y >= 282)
     if (x >= 196 && y >= 282) {
-      s.view = SOURCE_VIEW.WORLD_LAYER;
+      playSfx('click');
+      const nextView = s.parentView || SOURCE_VIEW.WORLD_LAYER;
+      s.parentView = null;
+      s.view = nextView;
       event.preventDefault();
       return;
     }
     // Bottom-left original ✔ Confirm button (x <= 44, y >= 282)
     if (x <= 44 && y >= 282) {
-      const idx = s.view === SOURCE_VIEW.SHOP ? s.shopCursor
-        : s.view === SOURCE_VIEW.BARN ? s.barnCursor
-        : s.view === SOURCE_VIEW.QUESTS ? s.questCursor
-        : s.panelCursor;
-      handlePanelAction(s, idx);
+      if (s.view === SOURCE_VIEW.BARN && s.barnTab !== 'upgrade') {
+        sellAllGoods(s);
+        saveSession();
+      } else {
+        const idx = s.view === SOURCE_VIEW.SHOP ? s.shopCursor
+          : s.view === SOURCE_VIEW.BARN ? s.barnCursor
+          : s.view === SOURCE_VIEW.QUESTS ? s.questCursor
+          : s.panelCursor;
+        handlePanelAction(s, idx);
+      }
       event.preventDefault();
       return;
     }
 
     if (s.view === SOURCE_VIEW.SHOP) {
-      // 4 real /6[2] Shop Tabs (x=31, 76, 121, 166; y=48..82)
-      if (y >= 46 && y <= 82 && x >= 26 && x <= 212) {
-        const tabIds = ['crops', 'trees', 'animals', 'decor'];
-        const tIdx = Math.max(0, Math.min(3, Math.floor((x - 28) / 45)));
+      // 5 clean Shop Tabs (x=24..216; y=48..80)
+      if (y >= 46 && y <= 84 && x >= 20 && x <= 220) {
+        const tabIds = ['crops', 'trees', 'animals', 'land', 'decor'];
+        const tIdx = Math.max(0, Math.min(4, Math.floor((x - 22) / 39)));
         s.shopTab = tabIds[tIdx];
         s.shopCursor = 0;
+        playSfx('click');
         event.preventDefault();
         return;
       }
-      if (y >= 284 && x > 44 && x < 196) {
+      if (y >= 278 && x > 44 && x < 196) {
         const list = getShopItems(s);
         const pages = Math.max(1, Math.ceil(list.length / 4));
         const curPage = Math.floor(s.shopCursor / 4);
         const nextPage = x < SCREEN_W / 2 ? (curPage - 1 + pages) % pages : (curPage + 1) % pages;
         s.shopCursor = nextPage * 4;
+        playSfx('click');
         event.preventDefault();
         return;
       }
       // 2x2 real /6[2] Card Grid click ((31,85), (126,85), (31,182), (126,182))
-      if (y >= 84 && y <= 278 && x >= 24 && x <= 220) {
+      if (y >= 84 && y <= 276 && x >= 24 && x <= 220) {
         const col = x < 122 ? 0 : 1;
         const row = y < 180 ? 0 : 1;
         const page = Math.floor(s.shopCursor / 4);
@@ -1335,18 +1670,36 @@ function handleTap(x, y, event) {
 
     if (s.view === SOURCE_VIEW.KITCHEN) {
       // Tap top header to collect any ready dish!
-      if (y <= 48) {
+      if (y <= 44) {
         const readyJob = (s.kitchenQueue || []).find(j => j.ready);
         if (readyJob) { collectKitchenDish(s, readyJob.uid); saveSession(); }
         event.preventDefault();
         return;
       }
-      if (y >= 284 && x > 44 && x < 196) {
+      // 2 Kitchen tabs: Recipes (left) & Stoves (right)
+      if (y >= 46 && y <= 84) {
+        s.kitchenTab = x < SCREEN_W / 2 ? 'recipes' : 'stoves';
+        s.panelCursor = 0;
+        playSfx('click');
+        event.preventDefault();
+        return;
+      }
+      if (s.kitchenTab === 'stoves') {
+        if (y >= 88 && y <= 272 && x >= 20 && x <= 220) {
+          const col = x < 120 ? 0 : 1;
+          const row = y < 178 ? 0 : 1;
+          handlePanelAction(s, row * 2 + col);
+        }
+        event.preventDefault();
+        return;
+      }
+      if (y >= 278 && x > 44 && x < 196) {
         const recipes = s.catalog.recipes || [];
         const pages = Math.max(1, Math.ceil(recipes.length / 6));
         const curPage = Math.floor(s.panelCursor / 6);
         const nextPage = x < SCREEN_W / 2 ? (curPage - 1 + pages) % pages : (curPage + 1) % pages;
         s.panelCursor = nextPage * 6;
+        playSfx('click');
         event.preventDefault();
         return;
       }
@@ -1366,16 +1719,37 @@ function handleTap(x, y, event) {
     }
 
     if (s.view === SOURCE_VIEW.BARN) {
-      const totalItems = s.inventory.size + 1;
-      const pages = Math.max(1, Math.ceil(totalItems / 6));
-      const curPage = Math.floor(s.barnCursor / 6);
-      if (y >= 140 && y <= 220 && x <= 28) {
-        s.barnCursor = ((curPage - 1 + pages) % pages) * 6;
+      // 2 Barn tabs (Goods vs Upgrades)
+      if (y >= 48 && y <= 94 && x >= 12 && x <= 124) {
+        s.barnTab = x < 68 ? 'goods' : 'upgrade';
+        s.barnCursor = 0;
+        playSfx('click');
         event.preventDefault();
         return;
       }
-      if (y >= 140 && y <= 220 && x >= 210) {
+      if (s.barnTab === 'upgrade') {
+        if (y >= 110 && y <= 268 && x >= 26 && x <= 214) {
+          const col = x < 120 ? 0 : 1;
+          const row = y < 188 ? 0 : 1;
+          const idx = row * 2 + col;
+          s.barnCursor = idx;
+          handlePanelAction(s, idx);
+        }
+        event.preventDefault();
+        return;
+      }
+      const totalItems = s.inventory.size + 1;
+      const pages = Math.max(1, Math.ceil(totalItems / 6));
+      const curPage = Math.floor(s.barnCursor / 6);
+      if (y >= 140 && y <= 220 && x <= 30) {
+        s.barnCursor = ((curPage - 1 + pages) % pages) * 6;
+        playSfx('click');
+        event.preventDefault();
+        return;
+      }
+      if (y >= 140 && y <= 220 && x >= 208) {
         s.barnCursor = ((curPage + 1) % pages) * 6;
+        playSfx('click');
         event.preventDefault();
         return;
       }
@@ -1394,17 +1768,19 @@ function handleTap(x, y, event) {
 
     if (s.view === SOURCE_VIEW.MANOR) {
       const cards = getManorCards(s);
-      if (x <= 48 && y >= 100 && y <= 220) {
+      if (x <= 52 && y >= 100 && y <= 220) {
         s.panelCursor = (s.panelCursor - 1 + cards.length) % cards.length;
+        playSfx('click');
         event.preventDefault();
         return;
       }
-      if (x >= 192 && y >= 100 && y <= 220) {
+      if (x >= 188 && y >= 100 && y <= 220) {
         s.panelCursor = (s.panelCursor + 1) % cards.length;
+        playSfx('click');
         event.preventDefault();
         return;
       }
-      if (y >= 205 && y <= 255 && x >= 76 && x <= 190) {
+      if (y >= 210 && y <= 254 && x >= 60 && x <= 184) {
         handlePanelAction(s, s.panelCursor);
         event.preventDefault();
         return;
@@ -1417,18 +1793,21 @@ function handleTap(x, y, event) {
       if (y >= 36 && y <= 55) {
         s.view = x < SCREEN_W / 2 ? SOURCE_VIEW.QUESTS : SOURCE_VIEW.NEIGHBORS;
         s.panelCursor = 0;
+        playSfx('click');
         event.preventDefault();
         return;
       }
-      if (s.view === SOURCE_VIEW.NEIGHBORS && y >= 58 && y <= 276) {
+      if (s.view === SOURCE_VIEW.NEIGHBORS && y >= 56 && y <= 280) {
         const list = s.catalog.neighbors || [];
         const start = Math.max(0, Math.min(Math.max(0, list.length - 8), s.panelCursor - 3));
-        const idx = start + Math.floor((y - 58) / 27);
+        const rowSlot = Math.max(0, Math.min(7, Math.floor((y - 58) / 27)));
+        const idx = start + rowSlot;
         if (idx >= 0 && idx < list.length) { s.panelCursor = idx; handlePanelAction(s, idx); }
-      } else if (s.view === SOURCE_VIEW.QUESTS && y >= 142 && y <= 276) {
+      } else if (s.view === SOURCE_VIEW.QUESTS && y >= 140 && y <= 280) {
         const list = s.quests || [];
         const start = Math.max(0, Math.min(Math.max(0, list.length - 5), s.questCursor - 2));
-        const idx = start + Math.floor((y - 142) / 26);
+        const rowSlot = Math.max(0, Math.min(4, Math.floor((y - 142) / 26)));
+        const idx = start + rowSlot;
         if (idx >= 0 && idx < list.length) {
           s.questCursor = idx;
           if (list[idx].completed && !list[idx].claimed) handlePanelAction(s, idx);
@@ -1439,7 +1818,7 @@ function handleTap(x, y, event) {
     }
 
     // Standard Parchment Lists (Barn, Manor, Coop, Mailbox, Collections, Seed Picker)
-    if (y >= 40 && y <= 276) {
+    if (y >= 40 && y <= 278) {
       const cur = s.view === SOURCE_VIEW.BARN ? s.barnCursor : s.panelCursor;
       const start = Math.max(0, cur - 4);
       const idx = start + Math.floor((y - 40) / 26);
@@ -1457,14 +1836,17 @@ function handleTap(x, y, event) {
     const count = fieldCrops.length;
     if (x >= 198 && y >= 278) {
       s.seedCarousel = null;
+      playSfx('click');
       event.preventDefault();
       return;
     }
-    if (y >= 254 && x >= 44 && x < 198 && count > 0) {
-      if (x < 102) {
+    if (y >= 254 && x >= 40 && x < 198 && count > 0) {
+      if (x < 100) {
         s.seedCarousel.index = (s.seedCarousel.index - 1 + count) % count;
-      } else if (x > 148) {
+        playSfx('click');
+      } else if (x > 146) {
         s.seedCarousel.index = (s.seedCarousel.index + 1) % count;
+        playSfx('click');
       } else {
         const chosen = fieldCrops[s.seedCarousel.index];
         const sc = s.seedCarousel;
@@ -1494,31 +1876,39 @@ function handleTap(x, y, event) {
     const nextIdx = (levels.findIndex(z => Math.abs(z - (s.worldZoom || 1)) < 0.05) + 1) % levels.length;
     s.worldZoom = levels[nextIdx];
     clampWorldCamera(s, sourceWorld?.tileMap);
+    playSfx('click');
     event.preventDefault();
     return;
   }
   // Top-right Pause/Menu icon [41]
-  if (x >= 198 && y <= 40) {
+  if (x >= 198 && y <= 39) {
+    s.parentView = null;
     s.panelCursor = 0;
     s.view = SOURCE_VIEW.MANOR;
+    playSfx('click');
     event.preventDefault();
     return;
   }
   // Return Home button when visiting a neighbor
   if (s.visitingNeighbor && x >= 152 && y >= SCREEN_H - 40) {
+    playSfx('click');
     returnHomeFarm(s, sourceWorld?.tileMap);
     event.preventDefault();
     return;
   }
   // Bottom-left Clipboard/Quest icon [52]+[63]
   if (x <= 68 && y >= 274) {
+    s.parentView = null;
     s.view = SOURCE_VIEW.QUESTS;
+    playSfx('click');
     event.preventDefault();
     return;
   }
   // Bottom-right Market Stand icon [67]
   if (!s.visitingNeighbor && x >= 192 && y >= 274) {
+    s.parentView = null;
     s.view = SOURCE_VIEW.SHOP;
+    playSfx('click');
     event.preventDefault();
     return;
   }
@@ -1575,12 +1965,33 @@ function handleTap(x, y, event) {
     return;
   }
 
-  // Buildings (cat 50)
-  const hitBuilding = (sourceWorld?.farmEntities || []).find(
-    e => e.category === 50 && !(e.entityId >= 0 && e.entityId <= 8) && Math.hypot(e.x - wx, (e.y - 14) - wy) <= 34,
-  );
-  if (hitBuilding) {
-    setFarmerWalkTarget(s, hitBuilding.x, hitBuilding.y + 22, { type: 'building', entityId: hitBuilding.entityId });
+  // Plots (cat 49) take priority when planting or tending crops
+  let hitPlot = null;
+  let bestPlotDist = 28;
+  for (const plot of s.plots.values()) {
+    const px = plot.worldX ?? (plot.col * 36 + 18);
+    const py = plot.worldY ?? (plot.row * 18 + 9);
+    const visualY = plot.stage === 'tilled' ? py : (py - 8);
+    const d = Math.hypot((px - wx) * 0.75, visualY - wy);
+    if (d < bestPlotDist) { bestPlotDist = d; hitPlot = plot; }
+  }
+  if (hitPlot && s.activeTool === 'plant' && hitPlot.stage === 'tilled') {
+    const px = hitPlot.worldX ?? (hitPlot.col * 36 + 18);
+    const py = hitPlot.worldY ?? (hitPlot.row * 18 + 9);
+    const cropId = s.selectedCropId;
+    s.activeTool = 'auto';
+    setFarmerWalkTarget(s, px, py + 4, {
+      type: 'plant_seed', row: hitPlot.row, col: hitPlot.col, cropId,
+    });
+    saveSession();
+    event.preventDefault();
+    return;
+  }
+
+  // Buildings (cat 50) — walk to clear entrance outside building/Pond footprint
+  const hitB = findTargetBuilding(sourceWorld?.farmEntities, wx, wy, 'tap');
+  if (hitB) {
+    setFarmerWalkTarget(s, hitB.entity.x, hitB.entity.y + hitB.spec.approachDy, { type: 'building', entityId: hitB.entity.entityId });
     event.preventDefault();
     return;
   }
@@ -1603,15 +2014,6 @@ function handleTap(x, y, event) {
     return;
   }
 
-  // Plots (cat 49)
-  let hitPlot = null;
-  let bestDist = 28;
-  for (const plot of s.plots.values()) {
-    const px = plot.worldX ?? (plot.col * 36 + 18);
-    const py = plot.worldY ?? (plot.row * 18 + 9);
-    const d = Math.hypot(px - wx, py - wy);
-    if (d < bestDist) { bestDist = d; hitPlot = plot; }
-  }
   if (hitPlot) {
     s.cursorRow = hitPlot.row;
     s.cursorCol = hitPlot.col;
@@ -1669,8 +2071,11 @@ function onKeyDown(event) {
     return;
   }
   if (s.view !== SOURCE_VIEW.WORLD_LAYER) {
-    if (code === KEY.SK_RIGHT) {
-      s.view = SOURCE_VIEW.WORLD_LAYER;
+    if (code === KEY.SK_RIGHT || event.code === 'Escape' || event.key === 'Escape') {
+      const nextView = s.parentView || SOURCE_VIEW.WORLD_LAYER;
+      s.parentView = null;
+      s.view = nextView;
+      playSfx('click');
       event.preventDefault();
     } else if (code === KEY.SK_LEFT) {
       if (s.view === SOURCE_VIEW.SHOP) {
@@ -1692,13 +2097,17 @@ function onKeyDown(event) {
         const step = (code === KEY.UP || code === KEY.DOWN) ? delta * 2 : delta;
         s.shopCursor = (s.shopCursor + step + len) % len;
       } else if (s.view === SOURCE_VIEW.BARN) {
-        const len = Math.max(1, s.inventory.size + 1);
+        const len = s.barnTab === 'upgrade' ? 4 : Math.max(1, s.inventory.size + 1);
         s.barnCursor = (s.barnCursor + delta + len) % len;
       } else if (s.view === SOURCE_VIEW.QUESTS) {
         const len = Math.max(1, s.quests?.length || 1);
         s.questCursor = (s.questCursor + delta + len) % len;
+      } else if (s.view === SOURCE_VIEW.MANOR) {
+        const len = getManorCards(s).length;
+        s.panelCursor = (s.panelCursor + delta + len) % len;
       } else {
-        const len = s.view === SOURCE_VIEW.KITCHEN ? (s.catalog.recipes?.length || 1)
+        const len = s.view === SOURCE_VIEW.KITCHEN
+          ? (s.kitchenTab === 'stoves' ? 4 : (s.catalog.recipes?.length || 1))
           : s.view === SOURCE_VIEW.NEIGHBORS ? (s.catalog.neighbors?.length || 1) : 16;
         s.panelCursor = (s.panelCursor + delta + len) % len;
       }
@@ -1743,8 +2152,10 @@ function onKeyDown(event) {
       event.preventDefault();
       return;
     }
-    if (code === KEY.SK_RIGHT) {
+    if (code === KEY.SK_RIGHT || event.code === 'Escape' || event.key === 'Escape') {
       s.seedCarousel = null;
+      s.activeTool = 'auto';
+      playSfx('click');
       event.preventDefault();
       return;
     }
@@ -1753,6 +2164,13 @@ function onKeyDown(event) {
   if (code === KEY.UP || code === KEY.DOWN || code === KEY.LEFT || code === KEY.RIGHT) {
     const { vx, vy } = getHeldMoveVector();
     moveFarmerByVector(s, vx, vy, 55, tm);
+    event.preventDefault();
+    return;
+  }
+  if (event.code === 'Escape') {
+    s.activeTool = 'auto';
+    s.placementItem = null;
+    s.toast = '';
     event.preventDefault();
     return;
   }
@@ -1779,9 +2197,7 @@ function onKeyDown(event) {
       event.preventDefault();
       return;
     }
-    const nearBuilding = (sourceWorld?.farmEntities || []).find(
-      e => e.category === 50 && !(e.entityId >= 0 && e.entityId <= 8) && Math.hypot(e.x - fx, e.y - fy) <= 44,
-    );
+    const nearB = findTargetBuilding(sourceWorld?.farmEntities, fx, fy, 'key');
     const nearTree = (s.fruitTrees || []).find(t => t.ready && Math.hypot(t.worldX - fx, t.worldY - fy) <= 34);
     const nearAnimal = (s.animals || []).find(a => Math.hypot((a.worldX ?? a.col * 36 + 18) - fx, (a.worldY ?? a.row * 18 + 9) - fy) <= 32);
     let nearPlot = null; let bestD = 36;
@@ -1789,7 +2205,13 @@ function onKeyDown(event) {
       const d = Math.hypot((p.worldX ?? p.col * 36 + 18) - fx, (p.worldY ?? p.row * 18 + 9) - fy);
       if (d < bestD) { bestD = d; nearPlot = p; }
     }
-    if (nearPlot) {
+    if (nearPlot && s.activeTool === 'plant' && nearPlot.stage === 'tilled') {
+      const cropId = s.selectedCropId;
+      s.activeTool = 'auto';
+      setFarmerWalkTarget(s, nearPlot.worldX ?? fx, (nearPlot.worldY ?? fy) + 4, {
+        type: 'plant_seed', row: nearPlot.row, col: nearPlot.col, cropId,
+      });
+    } else if (nearPlot) {
       setFarmerWalkTarget(s, nearPlot.worldX ?? fx, (nearPlot.worldY ?? fy) + 6, {
         type: 'tile', row: nearPlot.row, col: nearPlot.col, worldX: nearPlot.worldX, worldY: nearPlot.worldY,
         openSeedPicker: nearPlot.stage === 'tilled',
@@ -1798,22 +2220,29 @@ function onKeyDown(event) {
       setFarmerWalkTarget(s, nearTree.worldX, nearTree.worldY + 8, { type: 'tree', uid: nearTree.uid });
     } else if (nearAnimal) {
       setFarmerWalkTarget(s, nearAnimal.worldX ?? fx, (nearAnimal.worldY ?? fy) + 6, { type: 'animal', uid: nearAnimal.uid });
-    } else if (nearBuilding) {
-      setFarmerWalkTarget(s, nearBuilding.x, nearBuilding.y + 20, { type: 'building', entityId: nearBuilding.entityId });
+    } else if (nearB) {
+      const tx = isWalkBlocked(fx, fy) ? nearB.entity.x : fx;
+      const ty = isWalkBlocked(fx, fy) ? (nearB.entity.y + nearB.spec.approachDy) : fy;
+      setFarmerWalkTarget(s, tx, ty, { type: 'building', entityId: nearB.entity.entityId });
     } else {
       setFarmerWalkTarget(s, fx, fy, { type: 'tile', row: s.cursorRow, col: s.cursorCol, worldX: fx, worldY: fy });
     }
     saveSession();
   } else if (code === KEY.SK_LEFT) {
+    s.parentView = null;
     s.view = SOURCE_VIEW.QUESTS;
   } else if (code === KEY.SK_RIGHT) {
+    s.parentView = null;
     s.view = SOURCE_VIEW.SHOP;
   } else return;
   event.preventDefault();
 }
 
 function setAudioEnabled(enabled) {
+  if (typeof Audio === 'undefined') return;
   if (!audioElement) {
+    const probe = new Audio();
+    if (!probe.canPlayType?.('audio/midi')) return;
     audioElement = new Audio(new URL('assets/audio/gf3_b000.mid', import.meta.url));
     audioElement.loop = true;
   }
@@ -1830,7 +2259,7 @@ if (typeof window !== 'undefined') {
       ? restoreFarmSession(savedRaw, sourceWorld, textData)
       : createFarmSession(sourceWorld, textData);
     canvasEl.tabIndex = 0;
-    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keydown', onKeyDown, true);
     window.addEventListener('keyup', onKeyUp);
     window.addEventListener('blur', () => heldKeys.clear());
     canvasEl.addEventListener('pointerdown', onPointerDown);
@@ -1838,9 +2267,41 @@ if (typeof window !== 'undefined') {
     canvasEl.addEventListener('pointerup', onPointerUp);
     canvasEl.addEventListener('pointercancel', onPointerUp);
     canvasEl.addEventListener('wheel', (e) => {
-      if (app.session?.view !== SOURCE_VIEW.WORLD_LAYER) return;
-      app.session.worldZoom = e.deltaY > 0 ? Math.max(0.75, (app.session.worldZoom || 0.85) - 0.1) : Math.min(1.0, (app.session.worldZoom || 0.85) + 0.1);
-      clampWorldCamera(app.session, sourceWorld?.tileMap);
+      const s = app.session;
+      if (!s) return;
+      if (s.view === SOURCE_VIEW.WORLD_LAYER) {
+        s.worldZoom = e.deltaY > 0 ? Math.max(0.75, (s.worldZoom || 1.0) - 0.1) : Math.min(1.0, (s.worldZoom || 1.0) + 0.1);
+        clampWorldCamera(s, sourceWorld?.tileMap);
+      } else {
+        const delta = e.deltaY > 0 ? 1 : -1;
+        if (s.view === SOURCE_VIEW.NEIGHBORS) {
+          const len = s.catalog.neighbors?.length || 1;
+          s.panelCursor = Math.max(0, Math.min(len - 1, s.panelCursor + delta));
+        } else if (s.view === SOURCE_VIEW.QUESTS) {
+          const len = s.quests?.length || 1;
+          s.questCursor = Math.max(0, Math.min(len - 1, s.questCursor + delta));
+        } else if (s.view === SOURCE_VIEW.SHOP) {
+          const len = getShopItems(s).length || 1;
+          const pages = Math.max(1, Math.ceil(len / 4));
+          const curP = Math.floor(s.shopCursor / 4);
+          s.shopCursor = ((curP + delta + pages) % pages) * 4;
+        } else if (s.view === SOURCE_VIEW.KITCHEN && s.kitchenTab !== 'stoves') {
+          const len = s.catalog.recipes?.length || 1;
+          const pages = Math.max(1, Math.ceil(len / 6));
+          const curP = Math.floor(s.panelCursor / 6);
+          s.panelCursor = ((curP + delta + pages) % pages) * 6;
+        } else if (s.view === SOURCE_VIEW.BARN && s.barnTab !== 'upgrade') {
+          const len = (s.inventory.size + 1) || 1;
+          const pages = Math.max(1, Math.ceil(len / 6));
+          const curP = Math.floor(s.barnCursor / 6);
+          s.barnCursor = ((curP + delta + pages) % pages) * 6;
+        } else if (s.view === SOURCE_VIEW.MANOR) {
+          const len = getManorCards(s).length;
+          s.panelCursor = (s.panelCursor + delta + len) % len;
+        } else {
+          s.panelCursor = Math.max(0, s.panelCursor + delta);
+        }
+      }
       e.preventDefault();
     }, { passive: false });
     window.addEventListener('keydown', (event) => {

@@ -212,6 +212,8 @@ export function decodeFarmCatalog(pack9, textData = {}) {
     index: idx,
     id: r[1],
     name: txt(r[2]) || `Vật phẩm #${r[1]}`,
+    iconBlock: r[3],
+    iconFrame: Math.max(0, r[4] || 0),
     buyPrice: Math.max(0, r[5] || 0),
     sellPrice: Math.max(8, r[7] || r[6] || 18),
   }));
@@ -240,6 +242,8 @@ export function decodeFarmCatalog(pack9, textData = {}) {
       sellPrice: good?.sellPrice ?? Math.max(15, Math.round(buyPrice * 1.8) + 6),
       xp: Math.max(2, Math.round((r[16] || 10) / 3)),
       harvestGoodId: good?.id ?? r[1],
+      harvestIconBlock: good?.iconBlock ?? (isTree ? 23 : 9),
+      harvestIconFrame: good?.iconFrame ?? Math.max(0, r[4] >= 12 ? r[4] - 12 : r[4]),
       // Port of a.java:13125-13134 & e.java:1625: col 9 is the /5 world BSprite block
       worldBlock: r[9],
       iconBlock: r[3],
@@ -247,27 +251,44 @@ export function decodeFarmCatalog(pack9, textData = {}) {
     };
   });
 
-  const animals = t0.rows
-    .filter((r) => txt(r[2]) && (r[6] > 0 || r[9] > 0))
-    .slice(0, 24)
+  const allAnimals = t0.rows
+    .filter((r) => txt(r[2]))
     .map((r) => {
       const name = txt(r[2]);
       const low = name.toLowerCase();
-      const prodGood = low.includes('gà') ? goods[1]
-        : (low.includes('bò') || low.includes('dê')) ? goods[2]
-        : low.includes('cừu') ? (goods.find(g => g.name.toLowerCase().includes('lông')) || goods[3])
-        : goods[1];
-      const kind = low.includes('gà') ? 'chicken' : 'livestock';
+      const prodKind = r[9];
+      let prodGood = goods[1];
+      let customProdName = null;
+      if (prodKind === 0 || low.includes('gà')) prodGood = goods[1];
+      else if (prodKind === 1 || low.includes('bò') || low.includes('bê')) prodGood = goods[2];
+      else if (prodKind === 2 || low.includes('heo') || low.includes('lợn')) {
+        prodGood = goods[110] || goods[5];
+        customProdName = 'Nấm cục';
+      } else if (prodKind === 3 || low.includes('dê')) {
+        prodGood = goods[2];
+        customProdName = 'Sữa dê';
+      } else if (prodKind === 4 || low.includes('cừu')) {
+        prodGood = goods[3];
+      } else if (low.includes('ngựa')) {
+        prodGood = goods[110] || goods[3];
+        customProdName = 'Nông sản quý';
+      }
+      const kind = (prodKind === 0 || low.includes('gà')) ? 'chicken' : 'livestock';
+      const rawPrice = r[6] || 0;
+      const buyPrice = rawPrice > 0 ? Math.max(100, rawPrice) : Math.max(100, r[9] > 0 ? r[9] * 150 : 200);
       return {
         id: r[1],
         name,
         kind,
-        buyPrice: Math.max(100, r[6] || r[9] || 200),
+        isPurchasable: rawPrice > 0,
+        buyPrice,
         prodSec: Math.max(12, Math.round((r[11] || 180) / 10)),
-        sellPrice: prodGood?.sellPrice ?? Math.max(25, Math.round((r[6] || 200) * 0.18)),
-        productGoodId: prodGood?.id ?? (r[1] + 2000),
-        productName: prodGood?.name ?? `Sản phẩm ${name}`,
-        xp: Math.max(5, Math.round((r[6] || 200) / 40)),
+        sellPrice: Math.max(prodGood?.sellPrice || 0, Math.round(buyPrice * 0.18), 28),
+        productGoodId: prodKind === 3 ? (r[1] + 2000) : (prodGood?.id ?? (r[1] + 2000)),
+        productName: customProdName ?? prodGood?.name ?? `Nông sản ${name}`,
+        productIconBlock: prodGood?.iconBlock ?? 2,
+        productIconFrame: prodGood?.iconFrame ?? 0,
+        xp: Math.max(5, Math.round(buyPrice / 40)),
         // Port of a.java:13457-13508: col 31 = /5 BSprite block, col 32 = palette, col 33 = idle frame
         worldBlock: r[31],
         paletteIndex: Math.max(0, r[32] || 0),
@@ -275,6 +296,7 @@ export function decodeFarmCatalog(pack9, textData = {}) {
         iconFrame: Math.max(0, r[4] || 0),
       };
     });
+  const animals = allAnimals.filter(a => a.isPurchasable);
 
   const buildings = t3.rows.map((r, idx) => ({
     entityId: idx,
@@ -303,10 +325,15 @@ export function decodeFarmCatalog(pack9, textData = {}) {
     const name = txt(r[2]) || `Món #${idx + 1}`;
     const ingList = [];
     const g1 = goods[r[6]];
-    if (g1 && r[7] > 0) ingList.push({ goodId: g1.id, name: g1.name, qty: r[7] });
+    if (g1 && r[7] > 0) {
+      ingList.push({ goodId: g1.id, name: g1.name, qty: r[7], iconBlock: g1.iconBlock, iconFrame: g1.iconFrame });
+    }
     const g2 = goods[r[9]];
-    if (g2 && r[10] > 0 && r[9] !== r[6]) ingList.push({ goodId: g2.id, name: g2.name, qty: r[10] });
-    const outGood = findGoodByName(name);
+    if (g2 && r[10] > 0) {
+      if (r[9] === r[6] && ingList.length > 0) ingList[0].qty += r[10];
+      else ingList.push({ goodId: g2.id, name: g2.name, qty: r[10], iconBlock: g2.iconBlock, iconFrame: g2.iconFrame });
+    }
+    const outGood = (r[18] >= 0 && r[18] < goods.length) ? goods[r[18]] : findGoodByName(name);
     return {
       index: idx,
       id: r[1],
@@ -315,8 +342,10 @@ export function decodeFarmCatalog(pack9, textData = {}) {
       cookSec: Math.max(6, (r[5] || 5) * 2),
       ingredients: ingList,
       outputGoodId: outGood?.id ?? r[1],
+      iconBlock: outGood?.iconBlock ?? 50,
+      iconFrame: outGood?.iconFrame ?? 0,
       sellPrice: outGood?.sellPrice ?? Math.max(35, (idx + 2) * 18),
-      xp: Math.max(5, Math.round((r[5] || 5) * 1.5)),
+      xp: Math.max(5, r[16] || Math.round((r[5] || 5) * 1.5)),
     };
   });
 
@@ -348,7 +377,7 @@ export function decodeFarmCatalog(pack9, textData = {}) {
 
   const levelXp = t26.rows.map((r) => Math.max(20, (r[1] || 30) * 2));
 
-  return { crops, goods, animals, buildings, decorations, recipes, neighbors, collectibles, quests, levelXp };
+  return { crops, goods, animals, allAnimals, buildings, decorations, recipes, neighbors, collectibles, quests, levelXp };
 }
 
 /**

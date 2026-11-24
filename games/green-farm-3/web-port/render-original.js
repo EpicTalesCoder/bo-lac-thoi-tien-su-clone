@@ -244,7 +244,7 @@ export async function loadSourceFrame({ manifestUrl, moduleBaseUrl }) {
  * applies resolveFModuleTransform and drawRegionMIDP for image modules (type 0)
  * and solid rectangles (type 0xFE), skipping markers (type 0xFD).
  */
-export function drawBSpriteBlockFrame(ctx, sprite, moduleImages, frameIndex, x, y, frameTransform = 0) {
+export function drawBSpriteBlockFrame(ctx, sprite, moduleImages, frameIndex, x, y, frameTransform = 0, skipModuleIndices = null) {
   if (!sprite || !Array.isArray(sprite.frames) || sprite.frames.length === 0) return null;
   const idx = Math.max(0, Math.min(sprite.frames.length - 1, frameIndex | 0));
   const frame = sprite.frames[idx];
@@ -252,6 +252,7 @@ export function drawBSpriteBlockFrame(ctx, sprite, moduleImages, frameIndex, x, 
   for (let p = 0; p < frame.fmoduleCount; p += 1) {
     const fmodule = sprite.fmodules[frame.firstFmodule + p];
     if (!fmodule) continue;
+    if (skipModuleIndices && skipModuleIndices.has(fmodule.moduleIndex)) continue;
     // Skip procedural / hyperframe flag 0x10 if encountered on non-image layers
     if (fmodule.flags & 0x10) continue;
     const module = sprite.modules[fmodule.moduleIndex];
@@ -357,9 +358,12 @@ export function drawBSpriteBlockAnim(ctx, sprite, moduleImages, animIndex, tick,
   );
 }
 
+const scaledFrameCache = new WeakMap();
+
 /**
  * Draw any decoded /5 or /7 BSprite frame proportionally scaled & centered inside a (maxW x maxH) UI box.
- * Prevents oversized world sprites from being cropped inside Shop/Barn/Manor cards.
+ * Composites multi-module frames onto a 1:1 scratch canvas before scaling so fractional scales never
+ * produce 1px seams between adjacent fmodules (e.g. /7[7] Quest portraits).
  */
 export function drawBSpriteBlockFrameScaled(ctx, sprite, moduleImages, frameIndex, cx, cy, maxW, maxH) {
   if (!sprite || !Array.isArray(sprite.frames) || sprite.frames.length === 0) return;
@@ -370,6 +374,30 @@ export function drawBSpriteBlockFrameScaled(ctx, sprite, moduleImages, frameInde
   const bx = b?.x ?? -(bw >> 1);
   const by = b?.y ?? -(bh >> 1);
   const scale = Math.min(1, maxW / bw, maxH / bh);
+
+  if (typeof document !== 'undefined' && scale < 0.999) {
+    let byIdx = scaledFrameCache.get(sprite);
+    if (!byIdx) {
+      byIdx = new Map();
+      scaledFrameCache.set(sprite, byIdx);
+    }
+    let scratch = byIdx.get(idx);
+    if (!scratch) {
+      scratch = document.createElement('canvas');
+      scratch.width = bw;
+      scratch.height = bh;
+      const sctx = scratch.getContext('2d');
+      sctx.imageSmoothingEnabled = false;
+      drawBSpriteBlockFrame(sctx, sprite, moduleImages, idx, -bx, -by, 0);
+      byIdx.set(idx, scratch);
+    }
+    const dw = Math.max(1, Math.round(bw * scale));
+    const dh = Math.max(1, Math.round(bh * scale));
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(scratch, 0, 0, bw, bh, Math.round(cx - dw / 2), Math.round(cy - dh / 2), dw, dh);
+    return;
+  }
+
   ctx.save();
   ctx.translate(Math.round(cx), Math.round(cy));
   ctx.scale(scale, scale);

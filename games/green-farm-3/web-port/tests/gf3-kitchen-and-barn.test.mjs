@@ -6,7 +6,8 @@ import { fileURLToPath } from 'node:url';
 import { loadOriginalWorldResources } from '../gf3-resource-loader.js';
 import {
   SOURCE_VIEW, createFarmSession, stepFarmSession,
-  startKitchenRecipe, collectKitchenDish, upgradeBarn, sellGood,
+  startKitchenRecipe, collectKitchenDish, upgradeBarn, upgradeCoop, sellGood,
+  collectOrFeedAnimal, serializeFarmSession, restoreFarmSession,
 } from '../gf-core.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -34,6 +35,13 @@ test('kitchen 4-stove cap, ingredient validation, cooking completion, barn sell 
 
   const flour = world.catalog.recipes.find(r => r.id === 6001);
   assert.ok(flour);
+  assert.equal(flour.iconBlock, 51);
+  assert.equal(flour.ingredients[0].qty, 4);
+
+  // Starting farm animals must retain real names from /9[0] (never fall back to Gà con Delaware)
+  const animalNames = s.animals.map(a => a.name);
+  assert.ok(animalNames.includes('Bò siêu hạng'));
+  assert.ok(animalNames.includes('Cừu Cheviot'));
 
   // Missing ingredient rejected cleanly
   assert.equal(startKitchenRecipe(s, flour.id).reason, 'missing_ingredient');
@@ -47,12 +55,13 @@ test('kitchen 4-stove cap, ingredient validation, cooking completion, barn sell 
   }
   assert.equal(startKitchenRecipe(s, flour.id).reason, 'full');
 
-  // Step timer -> collect all 4 dishes -> sell from Barn -> upgrade Barn capacity
+  // Step timer -> collect all 4 dishes -> verify inventory iconBlock & sell -> upgrade Barn & Coops
   stepFarmSession(s, flour.cookSec * 1000 + 200);
   while (s.kitchenQueue.length > 0) {
     assert.equal(collectKitchenDish(s, s.kitchenQueue[0].uid).ok, true);
   }
   assert.equal(s.inventory.get(flour.outputGoodId).qty, 4);
+  assert.equal(s.inventory.get(flour.outputGoodId).iconBlock, 51);
 
   const coinsBefore = s.coins;
   assert.equal(sellGood(s, flour.outputGoodId, 4).ok, true);
@@ -61,4 +70,28 @@ test('kitchen 4-stove cap, ingredient validation, cooking completion, barn sell 
   const capBefore = s.barnCapacity;
   assert.equal(upgradeBarn(s).ok, true);
   assert.equal(s.barnCapacity, capBefore + 20);
+
+  const coopBefore = s.coopCapacity;
+  assert.equal(upgradeCoop(s, 'chicken').ok, true);
+  assert.equal(s.coopCapacity, coopBefore + 4);
+
+  // Milk harvest from Cow uses milk emoji (not egg), and restore heals stale "Sản phẩm Gà con Delaware" & blocked Manor-step plots
+  const cow = s.animals.find(a => /bò/i.test(a.name));
+  assert.ok(cow);
+  cow.ready = true;
+  const milkRes = collectOrFeedAnimal(s, cow.uid);
+  assert.equal(milkRes.ok, true);
+  assert.equal(milkRes.prodName, 'Sữa');
+  assert.match(s.toast, /^🥛 /);
+
+  const rawSave = JSON.parse(serializeFarmSession(s));
+  rawSave.inventory.push(
+    { id: 4001, name: 'Sản phẩm Gà con Delaware', qty: 2, sellPrice: 12, iconBlock: 2, iconFrame: 0 },
+    { id: 4047, name: 'Sản phẩm Gà con Delaware', qty: 1, sellPrice: 20, iconBlock: 2, iconFrame: 3 },
+  );
+  rawSave.plots.push({ row: 24, col: 33, worldX: 1206, worldY: 441, cropId: 3004, stage: 'ready', progressMs: 9000, growMs: 9000 });
+  const healed = restoreFarmSession(JSON.stringify(rawSave), world, textData);
+  assert.equal(healed.inventory.get(4001)?.name, 'Trứng');
+  assert.equal(healed.inventory.get(4003)?.name, 'Len');
+  assert.equal(healed.plots.has('24,33'), false);
 });
