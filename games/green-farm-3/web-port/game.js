@@ -438,28 +438,14 @@ function renderFarmWorld(ctx) {
     drawText(ctx, toolNames[s.activeTool] || '', SCREEN_W / 2, 74, { align: 'center', size: 8, color: '#fff4c2', bold: true });
   }
 
-  // Toast banner above bottom dock
+  // Toast banner above bottom softkeys
   if (s.toast) {
     ctx.fillStyle = 'rgba(59, 34, 13, 0.9)';
-    ctx.fillRect(6, SCREEN_H - 60, SCREEN_W - 12, 17);
+    ctx.fillRect(6, SCREEN_H - 52, SCREEN_W - 12, 17);
     ctx.strokeStyle = '#e8c47a';
-    ctx.strokeRect(6.5, SCREEN_H - 59.5, SCREEN_W - 13, 16);
-    drawText(ctx, s.toast, SCREEN_W / 2, SCREEN_H - 49, { align: 'center', size: 8, color: '#fff7c2', maxWidth: SCREEN_W - 18 });
+    ctx.strokeRect(6.5, SCREEN_H - 51.5, SCREEN_W - 13, 16);
+    drawText(ctx, s.toast, SCREEN_W / 2, SCREEN_H - 41, { align: 'center', size: 8, color: '#fff7c2', maxWidth: SCREEN_W - 18 });
   }
-
-  // Crisp labels on the original /6[1] bottom Gameloft dock buttons (y = 280..320)
-  const dockLabels = [
-    { x: 24, label: 'C.CỤ' },
-    { x: 72, label: 'CHỢ' },
-    { x: 120, label: 'KHO' },
-    { x: 168, label: 'NHÀ' },
-    { x: 216, label: 'NV/HX' },
-  ];
-  dockLabels.forEach((b) => {
-    ctx.fillStyle = 'rgba(46, 26, 9, 0.78)';
-    ctx.fillRect(b.x - 21, SCREEN_H - 13, 42, 12);
-    drawText(ctx, b.label, b.x, SCREEN_H - 4, { align: 'center', size: 7, color: '#fff4cc', bold: true });
-  });
 }
 
 // Port of a.java:9553-9621: draw real original Gameloft /6[screenId] wooden/parchment UI frame & header
@@ -627,9 +613,12 @@ function renderManor(ctx) {
   const s = app.session;
   const rooms = (s.catalog.buildings || []).filter(b => b.isManorRoom);
   const quickLinks = [
-    { left: '🍳 Vào Nhà bếp (83 công thức)', right: 'MỞ', rightColor: '#9cff7b' },
-    { left: '🏺 Vào Phòng sưu tập (15 cổ vật)', right: 'MỞ', rightColor: '#9cff7b' },
-    { left: '✉️ Mở Hòm thư & Đơn hàng', right: 'MỞ', rightColor: '#9cff7b' },
+    { left: '⛏️ Cuốc cày ô đất mới (10G)', right: s.activeTool === 'plow' ? 'ĐANG BẬT' : 'CHỌN', rightColor: '#9cff7b' },
+    { left: '🪓 Rìu dọn cỏ & đá (2⚡)', right: s.activeTool === 'clear' ? 'ĐANG BẬT' : 'CHỌN', rightColor: '#9cff7b' },
+    { left: '🏚️ Kho thóc (Bán & Nâng cấp)', right: 'MỞ', rightColor: '#9cff7b' },
+    { left: '🍳 Nhà bếp (83 công thức)', right: 'MỞ', rightColor: '#9cff7b' },
+    { left: '🏺 Phòng sưu tập (15 cổ vật)', right: 'MỞ', rightColor: '#9cff7b' },
+    { left: '✉️ Hòm thư & Đơn hàng', right: 'MỞ', rightColor: '#9cff7b' },
     { left: '🗺️ Mua đất mở rộng trang trại', right: `${s.unlockedZones?.length || 1}/6`, rightColor: '#ffd84d' },
   ];
   const roomRows = rooms.map((r) => {
@@ -643,7 +632,7 @@ function renderManor(ctx) {
       spriteFrame: r.frame || 0,
     };
   });
-  renderPanelList(ctx, 'DINH THỰ & CÔNG TRÌNH', `Xu: ${s.coins} · Sửa 9 phòng & mở nhanh`, [...quickLinks, ...roomRows], s.panelCursor, 'Chạm vào nhà/sửa phòng · Esc: Đóng', null, 14);
+  renderPanelList(ctx, 'MENU TRANG TRẠI & DINH THỰ', `Xu: ${s.coins} · Công cụ, Nhà & 9 Phòng`, [...quickLinks, ...roomRows], s.panelCursor, 'Chạm chọn · Esc: Đóng', null, 14);
 }
 
 function renderCoop(ctx) {
@@ -758,11 +747,16 @@ function onPointerDown(event) {
   const x = (event.clientX - rect.left) * (SCREEN_W / rect.width);
   const y = (event.clientY - rect.top) * (SCREEN_H / rect.height);
   const s = app.session;
-  if (s.view === SOURCE_VIEW.WORLD_LAYER && y >= 50 && y < SCREEN_H - 36) {
-    dragState = { pointerId: event.pointerId, startX: x, startY: y, camX: s.cameraX, camY: s.cameraY, dragged: false };
-    try { canvasEl.setPointerCapture(event.pointerId); } catch { /* ignore */ }
-    event.preventDefault();
-    return;
+  if (s.view === SOURCE_VIEW.WORLD_LAYER) {
+    const onTopQuestBtn = x >= 198 && y <= 40;
+    const onBottomLeftBtn = x <= 68 && y >= 274;
+    const onBottomRightBtn = x >= 192 && y >= 274;
+    if (!onTopQuestBtn && !onBottomLeftBtn && !onBottomRightBtn && y >= 48) {
+      dragState = { pointerId: event.pointerId, startX: x, startY: y, camX: s.cameraX, camY: s.cameraY, dragged: false };
+      try { canvasEl.setPointerCapture(event.pointerId); } catch { /* ignore */ }
+      event.preventDefault();
+      return;
+    }
   }
   handleTap(x, y, event);
 }
@@ -861,13 +855,26 @@ function handlePanelAction(s, idx) {
       if (recipe) { startKitchenRecipe(s, recipe.id); saveSession(); }
     }
   } else if (v === SOURCE_VIEW.MANOR) {
-    if (idx === 0) { s.panelCursor = 0; s.view = SOURCE_VIEW.KITCHEN; }
-    else if (idx === 1) { s.panelCursor = 0; s.view = SOURCE_VIEW.COLLECTIONS; }
-    else if (idx === 2) { s.panelCursor = 0; s.view = SOURCE_VIEW.MAILBOX; }
-    else if (idx === 3) { s.shopTab = 'land'; s.shopCursor = 0; s.view = SOURCE_VIEW.SHOP; }
+    if (idx === 0) {
+      s.activeTool = s.activeTool === 'plow' ? 'auto' : 'plow';
+      s.placementItem = null;
+      s.view = SOURCE_VIEW.WORLD_LAYER;
+      s.toast = s.activeTool === 'plow' ? '⛏️ Đã bật Cuốc: chạm bãi cỏ để cày ô đất!' : '✋ Đã chuyển về chế độ Tay';
+      s.toastMs = 2000;
+    } else if (idx === 1) {
+      s.activeTool = s.activeTool === 'clear' ? 'auto' : 'clear';
+      s.placementItem = null;
+      s.view = SOURCE_VIEW.WORLD_LAYER;
+      s.toast = s.activeTool === 'clear' ? '🪓 Đã bật Rìu: chạm bụi cây/đá để dọn!' : '✋ Đã chuyển về chế độ Tay';
+      s.toastMs = 2000;
+    } else if (idx === 2) { s.barnCursor = 0; s.view = SOURCE_VIEW.BARN; }
+    else if (idx === 3) { s.panelCursor = 0; s.view = SOURCE_VIEW.KITCHEN; }
+    else if (idx === 4) { s.panelCursor = 0; s.view = SOURCE_VIEW.COLLECTIONS; }
+    else if (idx === 5) { s.panelCursor = 0; s.view = SOURCE_VIEW.MAILBOX; }
+    else if (idx === 6) { s.shopTab = 'land'; s.shopCursor = 0; s.view = SOURCE_VIEW.SHOP; }
     else {
       const rooms = (s.catalog.buildings || []).filter(b => b.isManorRoom);
-      const room = rooms[idx - 4];
+      const room = rooms[idx - 7];
       if (room) { repairManorRoom(s, room.entityId); saveSession(); }
     }
   } else if (v === SOURCE_VIEW.COOP) {
@@ -953,35 +960,23 @@ function handleTap(x, y, event) {
     return;
   }
 
-  // Top-right Quest icon in original /6[1] HUD (x >= 200, y <= 38)
-  if (x >= 200 && y <= 38) {
+  // 1:1 Original /6[1] HUD button hit-zones matching exact Gameloft icon art (a.java:24523-24556):
+  // Top-right Pause/Menu icon [41] (x=207, y=8) -> Menu Trang trại, Công cụ & Dinh thự
+  if (x >= 198 && y <= 40) {
+    s.panelCursor = 0;
+    s.view = SOURCE_VIEW.MANOR;
+    event.preventDefault();
+    return;
+  }
+  // Bottom-left Clipboard/Quest icon [52]+[63] (x=5..68, y>=274) -> Nhiệm vụ & 10 Hàng xóm
+  if (x <= 68 && y >= 274) {
     s.view = SOURCE_VIEW.QUESTS;
     event.preventDefault();
     return;
   }
-
-  // Bottom original Gameloft dock (y >= SCREEN_H - 38)
-  if (y >= SCREEN_H - 38) {
-    const tabIdx = Math.max(0, Math.min(4, Math.floor(x / (SCREEN_W / 5))));
-    if (tabIdx === 0) {
-      const order = ['auto', 'plow', 'clear'];
-      const next = order[(order.indexOf(s.activeTool) + 1) % order.length];
-      s.activeTool = next;
-      s.placementItem = null;
-      const labels = { auto: '✋ Chế độ Tay (Tương tác nhà/cây/thú)', plow: '⛏️ Chế độ Cuốc (Chạm cỏ để cày ô đất)', clear: '🪓 Chế độ Dọn cỏ/đá (Tốn 2⚡)' };
-      s.toast = labels[next];
-      s.toastMs = 2000;
-    } else if (tabIdx === 1) {
-      s.view = SOURCE_VIEW.SHOP;
-    } else if (tabIdx === 2) {
-      s.barnCursor = 0;
-      s.view = SOURCE_VIEW.BARN;
-    } else if (tabIdx === 3) {
-      s.panelCursor = 0;
-      s.view = SOURCE_VIEW.MANOR;
-    } else {
-      s.view = SOURCE_VIEW.QUESTS;
-    }
+  // Bottom-right Market Stand icon [67] (x>=192, y>=274) -> Cửa hàng 5 danh mục
+  if (x >= 192 && y >= 274) {
+    s.view = SOURCE_VIEW.SHOP;
     event.preventDefault();
     return;
   }

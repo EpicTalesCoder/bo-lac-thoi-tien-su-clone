@@ -377,7 +377,8 @@ export function drawOriginalUIScreen(ctx, widgets, getSpriteEntry, { filterWidge
       const pal = w.usePalette ? w.paletteIndex : 0;
       const entry = getSpriteEntry(w.spriteId, pal);
       if (!entry) continue;
-      drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, w.frameIndex, w.x, w.y, w.transform & 7);
+      // Port of a.java:9998: case 205 always passes frameTransform = 0 (sArray[7] is not a rotation flag)
+      drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, w.frameIndex, w.x, w.y, 0);
       drawn += 1;
     }
   }
