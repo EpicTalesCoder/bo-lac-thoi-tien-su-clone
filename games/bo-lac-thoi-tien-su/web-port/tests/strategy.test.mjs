@@ -15,7 +15,7 @@ const captures = new URL('../assets/campaign-captures/', import.meta.url);
 const originalFrames = new URL('../../analysis/rebuild-attempt/captures/original-campaign-walkthrough/walk-1/', import.meta.url);
 
 test('index.html loads the live canvas game module', () => {
-  assert.ok(indexHtml.includes('<script type="module" src="game.js"></script>'));
+  assert.match(indexHtml, /<script type="module" src="game\.js(?:\?[^"]*)?"><\/script>/);
 });
 
 test('live renderer ports terrain, objects, layered villagers, fog, construction dust, combat, and HUD', () => {
@@ -112,5 +112,58 @@ test('campaign frames are exact copies of the original-JAR emulator captures', a
     const digest = bytes => createHash('sha256').update(bytes).digest('hex');
     assert.equal(digest(browserBytes), digest(sourceBytes), `${name} differs from the original capture`);
     assert.ok((await stat(new URL(name, captures))).size > 0);
+  }
+});
+
+test('enterRestHut only triggers breeding state 2 during explicit courtship, never normal rest', async () => {
+  const { enterRestHut } = await import('../scenario-loader.js');
+  const mockData = {
+    width: 10,
+    height: 10,
+    occupancy: Array.from({ length: 10 }, () => new Array(10).fill(0)),
+    entityData: new Array(10500).fill(0),
+  };
+  // Unit 1: adult male; Unit 2: adult female; Hut bid = 5
+  mockData.entityData[1414 + 1] = 20;
+  mockData.entityData[1515 + 1] = 0;
+  mockData.entityData[1414 + 2] = 20;
+  mockData.entityData[1515 + 2] = 1;
+  const s1 = enterRestHut(mockData, 5, 1, false);
+  const s2 = enterRestHut(mockData, 5, 2, false);
+  assert.equal(s1.breeding, false);
+  assert.equal(s2.breeding, false);
+  assert.equal(mockData.entityData[1313 + 1], 1);
+  assert.equal(mockData.entityData[1313 + 2], 1);
+
+  // Explicit courtship in Hut bid = 6 MUST set breeding state 2
+  mockData.entityData[1414 + 3] = 22;
+  mockData.entityData[1515 + 3] = 0;
+  mockData.entityData[1414 + 4] = 22;
+  mockData.entityData[1515 + 4] = 1;
+  const c1 = enterRestHut(mockData, 6, 3, true);
+  const c2 = enterRestHut(mockData, 6, 4, true);
+  assert.equal(c1.breeding, false);
+  assert.equal(c2.breeding, true);
+  assert.equal(mockData.entityData[1313 + 3], 2);
+  assert.equal(mockData.entityData[1313 + 4], 2);
+});
+
+test('/sa embeds 5 valid MIDI tracks including Track 3 chase/tension percussion & dynamic BGM/SFX wiring', async () => {
+  const { extractMidiTracksFromSa, PrehistoricMidiSynth } = await import('../audio-binary.js');
+  const saBytes = await readFile(new URL('../assets/sa', import.meta.url));
+  const tracks = extractMidiTracksFromSa(saBytes);
+  assert.equal(tracks.length, 5, 'should parse all 5 embedded MIDI tracks from /sa');
+  for (const t of tracks) {
+    assert.ok(t.notes.length > 20, `Track ${t.index} should have parsed MIDI notes`);
+  }
+  const track3Channels = new Set(tracks[3].notes.map((n) => n.channel));
+  assert.ok(track3Channels.has(9), 'Track 3 (chase/tension) must include channel 9 percussion notes');
+  const synth = new PrehistoricMidiSynth();
+  assert.equal(synth.loadTracks(saBytes), 5);
+  assert.equal(typeof synth.unlock, 'function');
+  assert.equal(typeof synth.playSfx, 'function');
+  synth.playSfx('chop');
+  for (const token of ['SA_MOOD_TRACKS', 'updateDynamicBgm', 'cycleIdleVillager', 'findExpandedEntityAtCursor']) {
+    assert.ok(gameJs.includes(token), `missing game.js symbol: ${token}`);
   }
 });

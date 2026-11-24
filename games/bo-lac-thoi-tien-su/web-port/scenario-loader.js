@@ -642,13 +642,13 @@ export function demolishBuilding(data, bid) {
   return { x: bx, y: by, w: spec.width, h: spec.height, spec, isScaffold, workers };
 }
 
-export function enterRestHut(data, bid, unitId) {
+export function enterRestHut(data, bid, unitId, isCourtship = false) {
   const e = data.entityData;
   const usedSlots = new Set();
   let cur = e[8993 + bid];
   let guard = 0;
   while (cur > 0 && guard++ < 16) {
-    if (cur === unitId) return { slotIdx: e[4646 + cur] };
+    if (cur === unitId) return { slotIdx: e[4646 + cur], breeding: isCourtship && e[1313 + cur] === 2 };
     usedSlots.add(e[4646 + cur]);
     cur = e[4545 + cur];
   }
@@ -667,20 +667,24 @@ export function enterRestHut(data, bid, unitId) {
   e[8993 + bid] = unitId;
   e[4444 + unitId] = bid;
   e[4646 + unitId] = freeSlot;
-  // Check if 1 adult male + 1 adult female are sharing this Lều for breeding (state 2: bouncing tent + anim 90)
-  // Otherwise normal sleeping inside Lều uses state 1 (warm glowing window anim 115 only, b.java:2150 / f.java:1108-1114)
-  let hasAdultMale = false;
-  let hasAdultFemale = false;
-  let occupant = e[8993 + bid];
-  let chk = 0;
-  while (occupant > 0 && chk++ < 16) {
-    if ((e[1414 + occupant] & 0xff) >= 12) {
-      if ((e[1515 + occupant] & 0xff) === 0) hasAdultMale = true;
-      else hasAdultFemale = true;
+  // Authentic original J2ME rule (b.java:3354-3470 & 4201-4206):
+  // Normal sleeping inside Lều NEVER breeds — it ALWAYS uses state 1 (warm glowing window anim 115 only).
+  // ONLY an explicit courtship pair (isCourtship === true) with 1 adult male + 1 adult female triggers state 2 (anim 116)!
+  let canBreed = false;
+  if (isCourtship) {
+    let hasAdultMale = false;
+    let hasAdultFemale = false;
+    let occupant = e[8993 + bid];
+    let chk = 0;
+    while (occupant > 0 && chk++ < 16) {
+      if ((e[1414 + occupant] & 0xff) >= 12) {
+        if ((e[1515 + occupant] & 0xff) === 0) hasAdultMale = true;
+        else hasAdultFemale = true;
+      }
+      occupant = e[4545 + occupant];
     }
-    occupant = e[4545 + occupant];
+    canBreed = hasAdultMale && hasAdultFemale;
   }
-  const canBreed = hasAdultMale && hasAdultFemale;
   e[1313 + unitId] = canBreed ? 2 : 1;
   e[3030 + unitId] = 0;
   if (canBreed) {

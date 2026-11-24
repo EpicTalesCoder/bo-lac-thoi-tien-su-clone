@@ -428,12 +428,18 @@ class SameOriginHttpRelay {
           nextDelay = data.snap ? 150 : 210;
         }
       } else {
+        if (!this.ready && (res.status === 404 || res.status === 405 || res.status === 501)) {
+          this._deadEndpoints = (this._deadEndpoints || 0) + 1;
+          if (this._deadEndpoints >= this.endpoints.length) {
+            this.close();
+            return;
+          }
+        }
         if (!this.ready && this.endpoints.length > 1) {
           this.endpointIdx = (this.endpointIdx + 1) % this.endpoints.length;
           this.endpoint = this.endpoints[this.endpointIdx];
           nextDelay = 400;
         } else {
-          // e.g. local python static http.server without /api/mp -> back off gracefully
           nextDelay = 5000;
         }
       }
@@ -664,6 +670,7 @@ export class MultiplayerClient {
     // 1) BroadcastChannel for instant local multi-tab play (up to 4 tabs!)
     if (typeof BroadcastChannel !== 'undefined') {
       this.bc = new BroadcastChannel(`pt-mp-room-${code}`);
+      this.statusNote = `Phòng #${code} đã mở! Nhấn "🪟 Mở Tab 2" hoặc gửi mã phòng cho người chơi khác.`;
       this.bc.onmessage = (ev) => {
         const msg = ev.data;
         if (!msg || msg._from === this.clientId) return;

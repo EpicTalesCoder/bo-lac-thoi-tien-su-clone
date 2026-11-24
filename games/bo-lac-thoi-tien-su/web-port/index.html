@@ -8,23 +8,27 @@
     <meta http-equiv="Expires" content="0" />
     <meta name="theme-color" content="#111914" />
     <title>Prehistoric Tribes — Full Window WebGL</title>
-    <link rel="stylesheet" href="style.css?v=20261121d" />
+    <link rel="stylesheet" href="style.css?v=20261124c" />
   </head>
   <body>
     <main class="app-shell">
       <section class="viewport-stage" aria-label="Màn hình game toàn cửa sổ">
         <canvas id="game" width="640" height="360" aria-label="Màn hình game Prehistoric Tribes"></canvas>
 
-        <div class="floating-toolbar" aria-label="Tiện ích cửa sổ">
-          <span class="runtime-badge" id="viewport-badge"><span></span> WebGL · 60 FPS</span>
-          <button type="button" id="btn-mp-lobby" title="Mở phòng Multiplayer 1v1">⚔️ Phòng</button>
-          <button type="button" id="btn-zoom" title="Đổi độ phóng đại pixel (1x / 2x / 3x)">🔍 2x</button>
-          <button type="button" id="btn-fullscreen" title="Toàn màn hình (Fullscreen)">⛶</button>
+        <div class="floating-toolbar" id="floating-toolbar" aria-label="Tiện ích cửa sổ">
+          <button type="button" id="btn-mp-lobby" title="Tạo / Vào phòng Multiplayer 1v1">⚔️ Tạo phòng</button>
+          <button type="button" id="btn-toolbar-toggle" class="toolbar-toggle" title="Tiện ích cửa sổ" aria-label="Mở tiện ích">⚙</button>
+          <div class="toolbar-items">
+            <span class="runtime-badge" id="viewport-badge"><span></span> WebGL · 60 FPS</span>
+            <button type="button" id="btn-zoom" title="Đổi độ phóng đại pixel (1x / 2x / 3x)">🔍 2x</button>
+            <button type="button" id="btn-fullscreen" title="Toàn màn hình (Fullscreen)">⛶</button>
+          </div>
         </div>
 
         <!-- 1v1 Multiplayer Lobby Overlay -->
-        <div class="mp-lobby-overlay" id="mp-lobby" role="dialog" aria-label="Phòng chơi Multiplayer 1v1">
+        <div class="mp-lobby-overlay hidden" id="mp-lobby" role="dialog" aria-label="Phòng chơi Multiplayer 1v1">
           <div class="mp-card">
+            <button type="button" class="mp-close-btn" id="mp-close-btn" title="Đóng (Esc)" aria-label="Đóng phòng chờ">✕</button>
             <div class="mp-brand">
               <span class="mp-pill">⚔️ ĐỐI KHÁNG 1v1 & CHƠI VỚI MÁY (AI)</span>
               <h1>Prehistoric Tribes</h1>
@@ -184,6 +188,6 @@
     </main>
     <script src="https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
-    <script type="module" src="game.js"></script>
+    <script type="module" src="game.js?v=20261124c"></script>
   </body>
 </html>

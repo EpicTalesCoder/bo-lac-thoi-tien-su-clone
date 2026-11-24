@@ -9,7 +9,7 @@ import {
   revealFog,
   getMinimapRect,
   renderOriginalMap,
-} from './render-original.js';
+} from './render-original.js?v=20261124c';
 import {
   SCENARIOS,
   BUILDINGS,
@@ -44,8 +44,8 @@ import {
   loadScenarioFromMa,
   MP_MAPS,
   prepareMultiplayerMatch,
-} from './scenario-loader.js';
-import { MultiplayerClient, packWorldSnapshot, applyWorldSnapshot } from './multiplayer.js?v=20261122b';
+} from './scenario-loader.js?v=20261124c';
+import { MultiplayerClient, packWorldSnapshot, applyWorldSnapshot } from './multiplayer.js?v=20261124c';
 import {
   DIFFICULTIES,
   parseStoryD0,
@@ -69,9 +69,68 @@ import {
   parseOriginalA,
   PrehistoricMidiSynth,
 } from './audio-binary.js';
-import { mountPhaserRuntime } from './phaser-engine.js';
+import { mountPhaserRuntime } from './phaser-engine.js?v=20261124c';
 
 const midiSynth = new PrehistoricMidiSynth();
+const SA_MOOD_TRACKS = [
+  [0, 1], // mood 0: menu & peaceful village (e.java:230)
+  [2, 3], // mood 1: chase, tension, danger, combat (b.java:5004)
+  [4, 4], // mood 2: victory / crisis / finale (b.java:5000)
+];
+let currentBgmMood = -1;
+
+function getDesiredBgmMood() {
+  if (state.phase !== 'game') return 0;
+  if (state.missionResult) return 2;
+  const recentAlert = (state.animTick || 0) - (state.lastAlertTick || -999) < 220;
+  let anyFighting = false;
+  for (const t of state.tasks.values()) {
+    if (t.kind === 'attackUnit' || t.kind === 'attackBuilding' || t.kind === 'armForBattle') {
+      anyFighting = true;
+      break;
+    }
+  }
+  if (!anyFighting && state.enemyTasks?.size) {
+    for (const et of state.enemyTasks.values()) {
+      if (et?.kind === 'attackUnit' || et?.kind === 'attackBuilding' || et?.kind === 'hunt') {
+        anyFighting = true;
+        break;
+      }
+    }
+  }
+  if (!anyFighting && state.combatLocks?.size) {
+    const nowTick = state.animTick || 0;
+    for (const until of state.combatLocks.values()) {
+      if (nowTick <= until) {
+        anyFighting = true;
+        break;
+      }
+    }
+  }
+  // Tense chase / siege / endgame missions keep action BGM active dynamically matching original campaign pacing
+  const tenseScenario = state.scenarioIndex === 2 || state.scenarioIndex === 8 || state.scenarioIndex === 9;
+  if (recentAlert || anyFighting || tenseScenario) return 1;
+  return 0;
+}
+
+function pickTrackForMood(mood) {
+  const pair = SA_MOOD_TRACKS[Math.max(0, Math.min(2, mood))] || SA_MOOD_TRACKS[0];
+  return pair[Math.floor(Math.random() * pair.length)];
+}
+
+function updateDynamicBgm(forceSwitch = false) {
+  if (!midiSynth.tracks.length) return;
+  const desiredMood = getDesiredBgmMood();
+  const validPair = SA_MOOD_TRACKS[desiredMood];
+  const alreadyMatches = validPair.includes(midiSynth.currentTrackIndex) && midiSynth.playing;
+  if (forceSwitch || currentBgmMood !== desiredMood || (state.music && !alreadyMatches)) {
+    currentBgmMood = desiredMood;
+    const track = pickTrackForMood(desiredMood);
+    if (state.music) midiSynth.playTrack(track);
+  }
+}
+
+midiSynth.onTrackEnded = () => pickTrackForMood(getDesiredBgmMood());
 
 const canvas = document.querySelector('#game');
 let ctx = null;
@@ -124,15 +183,15 @@ const PHASES = {
   },
   mode: {
     title: 'Chọn chế độ',
-    copy: 'Chọn Chiến dịch (10 màn có cốt truyện /0/d0 & mang bộ lạc), Trò chơi tuỳ chỉnh (chọn map & độ khó), hoặc chọn nhanh màn 1–10.',
-    options: ['CHIẾN DỊCH (10 MÀN)', 'TRÒ CHƠI TUỲ CHỈNH', 'CHỌN MÀN CHIẾN DỊCH (1–10)', 'QUAY LẠI'],
+    copy: 'Chọn Chiến dịch (10 màn), Trò chơi tuỳ chỉnh, Chơi nhiều người (Tạo phòng 1v1 / Đấu với Máy), hoặc Quay lại.',
+    options: ['CHIẾN DỊCH', 'TRÒ CHƠI TUỲ CHỈNH', 'CHƠI NHIỀU NGƯỜI (1v1)', 'QUAY LẠI'],
     capture: 3,
   },
   campaignMenu: {
     title: 'Chiến dịch',
     copy: 'Chọn Độ khó và bắt đầu Chiến dịch Avnotaklu với đầy đủ cốt truyện gốc từ /0/d0.',
     options: ['TIẾP TỤC', 'TRÒ CHƠI MỚI (MÀN 1)', 'ĐỘ KHÓ: DỄ', 'QUAY LẠI'],
-    capture: 4,
+    capture: 3,
   },
 };
 
@@ -163,6 +222,7 @@ const state = {
   selected: 0,
   language: 0,
   music: true,
+  sfx: true,
   campaignFrame: CAPTURED_FLOW.newGame,
   baseData: null,
   maBytes: null,
@@ -191,6 +251,7 @@ const state = {
   selectionBox: null,
   paused: false,
   compareOriginal: false,
+  menuModal: null, // null | 'help' | 'options' | 'about'
   autoAI: false,
   panelMode: 'main', // 'main' | 'build' | 'scenarios' | 'building'
   canvasMenu: null, // Authentic on-canvas J2ME menus: { kind: 'actions'|'build'|'building'|'villagers'|'pause'|'scenarios', items, selected, scroll, title }
@@ -201,7 +262,7 @@ const state = {
   activeFlag: null, // { kind, x, y, until }
   animTick: 0,
   lastAlertTick: -999,
-  mpMode: true,
+  mpMode: false,
   aiMode: false,
   aiDifficulty: 'normal', // 'easy' | 'normal' | 'hard'
   localTribe: 0, // 0 = Host (Blue Tribe 1..50), 1 = Guest (Red Tribe 51..100)
@@ -219,6 +280,9 @@ const state = {
   // Active tasks per villager: { kind: 'move'|'gather'|'return'|'build'|'hunt'|'rest'|'eat'|'workBuilding'|'attackUnit'|'attackBuilding', ... }
   tasks: new Map(),
   savedJobs: new Map(), // unitId -> previous primary job to resume automatically after eating/sleeping/dancing
+  combatLocks: new Map(), // unitId -> animTick until which unit remains combat-locked (never flees to eat/sleep mid-battle)
+  simSubTick: 0,
+  liveFps: 60,
   enemyTasks: new Map(),
   weaponQueues: new Map(), // bid -> [q0..q5] weapon forge orders (starts at 0)
   shrineRituals: new Map(), // bid -> { spell, ticks, duration } active Shaman spell rituals
@@ -387,6 +451,8 @@ function alertCombat(msg, color = '#ff7b6b') {
   if (state.animTick - state.lastAlertTick < 50) return;
   state.lastAlertTick = state.animTick;
   state.message = msg;
+  midiSynth.playSfx('alert');
+  updateDynamicBgm();
   addPopup(state.cameraX + 5, state.cameraY + 4, msg, color);
 }
 
@@ -537,10 +603,13 @@ function applyUnitDamage(attackerId, targetId, dmg) {
   const ty = e[101 + targetId] & 0xff;
   addPopup(tx, ty, `-${dmg}`, targetId <= 50 ? '#ff6f61' : '#ffd84d');
   if (dmg < 200) {
+    midiSynth.playSfx('hit');
     addHitEffect(tx, ty, attackerId > 0 && getUnitRange(attackerId) > 1 ? 'ranged' : 'melee');
   }
 
   if (nextHp > 0 && (e[1414 + targetId] & 0xff) >= 12) {
+    markUnitInCombat(targetId, 110);
+    if (attackerId > 0) markUnitInCombat(attackerId, 110);
     if (targetId <= 50 && attackerId > 50) {
       if ((state.localTribe ?? 0) === 0) alertCombat('Chúng ta đang bị tấn công!');
       const curT = state.tasks.get(targetId);
@@ -560,6 +629,7 @@ function applyUnitDamage(attackerId, targetId, dmg) {
   }
 
   if (nextHp <= 0) {
+    midiSynth.playSfx('death');
     // Authentic 2-stage villager death (b.java:1484 & 3753):
     // Stage 1: anim 108 (18f — knocked flying up and slamming down),
     // Stage 2: anim 43 (adult, 9f) / anim 44 (child, 10f) — transforms into the authentic human skeleton on the ground!
@@ -683,6 +753,7 @@ function applyBuildingDamage(attackerId, bid, dmg) {
   }
 
   if (nextHp <= 0) {
+    midiSynth.playSfx('death');
     const res = demolishBuilding(d, bid);
     addDust(res.x, res.y, res.w, res.h);
     addPopup(res.x + Math.floor(res.w / 2), res.y, 'Nhà đã bị phá hủy!', '#ff5252');
@@ -719,6 +790,7 @@ function notifyTribeEvent(tribe, message, warning = '', popup = null) {
 
 function launchProjectile(attackerId, targetType, targetId, x0, y0, x1, y1, weaponId, dmg) {
   const dist = Math.max(1, Math.hypot(x1 - x0, y1 - y0));
+  midiSynth.playSfx('throw');
   state.projectiles.push({
     attackerId,
     targetType,
@@ -965,11 +1037,43 @@ function distanceToRect(x, y, rect) {
   return Math.max(dx, dy);
 }
 
+function markUnitInCombat(unitId, ticks = 100) {
+  if (!unitId) return;
+  const cur = state.combatLocks.get(unitId) || 0;
+  const until = (state.animTick || 0) + ticks;
+  if (until > cur) state.combatLocks.set(unitId, until);
+}
+
+function isUnitInCombat(unitId) {
+  return (state.combatLocks.get(unitId) || 0) > (state.animTick || 0);
+}
+
+function findNearestEnemyFor(unitId, maxDist = 10) {
+  const d = state.data;
+  if (!d) return 0;
+  const e = d.entityData;
+  const owner = getUnitOwner(d, unitId);
+  const ux = e[unitId] & 0xff;
+  const uy = e[101 + unitId] & 0xff;
+  let bestId = 0;
+  let bestDist = maxDist + 0.01;
+  for (const eid of getEnemyIds(owner)) {
+    if (isUnitInsideBuilding(d, eid)) continue;
+    const dist = Math.hypot((e[eid] & 0xff) - ux, (e[101 + eid] & 0xff) - uy);
+    if (dist < bestDist) {
+      bestDist = dist;
+      bestId = eid;
+    }
+  }
+  return bestId;
+}
+
 function assignAttackTask(unitId, targetType, targetId, skipArmFetch = false) {
   const d = state.data;
   if (!d) return false;
   const e = d.entityData;
   if ((e[1919 + unitId] & 0xff) <= 0) return false;
+  markUnitInCombat(unitId, 110);
   ensureUnitOutside(unitId);
   setUnitCarry(unitId, 0, 0);
   const info = getVillagerInfo(unitId);
@@ -1828,6 +1932,7 @@ function selectUnit(unitId) {
   state.selectedUnit = unitId;
   state.selectedUnits = new Set([unitId]);
   state.activeGroupId = 0;
+  midiSynth.playSfx('select');
   const info = getVillagerInfo(unitId);
   state.cursor = { x: info.x, y: info.y };
   const task = state.tasks.get(unitId);
@@ -1865,6 +1970,41 @@ function cycleUnit() {
   const idx = ids.indexOf(state.selectedUnit);
   const nextId = ids[(idx + 1) % ids.length];
   selectUnit(nextId);
+}
+
+function getIdleAdultVillagerIds(owner = state.localTribe ?? 0) {
+  const d = state.data;
+  if (!d) return [];
+  const e = d.entityData;
+  return getVillagerIds(owner).filter(
+    (id) => (e[1414 + id] & 0xff) >= 12 && !state.tasks.has(id) && !isUnitInsideBuilding(d, id)
+  );
+}
+
+function cycleIdleVillager() {
+  const idleIds = getIdleAdultVillagerIds();
+  if (idleIds.length === 0) {
+    midiSynth.playSfx('ui_cancel');
+    if (state.phase === 'game') {
+      showWarning('Tất cả dân trưởng thành đều đã có việc làm!', 679);
+    } else {
+      state.message = '✅ Tất cả dân làng trưởng thành đều đang có việc làm!';
+      render();
+    }
+    return;
+  }
+  const idx = idleIds.indexOf(state.selectedUnit);
+  const nextId = idleIds[(idx + 1) % idleIds.length];
+  selectUnit(nextId);
+  centerOnUnit(nextId);
+  const info = getVillagerInfo(nextId);
+  const msg = `Dân rảnh (${idleIds.length}): ${info.role} (${info.age}t) đang chờ lệnh!`;
+  if (state.phase === 'game') {
+    showWarning(msg, 679);
+  } else {
+    state.message = `💤 ${msg}`;
+    render();
+  }
 }
 
 function classifyGatherable(x, y) {
@@ -1933,37 +2073,64 @@ function getPointerSubX() {
   return (((worldPxX % CELL_WIDTH) + CELL_WIDTH) % CELL_WIDTH) / CELL_WIDTH;
 }
 
-// Expanded gatherable hitbox matching visual sprite silhouettes (trees extend 1-2 tiles UP + slight left/right overhang;
-// rocks, berry bushes, mushrooms, bones extend slightly UP + left/right). Matches render-original.js red cursor 1:1!
+// Expanded gatherable hitbox matching visual sprite silhouettes in render-original.js 1:1
+// (trees extend 1-3 tiles UP + canopy overhang left/right; rocks, bushes, mushrooms extend UP + left/right).
 function findGatherableAtCursor(tx, ty, subX = getPointerSubX()) {
   const direct = classifyGatherable(tx, ty);
   if (direct) return direct;
   const d = state.data;
   if (!d) return null;
   const occ = d.occupancy[ty]?.[tx] ?? 0;
-  if (occ !== 0) return null; // Never override buildings, units, or wild animals on exact tile
+  const myTribe = state.localTribe ?? 0;
+  const canHitExpanded = occ === 0 || (occ >= 1 && occ <= 100 && getUnitOwner(d, occ) === myTribe);
+  if (!canHitExpanded) return null; // Never override buildings, enemy units, or wild animals on exact tile
 
   // 1 tile below: clicking upper body / canopy of a tree, rock, bush, mushroom, bone, or fish shoreline
   const below1 = classifyGatherable(tx, ty + 1);
   if (below1) return below1;
 
-  // 2 tiles below: clicking the tall crown of a tree (trees are ~32-44px tall = 2+ tiles above trunk)
+  // 2-3 tiles below: clicking the tall crown/leaves of a tree (~32-48px tall above trunk)
   const below2 = classifyGatherable(tx, ty + 2);
   if (below2 && below2.type === 'wood') return below2;
+  const below3 = classifyGatherable(tx, ty + 3);
+  if (below3 && below3.type === 'wood') return below3;
 
-  // Slight horizontal overhang when clicking near left/right edge of an adjacent resource sprite
-  if (subX < 0.38) {
+  // Horizontal canopy/sprite overhang when hovering near adjacent resource sprite
+  if (subX < 0.58) {
     const left0 = classifyGatherable(tx - 1, ty);
     if (left0) return left0;
     const left1 = classifyGatherable(tx - 1, ty + 1);
     if (left1) return left1;
-  } else if (subX > 0.62) {
+    const left2 = classifyGatherable(tx - 1, ty + 2);
+    if (left2 && left2.type === 'wood') return left2;
+  }
+  if (subX > 0.42) {
     const right0 = classifyGatherable(tx + 1, ty);
     if (right0) return right0;
     const right1 = classifyGatherable(tx + 1, ty + 1);
     if (right1) return right1;
+    const right2 = classifyGatherable(tx + 1, ty + 2);
+    if (right2 && right2.type === 'wood') return right2;
   }
   return null;
+}
+
+// Expanded unit/animal hitbox matching visual head/torso drawn 1 tile above foot occupancy tile
+function findExpandedEntityAtCursor(tx, ty) {
+  const d = state.data;
+  if (!d || tx < 0 || ty < 0 || tx >= d.width || ty >= d.height) return 0;
+  const occ = d.occupancy[ty]?.[tx] ?? 0;
+  if (occ !== 0) return occ;
+  if (ty + 1 < d.height) {
+    const belowOcc = d.occupancy[ty + 1]?.[tx] ?? 0;
+    if (belowOcc >= 1 && belowOcc <= 100 && (d.entityData[1919 + belowOcc] & 0xff) > 0) {
+      return belowOcc;
+    }
+    if (belowOcc >= 101 && belowOcc <= 122 && (d.entityData[1919 + belowOcc] & 0xff) > 0) {
+      return belowOcc;
+    }
+  }
+  return 0;
 }
 
 function depleteGatherTarget(gt, amount) {
@@ -1976,6 +2143,7 @@ function depleteGatherTarget(gt, amount) {
     if (next <= 0) {
       state.treeWood.delete(key);
       d.terrain[gt.y][gt.x] = 0; // felled tree clears into grass tile!
+      d._terrainVer = (d._terrainVer || 0) + 1;
       d.occupancy[gt.y][gt.x] = 0;
       addPopup(gt.x, gt.y, 'Đốn xong cây!', '#c5f285');
       return true;
@@ -2103,11 +2271,15 @@ function startCourtshipPair(force = false, preferredHut = null, owner = 0) {
   if (!chosenHut || !meetSpot) return false;
 
   // Find eligible adult male (sex 0, age >= 12) and adult female (sex 1, age >= 12)
+  // Authentic b.java:3281 & 3359: NEVER court while in combat or near enemies, and auto-courtship requires mood >= 75 & adequate food/energy!
   const isEligible = (id) => {
     if ((e[1414 + id] & 0xff) < 12) return false;
     if ((e[1919 + id] & 0xff) <= 0) return false;
+    if (isUnitInCombat(id) || findNearestEnemyFor(id, 10) > 0) return false;
     const mood = e[505 + id] & 0xff;
-    if (!force && mood < 50) return false;
+    const energy = e[2020 + id] & 0xff;
+    const satiety = e[2121 + id] & 0xff;
+    if (!force && (mood < 75 || energy <= 35 || satiety <= 35)) return false;
     const task = state.tasks.get(id);
     if (!task) return true;
     // Allow interrupting passive gathering/move when forced, or idle/move naturally
@@ -2872,7 +3044,8 @@ function commandUnitTo(tx, ty, overrideIds = null, owner = state.localTribe ?? 0
 
   const unitId = activeIds[0];
   const occ = d.occupancy[ty]?.[tx] ?? 0;
-  const isEnemyUnitOcc = occ >= 1 && occ <= 100 && getUnitOwner(d, occ) !== owner;
+  const effOcc = occ !== 0 ? occ : findExpandedEntityAtCursor(tx, ty);
+  const isEnemyUnitOcc = effOcc >= 1 && effOcc <= 100 && getUnitOwner(d, effOcc) !== owner;
   const isEnemyBldOcc = occ <= -1 && occ >= -60 && getBuildingOwner(d, -occ) !== owner;
   const isOwnBldOcc = occ <= -1 && occ >= -60 && getBuildingOwner(d, -occ) === owner;
   const adultIds = activeIds.filter((id) => (d.entityData[1414 + id] & 0xff) >= 12);
@@ -2910,20 +3083,22 @@ function commandUnitTo(tx, ty, overrideIds = null, owner = state.localTribe ?? 0
     isEnemyUnitOcc ||
     isEnemyBldOcc ||
     isOwnBldOcc ||
-    (occ >= 101 && occ <= 122) ||
+    (effOcc >= 101 && effOcc <= 122) ||
     Boolean(findGatherableAtCursor(tx, ty));
   if (isWorkOrCombatTarget && adultIds.length === 0) {
     if (!overrideIds) {
+      midiSynth.playSfx('ui_cancel');
       showWarning('⚠ Trẻ em (dưới 12 tuổi) chưa thể xây nhà, lao động hay chiến đấu!');
     }
     return;
   }
 
-  // Click an enemy warrior to attack with selected adult unit(s)
+  // Click an enemy warrior (including upper-body hitbox) to attack with selected adult unit(s)
   if (isEnemyUnitOcc) {
-    const dispatched = issueGroupAttack(adultIds, 'unit', occ);
+    const dispatched = issueGroupAttack(adultIds, 'unit', effOcc);
     if (dispatched > 0) {
       if (!overrideIds) {
+        midiSynth.playSfx('order');
         state.message =
           dispatched > 1
             ? `${dispatched} chiến binh đang xung phong tấn công quân địch!`
@@ -3112,13 +3287,14 @@ function commandUnitTo(tx, ty, overrideIds = null, owner = state.localTribe ?? 0
     }
   }
 
-  // Click a wild animal to hunt
-  if (occ >= 101 && occ <= 122) {
+  // Click a wild animal (including upper-body hitbox) to hunt
+  if (effOcc >= 101 && effOcc <= 122) {
     let hunters = 0;
     for (const uid of activeIds) {
-      if (assignHuntTask(uid, occ)) hunters++;
+      if (assignHuntTask(uid, effOcc)) hunters++;
     }
     if (hunters > 0) {
+      if (!overrideIds) midiSynth.playSfx('order');
       const info = getVillagerInfo(unitId);
       state.message = hunters > 1 ? `${hunters} thợ săn đang đi săn thú hoang!` : `${info.role} đang đi săn thú hoang!`;
       render();
@@ -3151,10 +3327,12 @@ function commandUnitTo(tx, ty, overrideIds = null, owner = state.localTribe ?? 0
       if (assignGatherTask(uid, gatherTarget)) gatherers++;
     }
     if (gatherers === 0) {
+      if (!overrideIds) midiSynth.playSfx('ui_cancel');
       state.message = `Không tìm được đường tới nguồn ${gatherTarget.label} tại (${tx}, ${ty}).`;
       render();
       return;
     }
+    if (!overrideIds) midiSynth.playSfx('order');
     const info = getVillagerInfo(unitId);
     const verb =
       gatherTarget.label === 'nấm'
@@ -3178,6 +3356,7 @@ function commandUnitTo(tx, ty, overrideIds = null, owner = state.localTribe ?? 0
   if (activeIds.length > 1) {
     const moved = issueGroupMove(activeIds, tx, ty);
     if (moved > 0) {
+      if (!overrideIds) midiSynth.playSfx('order');
       state.message = `Đội hình ${moved} chiến binh đang hành quân tới (${tx}, ${ty}).`;
       render();
       return;
@@ -3228,6 +3407,7 @@ function commandUnitTo(tx, ty, overrideIds = null, owner = state.localTribe ?? 0
     target: { x: destX, y: destY },
     workTicks: 0,
   });
+  if (!overrideIds) midiSynth.playSfx('order');
   state.activePath = planned.path;
   state.message = `${info.role} đang di chuyển tới (${destX}, ${destY}) (${planned.path.length} bước).`;
   render();
@@ -4111,15 +4291,16 @@ function stepSimulation() {
       const unitOwner = unitId > 50 ? 1 : 0;
       const tid = task.targetId;
       if ((e[1919 + tid] & 0xff) <= 0) {
-        // Target dead -> auto-acquire another nearby enemy within 6 tiles, or resume previous job!
+        // Target dead -> auto-acquire the NEAREST living enemy within 10 tiles, or resume previous job!
         e[7777 + unitId] = 0;
         state.tasks.delete(unitId);
         if (state.selectedUnit === unitId) state.activePath = [];
-        const nextEnemy = getEnemyIds(unitOwner).find((eid) => Math.max(Math.abs((e[eid] & 0xff) - ux), Math.abs((e[101 + eid] & 0xff) - uy)) <= 6);
+        const nextEnemy = findNearestEnemyFor(unitId, 10);
         if (nextEnemy && assignAttackTask(unitId, 'unit', nextEnemy)) {
           uiChanged = true;
           continue;
         }
+        markUnitInCombat(unitId, 50);
         if (!resumeSavedJob(unitId)) {
           setUnitAnim(unitId, 8, 0);
         }
@@ -4293,6 +4474,10 @@ function stepSimulation() {
           setUnitAnim(unitId, 142, Math.floor(task.workTicks / 2) % 10);
         } else {
           setUnitAnim(unitId, 21, Math.floor(task.workTicks / 2) % 2);
+        }
+        if (task.workTicks % 6 === 0 && (unitId > 50 ? 1 : 0) === (state.localTribe ?? 0)) {
+          if (gt.type === 'stone') midiSynth.playSfx('mine');
+          else if (gt.type === 'wood') midiSynth.playSfx('chop');
         }
         // Show live gathering progress (1..10) in Panel 4 cargo counter as each unit is collected
         const collectedSoFar = Math.min(cap, Math.floor((task.workTicks + 1) / ticksPerUnit));
@@ -4562,6 +4747,9 @@ function stepSimulation() {
       // Play authentic hammering (anim 53, 3 frames) or sawing (anim 54, 3 frames) INSIDE the scaffold
       const buildAnim = task.insideSlot.animId || 53;
       setUnitAnim(unitId, buildAnim, Math.floor(task.workTicks / 2) % 3);
+      if (task.workTicks % 5 === 0 && (bid > 30 ? 1 : 0) === (state.localTribe ?? 0)) {
+        midiSynth.playSfx('build');
+      }
       task.workTicks++;
 
       // Authentic steady construction / upgrade rate: +1 HP every 3 ticks per builder, capped by delivered materials!
@@ -4621,6 +4809,7 @@ function stepSimulation() {
           }
           // Dust cloud d(74) plays ONLY when the building finishes construction/upgrade (f.java:1517)!
           addDust(bld.x, bld.y, bld.w, bld.h);
+          if (bldOwner === (state.localTribe ?? 0)) midiSynth.playSfx('build_done');
           for (const wid of workers) grantSkillXp(wid, 12, 60);
 
           // If this finished building is a Nhà trẻ (bType 10), immediately call all outside children (< 12) of the tribe to run inside for safety!
@@ -4791,13 +4980,11 @@ function stepSimulation() {
     } else if (task.kind === 'rest') {
       const hut = task.target;
       if (!task.insideSlot) {
-        const slot = enterRestHut(d, hut.bid, unitId);
+        const slot = enterRestHut(d, hut.bid, unitId, false);
         if (slot) {
           task.insideSlot = slot;
           const info = getVillagerInfo(unitId);
-          state.message = slot.breeding
-            ? `${info.role} đã vào chung Lều (1 nam 1 nữ) — đang sinh thêm dân làng mới!`
-            : `${info.role} đã vào Lều ngủ hồi sức...`;
+          state.message = `${info.role} đã vào Lều ngủ hồi sức...`;
           uiChanged = true;
         } else {
           setUnitAnim(unitId, 8, 0);
@@ -4807,63 +4994,17 @@ function stepSimulation() {
         }
       }
       task.workTicks++;
-      // Advance building interior animation frame e[3030 + unitId] (13 frames for anim 115 glowing light / anim 116 breeding tent)
+      // Normal sleep inside Lều (b.java:2150 / f.java:1108): glowing light anim 115 ONLY, NEVER spawns babies!
+      e[1313 + unitId] = 1;
       e[3030 + unitId] = Math.floor(task.workTicks / 2) % 13;
 
-      // If 1 adult male + 1 adult female are inside this Lều (state 2: e[1313] === 2) and their tribe has room, spawn newborn villager!
-      if (e[1313 + unitId] === 2) {
-        task.breedTicks = (task.breedTicks || 0) + 1;
-      } else {
-        task.breedTicks = 0;
-      }
-      if (e[1313 + unitId] === 2 && task.breedTicks >= 36) {
-        const unitOwner = getUnitOwner(d, unitId);
-        const ownerPop = getVillagerIds(unitOwner).length;
-        const ownerHuts = getPlayerBuildings(unitOwner).filter((b) => !b.underConstruction && b.targetType === 2).length;
-        const ownerCap =
-          unitOwner === (state.localTribe ?? 0)
-            ? Math.max(state.housingCap, 6 + ownerHuts * 6)
-            : Math.max(6, 6 + ownerHuts * 6);
-        if (ownerPop < ownerCap) {
-          const newId = spawnNewbornVillager(d, hut.x + 1, hut.y + hut.h, unitOwner);
-          if (newId > 0) {
-            const newPop = getVillagerIds(unitOwner).length;
-            if (d.resources?.[unitOwner]) {
-              d.resources[unitOwner][11] = newPop;
-              d.resources[unitOwner][16] = ownerCap;
-            }
-            if (unitOwner === (state.localTribe ?? 0)) {
-              state.population = newPop;
-              syncResourcesToData(unitOwner);
-            }
-            const newName = getVillagerName(d, newId);
-            notifyTribeEvent(
-              unitOwner,
-              `👶 ${newName} được sinh ra! (Dân số: ${newPop}/${ownerCap})`,
-              `👶 ${newName} được sinh ra!`,
-              { x: hut.x + 1, y: hut.y, text: `${newName} được sinh ra!`, color: '#9cff7b' }
-            );
-            // Switch couple back to normal sleeping state 1 (glowing light only) after birth
-            let u = e[8993 + hut.bid];
-            let g = 0;
-            while (u > 0 && g++ < 16) {
-              if (e[1313 + u] === 2) e[1313 + u] = 1;
-              const ut = state.tasks.get(u);
-              if (ut) ut.breedTicks = 0;
-              u = e[4545 + u];
-            }
-            uiChanged = true;
-          }
-        }
-      }
-
       if (task.workTicks % 2 === 0) {
-        const nextEnergy = Math.min(100, (e[2020 + unitId] & 0xff) + 3);
+        const nextEnergy = Math.min(100, (e[2020 + unitId] & 0xff) + 4);
         const maxHp = e[6767 + unitId] & 0xff;
         const nextHp = Math.min(maxHp, (e[1919 + unitId] & 0xff) + 1);
         e[2020 + unitId] = nextEnergy;
         e[1919 + unitId] = nextHp;
-        if (nextEnergy >= 96 && (e[1313 + unitId] !== 2 || (task.breedTicks || 0) >= 38)) {
+        if (nextEnergy >= 98) {
           exitBuildingSlot(d, unitId);
           e[2222 + unitId] = 0;
           e[3333 + unitId] = -1;
@@ -5745,7 +5886,7 @@ function stepSimulation() {
       } else if (pair.stage === 'enterHut' || pair.stage === 'inHut') {
         if (!isUnitInsideBuilding(d, unitId)) {
           setUnitCarry(unitId, 0, 0);
-          const slot = enterRestHut(d, pair.hut.bid, unitId);
+          const slot = enterRestHut(d, pair.hut.bid, unitId, true);
           if (!slot) {
             cancelPair();
             continue;
@@ -5777,6 +5918,7 @@ function stepSimulation() {
                 if (pairOwner === (state.localTribe ?? 0)) {
                   state.population = newPop;
                   syncResourcesToData(pairOwner);
+                  midiSynth.playSfx('birth');
                 }
                 const babyName = getVillagerName(d, newId);
                 notifyTribeEvent(
@@ -5812,8 +5954,8 @@ function stepSimulation() {
     uiChanged = true;
   }
 
-  // Per-unit aggro scan radius: adult villagers seeing a nearby enemy (or enemy near a tribe building) immediately run to grab a weapon (default Stone) and fight back!
-  if (state.animTick % 6 === 0) {
+  // Per-unit aggro scan radius: runs before needs check so fighting/defending ALWAYS takes priority over eating/sleeping!
+  if (state.animTick % 4 === 0 || state.animTick % 28 === 0) {
     const tribesToScan = state.mpMode || state.aiMode ? [0, 1] : [0];
     for (const owner of tribesToScan) {
       const allies = getVillagerIds(owner);
@@ -5831,6 +5973,7 @@ function stepSimulation() {
             curTask.kind === 'armForBattle' ||
             curTask.kind === 'courtship')
         ) {
+          markUnitInCombat(uid, 60);
           continue;
         }
         const info = getVillagerInfo(uid);
@@ -5838,9 +5981,8 @@ function stepSimulation() {
         const uy = info.y;
         const insideBuilding = isUnitInsideBuilding(d, uid);
         const hasWeapon = (e[6565 + uid] & 0xff) < 9;
-        // Idle/walking villagers scan 6 tiles; busy workers/builders defend when enemy is within 6 tiles (or 4 tiles if inside a building)
-        const isBusyWorker = Boolean(curTask && curTask.kind !== 'move');
-        const scanRadius = insideBuilding ? 4 : isBusyWorker ? 6 : getUnitRange(uid) > 1 ? 7 : hasWeapon ? 6 : 6;
+        const isBusyWorker = Boolean(curTask && curTask.kind !== 'move' && curTask.kind !== 'eat' && curTask.kind !== 'rest');
+        const scanRadius = insideBuilding ? 4 : isBusyWorker ? 6 : getUnitRange(uid) > 1 ? 8 : hasWeapon ? 7 : 6;
         let nearestEnemy = 0;
         let bestDist = scanRadius + 0.01;
         for (const eid of enemies) {
@@ -5848,15 +5990,12 @@ function stepSimulation() {
           const ex = e[eid] & 0xff;
           const ey = e[101 + eid] & 0xff;
           const dist = Math.hypot(ex - ux, ey - uy);
-          if (dist <= bestDist) {
+          if (dist < bestDist) {
             bestDist = dist;
             nearestEnemy = eid;
-            continue;
-          }
-          // Also react if an enemy is attacking/threatening a nearby tribe building within 4 tiles of the enemy and 9 tiles of this villager!
-          if (!insideBuilding && dist <= 9) {
+          } else if (!insideBuilding && dist <= 9 && bestDist > scanRadius) {
             const threateningBase = ownBlds.some((b) => distanceToRect(ex, ey, b) <= 3);
-            if (threateningBase && dist < bestDist + 3) {
+            if (threateningBase) {
               bestDist = dist;
               nearestEnemy = eid;
             }
@@ -5938,7 +6077,8 @@ function stepSimulation() {
       const epilogue =
         evalRes.status === 'victory' ? getMissionDialogue(state.storyLines, state.scenarioIndex, 'outro')?.[0]?.text || '' : '';
       state.missionResult = { status: evalRes.status, reason: evalRes.reason, epilogue, score };
-      if (evalRes.status === 'victory' && state.music) midiSynth.playTrack(4);
+      if (evalRes.status === 'victory') midiSynth.playSfx('victory');
+      updateDynamicBgm(true);
       state.message = evalRes.status === 'victory' ? `HURRAH! CHIẾN THẮNG! ${evalRes.reason}` : `THẤT BẠI! ${evalRes.reason}`;
       uiChanged = true;
     }
@@ -5960,6 +6100,8 @@ function stepSimulation() {
   if (state.mpMode && mpClient?.role === 'host' && mpClient?.connected) {
     mpClient.sendSnapshot(packWorldSnapshot(d, state));
   }
+
+  if (state.animTick % 24 === 0) updateDynamicBgm();
 
   draw();
   if (uiChanged) updatePanel();
@@ -6423,9 +6565,10 @@ function stepVillagerNeeds() {
       }
 
       const working = Boolean(task);
-      const satiety = Math.max(0, (e[2121 + id] & 0xff) - (working ? 2 : 1));
-      const energy = Math.max(0, (e[2020 + id] & 0xff) - (working ? 2 : 1));
-      const mood = Math.max(0, (e[505 + id] & 0xff) - 1);
+      const drain = working ? 1 : state.animTick % 56 === 0 ? 1 : 0;
+      const satiety = Math.max(0, (e[2121 + id] & 0xff) - drain);
+      const energy = Math.max(0, (e[2020 + id] & 0xff) - drain);
+      const mood = Math.max(0, (e[505 + id] & 0xff) - (state.animTick % 56 === 0 ? 1 : 0));
       e[2121 + id] = satiety;
       e[2020 + id] = energy;
       e[505 + id] = mood;
@@ -6440,21 +6583,24 @@ function stepVillagerNeeds() {
       else if (mood <= 30) e[3333 + id] = 5;
       else e[3333 + id] = -1;
 
-      // Autonomous self-care (after eating/sleeping/dancing, resumeSavedJob() returns them to their previous job!):
-      // - Hungry -> seek Bếp (if Bếp exists & food > 0); otherwise just keep showing thought bubble!
-      // - Sleepy -> seek Lều (if Lều exists); otherwise just keep showing thought bubble!
-      // - Bored  -> seek Sàn disco (if Sàn disco exists); otherwise just keep showing thought bubble!
+      // Exact original J2ME behavior & priority order (b.java:3280-3338 boolean_n()):
+      // 0. NEVER abandon active combat, recent skirmish, or nearby enemies to eat/sleep/dance/heal!
+      // 1. Sleep (Lều) -> 2. Eat (Bếp) -> 3. Mood/Fun (Sàn disco) -> 4. Heal (Khu thánh địa)
       const curHp = e[1919 + id] & 0xff;
       const maxHp = Math.max(1, e[6767 + id] & 0xff);
-      const isLowHp = curHp > 0 && curHp < maxHp && (curHp <= Math.floor(maxHp * 0.55) || curHp <= 18);
+      const isLowHp = curHp > 0 && curHp < maxHp && (curHp <= Math.floor(maxHp * 0.5) || curHp <= 16);
       const isCombatTask =
         task &&
         (task.kind === 'attackUnit' ||
           task.kind === 'attackBuilding' ||
           task.kind === 'armForBattle' ||
           task.kind === 'hunt');
-      const thresh = task ? 20 : 38;
-      const canBreak = !isCombatTask && (!task || isLowHp || satiety <= thresh || energy <= thresh || mood <= thresh);
+      const inBattle = isCombatTask || isUnitInCombat(id) || findNearestEnemyFor(id, 10) > 0;
+      const needThresh = task ? 15 : 30;
+      const moodThresh = task ? 12 : 25;
+      const canBreak =
+        !inBattle &&
+        (!task || (isLowHp && curHp <= Math.floor(maxHp * 0.45)) || energy <= needThresh || satiety <= needThresh || mood <= moodThresh);
       if (canBreak) {
         const info = getVillagerInfo(id);
         const ux = info.x;
@@ -6470,7 +6616,16 @@ function stepVillagerNeeds() {
         );
         const kitchensReady = finishedKitchens.filter((b) => canKitchenServeFood(b.bid));
         const discosWithDj = finishedDiscos.filter((b) => isBuildingSlot0ActiveInside(b.bid));
-        if (isLowHp && !isShamanInShrine && shrinesReady.length > 0) {
+        if (energy <= needThresh && finishedHuts.length > 0) {
+          const hut = pickNearestBld(finishedHuts, ux, uy, true);
+          if (hut && assignRestTask(id, hut)) changed = true;
+        } else if (satiety <= needThresh && !isChefInKitchen && kitchensReady.length > 0) {
+          const kitchen = pickNearestBld(kitchensReady, ux, uy);
+          if (kitchen && assignEatTask(id, kitchen)) changed = true;
+        } else if (mood <= moodThresh && !isDjInDisco && discosWithDj.length > 0) {
+          const disco = pickNearestBld(discosWithDj, ux, uy);
+          if (disco && assignWorkAtBuilding(id, disco, [1, 2, 3, 4, 5, 6])) changed = true;
+        } else if (isLowHp && !isShamanInShrine && shrinesReady.length > 0) {
           const shrine = pickNearestBld(shrinesReady, ux, uy);
           if (shrine && assignWorkAtBuilding(id, shrine, [1])) {
             if (tribe === (state.localTribe ?? 0)) {
@@ -6478,15 +6633,6 @@ function stepVillagerNeeds() {
             }
             changed = true;
           }
-        } else if (satiety <= thresh && !isChefInKitchen && kitchensReady.length > 0) {
-          const kitchen = pickNearestBld(kitchensReady, ux, uy);
-          if (kitchen && assignEatTask(id, kitchen)) changed = true;
-        } else if (energy <= thresh && finishedHuts.length > 0) {
-          const hut = pickNearestBld(finishedHuts, ux, uy, true);
-          if (hut && assignRestTask(id, hut)) changed = true;
-        } else if (mood <= thresh && !isDjInDisco && discosWithDj.length > 0) {
-          const disco = pickNearestBld(discosWithDj, ux, uy);
-          if (disco && assignWorkAtBuilding(id, disco, [1, 2, 3, 4, 5, 6])) changed = true;
         }
       }
       if (id === state.selectedUnit) changed = true;
@@ -6629,6 +6775,8 @@ function resumeSavedGame() {
   state.paused = false;
   state.panelMode = 'main';
   state.tasks.clear();
+  state.savedJobs.clear();
+  state.combatLocks.clear();
   state.skillXp.clear();
   state.enemyTasks.clear();
   state.projectiles = [];
@@ -6696,11 +6844,36 @@ function jumpCameraFromMinimap(sx, sy) {
 
 function toggleMusic() {
   state.music = !state.music;
-  const trackIdx = state.phase === 'game' ? (state.scenarioIndex % 3) + 1 : 0;
+  midiSynth.unlock();
+  const desiredMood = getDesiredBgmMood();
+  currentBgmMood = desiredMood;
+  const trackIdx = pickTrackForMood(desiredMood);
   midiSynth.setEnabled(state.music, trackIdx);
-  const trackName = SA_TRACK_NAMES[midiSynth.currentTrackIndex] || 'MIDI';
-  state.message = state.music ? `🎵 Đã bật nhạc nền MIDI (/sa): ${trackName}` : '🔇 Đã tắt nhạc nền MIDI.';
-  render();
+  const rawTrackName = SA_TRACK_NAMES[midiSynth.currentTrackIndex] || 'MIDI';
+  const shortTrackName = rawTrackName.replace(/^Track \d+:\s*/i, '');
+  const msg = state.music
+    ? `MIDI #${midiSynth.currentTrackIndex}: ${shortTrackName}`
+    : 'Đã tắt nhạc nền MIDI.';
+  if (state.phase === 'game') {
+    showWarning(msg, 679);
+  } else {
+    state.message = state.music ? `🎵 Nhạc nền /sa (#${midiSynth.currentTrackIndex}): ${rawTrackName}` : `🔇 ${msg}`;
+    render();
+  }
+}
+
+function toggleSfx() {
+  state.sfx = !state.sfx;
+  midiSynth.unlock();
+  midiSynth.sfxEnabled = state.sfx;
+  if (state.sfx) midiSynth.playSfx('ui_confirm');
+  const msg = state.sfx ? 'Đã bật hiệu ứng âm thanh (SFX).' : 'Đã tắt hiệu ứng âm thanh (SFX).';
+  if (state.phase === 'game') {
+    showWarning(msg, 679);
+  } else {
+    state.message = state.sfx ? `🔊 ${msg}` : `🔇 ${msg}`;
+    render();
+  }
 }
 
 function cycleMidiTrack() {
@@ -6803,11 +6976,20 @@ function openCanvasVillagersMenu() {
   if (state.phase !== 'game' || !state.data) return;
   const ids = getVillagerIds();
   if (ids.length === 0) return;
+  const d = state.data;
+  const e = d.entityData;
   const items = ids.map((id) => {
     const u = getVillagerInfo(id);
+    const task = state.tasks.get(id);
+    const inside = isUnitInsideBuilding(d, id);
+    const isAdult = (e[1414 + id] & 0xff) >= 12;
+    const isIdle = isAdult && !task && !inside;
+    const taskTag = inside ? 'Trong nhà' : task ? describeTask(task) : isAdult ? 'RẢNH' : 'Trẻ em';
     return {
-      label: `${u.role} (${u.sex}, ${u.age}t)`,
+      label: `${u.role} (${u.sex}, ${u.age}t) · ${taskTag}`,
       unitId: id,
+      isIdle,
+      taskTag,
       action: () => {
         state.canvasMenu = null;
         selectUnit(id);
@@ -7254,35 +7436,119 @@ function openPauseMenu() {
   state.showMinimap = false;
   state.paused = !state.mpMode; // Never pause live 1v1 multiplayer simulation while viewing menu
   state.panelMode = 'pause';
-  const items = [
-    { label: 'TIẾP TỤC TRẬN ĐẤU', action: () => closePauseMenu() },
-    {
-      label: 'BẢN ĐỒ NHỎ (PHÍM 3)',
-      action: () => {
-        state.canvasMenu = null;
-        state.paused = false;
-        toggleMinimap();
-      },
-    },
-    {
-      label: `ÂM NHẠC MIDI: ${state.music ? 'BẬT' : 'TẮT'}`,
-      action: () => {
-        toggleMusic();
-        openPauseMenu();
-      },
-    },
-    {
-      label: 'QUAY VỀ PHÒNG CHỜ 1v1',
-      action: () => {
-        state.canvasMenu = null;
-        state.paused = false;
-        mpClient?.returnToLobby();
-        showMpLobby(true);
-        render();
-      },
-    },
-  ];
-  state.canvasMenu = { kind: 'pause', title: 'MENU TRẬN ĐẤU 1v1', items, selected: 0, scroll: 0 };
+  const items = state.mpMode
+    ? [
+        { label: 'TIẾP TỤC TRẬN ĐẤU', action: () => closePauseMenu() },
+        {
+          label: 'BẢN ĐỒ NHỎ (PHÍM 3)',
+          action: () => {
+            state.canvasMenu = null;
+            state.paused = false;
+            toggleMinimap();
+          },
+        },
+        {
+          label: `ÂM NHẠC MIDI: ${state.music ? 'BẬT' : 'TẮT'}`,
+          action: () => {
+            toggleMusic();
+            openPauseMenu();
+          },
+        },
+        {
+          label: `ÂM THANH SFX: ${midiSynth.sfxEnabled ? 'BẬT' : 'TẮT'}`,
+          action: () => {
+            toggleSfx();
+            openPauseMenu();
+          },
+        },
+        {
+          label: 'QUAY VỀ PHÒNG CHỜ 1v1',
+          action: () => {
+            state.canvasMenu = null;
+            state.paused = false;
+            mpClient?.returnToLobby();
+            showMpLobby(true);
+            render();
+          },
+        },
+      ]
+    : [
+        { label: 'TIẾP TỤC', action: () => closePauseMenu() },
+        {
+          label: 'LƯU TRÒ CHƠI',
+          action: () => {
+            saveCurrentGame();
+            closePauseMenu();
+          },
+        },
+        {
+          label: 'TẢI TRÒ CHƠI',
+          action: () => {
+            state.canvasMenu = null;
+            state.paused = false;
+            resumeSavedGame();
+          },
+        },
+        {
+          label: 'BẢN ĐỒ NHỎ (PHÍM 3)',
+          action: () => {
+            state.canvasMenu = null;
+            state.paused = false;
+            toggleMinimap();
+          },
+        },
+        {
+          label: `CHỌN MÀN (${state.scenarioIndex + 1}/10)`,
+          action: () => openCanvasScenariosMenu(),
+        },
+        {
+          label: `ÂM NHẠC MIDI: ${state.music ? 'BẬT' : 'TẮT'}`,
+          action: () => {
+            toggleMusic();
+            openPauseMenu();
+          },
+        },
+        {
+          label: `ÂM THANH SFX: ${midiSynth.sfxEnabled ? 'BẬT' : 'TẮT'}`,
+          action: () => {
+            toggleSfx();
+            openPauseMenu();
+          },
+        },
+        ...(state.scenarioIndex === 0
+          ? [
+              {
+                label: state.compareOriginal ? 'QUAY LẠI LIVE RENDER (V)' : 'SO SÁNH ẢNH JAR GỐC (V)',
+                action: () => {
+                  state.compareOriginal = !state.compareOriginal;
+                  closePauseMenu();
+                },
+              },
+            ]
+          : []),
+        {
+          label: '⚔️ PHÒNG CHƠI NHIỀU NGƯỜI',
+          action: () => {
+            closePauseMenu();
+            showMpLobby(true);
+          },
+        },
+        {
+          label: 'VỀ MENU CHÍNH',
+          action: () => {
+            state.canvasMenu = null;
+            state.paused = false;
+            setPhase('mainMenu');
+          },
+        },
+      ];
+  state.canvasMenu = {
+    kind: 'pause',
+    title: state.mpMode ? 'MENU TRẬN ĐẤU 1v1' : 'TẠM DỪNG',
+    items,
+    selected: 0,
+    scroll: 0,
+  };
   render();
 }
 
@@ -7299,12 +7565,13 @@ function moveCanvasMenuSelection(delta) {
   if (!m || !m.items?.length) return;
   const len = m.items.length;
   m.selected = (m.selected + delta + len) % len;
-  const pageSize = m.kind === 'pause' || m.kind === 'scenarios' ? 7 : m.kind === 'build' ? 1 : 5;
+  const pageSize = m.kind === 'pause' || m.kind === 'scenarios' ? 5 : m.kind === 'build' ? 1 : 5;
   if (m.selected < (m.scroll || 0)) m.scroll = m.selected;
   if (m.selected >= (m.scroll || 0) + pageSize) m.scroll = Math.max(0, m.selected - pageSize + 1);
   if (m.kind === 'villagers' && m.items[m.selected]?.unitId) {
     state.selectedUnit = m.items[m.selected].unitId;
   }
+  midiSynth.playSfx('ui_move');
   render();
 }
 
@@ -7330,11 +7597,11 @@ function handleCanvasMenuClick(x, y) {
 
   if (m.kind === 'pause' || m.kind === 'scenarios') {
     const items = m.items || [];
-    const visibleCount = Math.min(7, items.length);
+    const visibleCount = Math.min(5, items.length);
     const scroll = m.scroll || 0;
-    const rowH = 22;
+    const rowH = 19;
     const boardY = Math.max(64, Math.floor((LOGICAL_HEIGHT - 220) / 2));
-    const listTop = boardY + 38;
+    const listTop = boardY + 34;
     const selLeft = Math.floor(LOGICAL_WIDTH / 2) - 84;
     const selRight = Math.floor(LOGICAL_WIDTH / 2) + 84;
     if (x >= selLeft && x <= selRight && y >= listTop && y <= listTop + visibleCount * rowH) {
@@ -7483,6 +7750,8 @@ function loadScenario(index, opts = {}) {
   state.victoryDismissed = false;
   state.lastAlertTick = -999;
   state.tasks.clear();
+  state.savedJobs.clear();
+  state.combatLocks.clear();
   state.skillXp.clear();
   state.enemyTasks.clear();
   state.projectiles = [];
@@ -7523,47 +7792,171 @@ function loadScenario(index, opts = {}) {
   if (showStory && !isCustomGame) {
     openMissionStory(clamped, 'intro');
   }
-  if (state.music && midiSynth.tracks.length > 0) {
-    midiSynth.playTrack((clamped % 3) + 1);
-  }
   setPhase('game');
+  updateDynamicBgm(true);
+}
+
+function getOpeningFrameRect() {
+  const scale = Math.min(LOGICAL_WIDTH / 240, LOGICAL_HEIGHT / 320);
+  const w = Math.round(240 * scale);
+  const h = Math.round(320 * scale);
+  const x = Math.floor((LOGICAL_WIDTH - w) / 2);
+  const y = Math.floor((LOGICAL_HEIGHT - h) / 2);
+  return { x, y, w, h, scale };
+}
+
+function drawMainMenuModalOverlay() {
+  const modal = state.menuModal;
+  if (!modal) return;
+  ctx.save();
+  ctx.fillStyle = 'rgba(10, 16, 12, 0.78)';
+  ctx.fillRect(0, 0, 240, 320);
+  ctx.fillStyle = '#c5b85a';
+  ctx.fillRect(14, 28, 212, 264);
+  ctx.strokeStyle = '#3b2c12';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(15, 29, 210, 262);
+  ctx.strokeStyle = '#efe29a';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(18, 32, 204, 256);
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = '#2d1f0a';
+  ctx.font = 'bold 12px monospace';
+  const titles = { help: 'TRỢ GIÚP', options: 'TUỲ CHỌN', about: 'VỀ TRÒ CHƠI' };
+  ctx.fillText(titles[modal] || '', 120, 40);
+
+  ctx.textAlign = 'left';
+  ctx.font = '8px monospace';
+  let lines = [];
+  if (modal === 'help') {
+    lines = [
+      '• Click dân làng: chọn đơn vị',
+      '• Kéo chuột: khoanh chọn nhiều dân',
+      '• Click đất/cây/thú: đi, khai thác,',
+      '  săn bắt hoặc tấn công địch',
+      '• Click đúp: chạy nhanh (Sprint)',
+      '• B / nút xanh: Menu Xây & Lệnh',
+      '• 3 / M: Bản đồ nhỏ · P / Esc: Tạm dừng',
+      '• Tab: chuyển dân · Shift+7/9: lưu nhóm',
+      '• V (Màn 1): so sánh ảnh JAR gốc',
+    ];
+  } else if (modal === 'options') {
+    const langNames = ['TIẾNG VIỆT', 'FRANÇAIS', 'ITALIANO', 'DEUTSCH', 'ESPAÑOL'];
+    lines = [
+      `• Âm nhạc MIDI (/sa): ${state.music ? 'BẬT' : 'TẮT'}`,
+      '  (Nhấn M hoặc Enter để đổi)',
+      `• Âm thanh SFX: ${midiSynth.sfxEnabled ? 'BẬT' : 'TẮT'}`,
+      '  (Nhấn F để bật/tắt SFX)',
+      `• Ngôn ngữ: ${langNames[state.language] || 'TIẾNG VIỆT'}`,
+      '  (Nhấn L hoặc ←/→ để đổi)',
+      '• Phóng đại pixel: dùng nút 🔍',
+    ];
+  } else if (modal === 'about') {
+    lines = [
+      'BỘ LẠC THỜI TIỀN SỬ',
+      '(Prehistoric Tribes)',
+      '',
+      'Phục dựng 1:1 từ bản J2ME gốc',
+      'với toàn bộ sprite /pi0, /pi9,',
+      'bản đồ /ma, cốt truyện /0/d0',
+      'và nhạc nền MIDI /sa.',
+      '',
+      'Chạy trên WebGL / Canvas 60 FPS.',
+    ];
+  }
+  lines.forEach((line, idx) => {
+    ctx.fillText(line, 24, 66 + idx * 18);
+  });
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#4a3515';
+  ctx.font = 'bold 9px monospace';
+  ctx.fillText(
+    modal === 'options' ? 'ENTER: BẬT/TẮT NHẠC · ESC/CLICK: ĐÓNG' : 'CLICK HOẶC NHẤN ESC / ENTER ĐỂ ĐÓNG',
+    120,
+    270
+  );
+  ctx.restore();
 }
 
 function drawOpeningScreen() {
   const phaseDef = PHASES[state.phase];
+  if (!phaseDef) {
+    panelTitle.textContent = 'Phòng chờ 1v1';
+    panelCopy.textContent = state.message || 'Chọn chơi với Máy AI hoặc tạo/vào phòng 1v1.';
+    return;
+  }
   const img = getCaptureImage(phaseDef.capture);
+  ctx.fillStyle = '#0d140f';
+  ctx.fillRect(0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+  const rect = getOpeningFrameRect();
+  ctx.save();
+  ctx.translate(rect.x, rect.y);
+  ctx.scale(rect.w / 240, rect.h / 320);
   if (img.complete && img.naturalWidth) {
-    ctx.drawImage(img, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+    ctx.drawImage(img, 0, 0, 240, 320);
   } else {
     ctx.fillStyle = '#75b7dc';
-    ctx.fillRect(0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+    ctx.fillRect(0, 0, 240, 320);
   }
-  if (state.phase !== 'music') {
-    const top = state.phase === 'language' ? 92 : state.phase === 'campaignMenu' ? 124 : 144;
-    ctx.save();
+  if ((state.phase === 'mainMenu' || state.phase === 'campaignMenu' || state.phase === 'mode') && !state.menuModal) {
+    ctx.fillStyle = '#bfb156';
+    ctx.fillRect(32, 84, 176, 108);
+    const listTop = state.phase === 'mainMenu' ? 97 : 124;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    phaseDef.options.forEach((label, idx) => {
+      const oy = listTop + idx * 20;
+      const isSel = idx === state.selected;
+      ctx.font = isSel ? 'bold 9.5px monospace' : 'bold 8.5px monospace';
+      if (isSel) {
+        ctx.strokeStyle = '#33250c';
+        ctx.lineWidth = 2.5;
+        ctx.strokeText(label, 120, oy);
+        ctx.fillStyle = '#fff16b';
+      } else {
+        ctx.fillStyle = '#331d06';
+      }
+      ctx.fillText(label, 120, oy);
+    });
+  }
+  if (state.phase !== 'music' && !state.menuModal) {
+    const top = state.phase === 'language' ? 92 : state.phase === 'mainMenu' ? 97 : (state.phase === 'campaignMenu' || state.phase === 'mode') ? 124 : 144;
+    const arrowLeft = state.phase === 'language' ? 16 : 36;
+    const arrowRight = state.phase === 'language' ? 224 : 204;
     ctx.fillStyle = '#fff16b';
     ctx.strokeStyle = '#33250c';
     ctx.lineWidth = 2.5;
-    ctx.font = 'bold 11px monospace';
+    ctx.font = 'bold 8px monospace';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     const y = top + state.selected * 20;
-    ctx.strokeText('▶', 28, y);
-    ctx.fillText('▶', 28, y);
-    ctx.strokeText('◀', 212, y);
-    ctx.fillText('◀', 212, y);
-    ctx.restore();
+    ctx.strokeText('▶', arrowLeft, y);
+    ctx.fillText('▶', arrowLeft, y);
+    ctx.strokeText('◀', arrowRight, y);
+    ctx.fillText('◀', arrowRight, y);
   }
+  drawMainMenuModalOverlay();
+  ctx.restore();
 }
 
 function drawCampaignWalkthrough() {
   const img = getCaptureImage(state.campaignFrame);
+  ctx.fillStyle = '#0d140f';
+  ctx.fillRect(0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+  const rect = getOpeningFrameRect();
+  ctx.save();
+  ctx.translate(rect.x, rect.y);
+  ctx.scale(rect.w / 240, rect.h / 320);
   if (img.complete && img.naturalWidth) {
-    ctx.drawImage(img, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+    ctx.drawImage(img, 0, 0, 240, 320);
   } else {
     ctx.fillStyle = '#c4b856';
-    ctx.fillRect(0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+    ctx.fillRect(0, 0, 240, 320);
   }
+  ctx.restore();
 }
 
 function drawFrameToCtx(targetCtx) {
@@ -7581,7 +7974,10 @@ function drawFrameToCtx(targetCtx) {
     if (state.compareOriginal && state.scenarioIndex === 0) {
       const refImg = getCaptureImage(CAPTURED_FLOW.gameplay);
       if (refImg.complete && refImg.naturalWidth) {
-        ctx.drawImage(refImg, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+        ctx.fillStyle = '#0d140f';
+        ctx.fillRect(0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+        const rect = getOpeningFrameRect();
+        ctx.drawImage(refImg, rect.x, rect.y, rect.w, rect.h);
         ctx = prevCtx;
         return;
       }
@@ -7619,6 +8015,16 @@ function drawFrameToCtx(targetCtx) {
       state.buildingBuilders = bMap;
       state.buildingHasStaff = staffSet;
       state.kitchenHasChef = staffSet;
+      const idleSet = new Set();
+      const myTribeId = state.localTribe ?? 0;
+      const eData = state.data.entityData;
+      for (const uid of getVillagerIds(myTribeId)) {
+        if ((eData[1414 + uid] & 0xff) >= 12 && !state.tasks.has(uid) && !isUnitInsideBuilding(state.data, uid)) {
+          idleSet.add(uid);
+        }
+      }
+      state.idleUnits = idleSet;
+      state.idleVillagerCount = idleSet.size;
       renderOriginalMap(ctx, state.data, state, spriteCache);
     } else {
       ctx.fillStyle = '#18241b';
@@ -7638,8 +8044,13 @@ function drawFrameToCtx(targetCtx) {
   }
   if (state.phase === 'customSetup') {
     const img = getCaptureImage(3);
-    if (img.complete && img.naturalWidth) ctx.drawImage(img, 0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+    ctx.fillStyle = '#0d140f';
+    ctx.fillRect(0, 0, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+    const rect = getOpeningFrameRect();
     ctx.save();
+    ctx.translate(rect.x, rect.y);
+    ctx.scale(rect.w / 240, rect.h / 320);
+    if (img.complete && img.naturalWidth) ctx.drawImage(img, 0, 0, 240, 320);
     ctx.fillStyle = 'rgba(18, 16, 8, 0.72)';
     ctx.fillRect(14, 90, 212, 140);
     ctx.strokeStyle = '#d2c268';
@@ -8223,6 +8634,11 @@ function updatePanel() {
   }
 
   const phaseDef = PHASES[state.phase];
+  if (!phaseDef) {
+    panelTitle.textContent = 'Phòng chờ 1v1';
+    panelCopy.textContent = state.message || 'Chọn chơi với Máy AI hoặc tạo/vào phòng 1v1.';
+    return;
+  }
   if (state.phase === 'campaignMenu') {
     const ui = getUiStrings(state.language);
     const meta = loadSaveMetadata();
@@ -8277,6 +8693,7 @@ function setPhase(phase) {
   state.phase = phase;
   state.selected = 0;
   state.compareOriginal = false;
+  state.menuModal = null;
   if (phase === 'game') {
     if (state.data && !state.selectedUnit) {
       state.selectedUnit = state.data.hoverUnit || getVillagerIds()[0] || 0;
@@ -8288,24 +8705,55 @@ function setPhase(phase) {
 }
 
 function confirm() {
+  midiSynth.unlock();
   if (state.phase === 'language') {
+    midiSynth.playSfx('ui_confirm');
     applyLanguage(state.selected);
     setPhase('music');
     return;
   }
   if (state.phase === 'music') {
     state.music = state.selected === 0;
-    midiSynth.setEnabled(state.music, 0);
+    midiSynth.setEnabled(state.music, pickTrackForMood(0));
+    if (state.music) midiSynth.playSfx('ui_confirm');
     setPhase('mainMenu');
     return;
   }
   if (state.phase === 'mainMenu') {
+    midiSynth.playSfx('ui_confirm');
+    if (state.menuModal === 'options') {
+      toggleMusic();
+      render();
+      return;
+    }
+    if (state.menuModal) {
+      state.menuModal = null;
+      render();
+      return;
+    }
     if (state.selected === 0) {
       setPhase('mode');
       return;
     }
-    state.message = `${PHASES.mainMenu.options[state.selected]} — mục này chưa được dựng trong bản web.`;
-    render();
+    if (state.selected === 1) {
+      state.menuModal = 'help';
+      render();
+      return;
+    }
+    if (state.selected === 2) {
+      state.menuModal = 'options';
+      render();
+      return;
+    }
+    if (state.selected === 3) {
+      state.menuModal = 'about';
+      render();
+      return;
+    }
+    if (state.selected === 4) {
+      setPhase('language');
+      return;
+    }
     return;
   }
   if (state.phase === 'mode') {
@@ -8318,9 +8766,7 @@ function confirm() {
       return;
     }
     if (state.selected === 2) {
-      if (!state.data) loadScenario(0);
-      state.panelMode = 'scenarios';
-      setPhase('game');
+      showMpLobby(true);
       return;
     }
     setPhase('mainMenu');
@@ -8378,7 +8824,10 @@ function confirm() {
     }
     if (state.canvasMenu) {
       const item = state.canvasMenu.items?.[state.canvasMenu.selected];
-      if (item?.action) item.action();
+      if (item?.action) {
+        midiSynth.playSfx('ui_confirm');
+        item.action();
+      }
       return;
     }
     if (state.flagMode) {
@@ -8392,13 +8841,27 @@ function confirm() {
     const { x, y } = state.cursor;
     const occ = state.data.occupancy[y]?.[x] ?? 0;
     const myTribe = state.localTribe ?? 0;
-    const isOwnUnitOcc = occ >= 1 && occ <= 100 && getUnitOwner(state.data, occ) === myTribe;
-    const isEnemyUnitOcc = occ >= 1 && occ <= 100 && getUnitOwner(state.data, occ) !== myTribe;
+    const selIdsNow = getActiveSelectionIds();
+    const hasSel = selIdsNow.length > 0;
+    const expandedOcc = occ !== 0 ? occ : findExpandedEntityAtCursor(x, y);
+    const expandedGather = findGatherableAtCursor(x, y);
+    const isDirectOwnUnitOcc = occ >= 1 && occ <= 100 && getUnitOwner(state.data, occ) === myTribe;
+    const isExpandedOwnUnit =
+      !hasSel &&
+      !expandedGather &&
+      expandedOcc >= 1 &&
+      expandedOcc <= 100 &&
+      getUnitOwner(state.data, expandedOcc) === myTribe;
+    const isEnemyUnitOcc = expandedOcc >= 1 && expandedOcc <= 100 && getUnitOwner(state.data, expandedOcc) !== myTribe;
     const isOwnBldOcc = occ <= -1 && occ >= -60 && getBuildingOwner(state.data, -occ) === myTribe;
     const isEnemyBldOcc = occ <= -1 && occ >= -60 && getBuildingOwner(state.data, -occ) !== myTribe;
 
-    if (isOwnUnitOcc) {
+    if (isDirectOwnUnitOcc) {
       selectUnit(occ);
+      return;
+    }
+    if (isExpandedOwnUnit) {
+      selectUnit(expandedOcc);
       return;
     }
     if (isOwnBldOcc) {
@@ -8436,8 +8899,8 @@ function confirm() {
     if (getActiveSelectionIds().length > 0) {
       commandUnitTo(x, y);
     } else if (isEnemyUnitOcc) {
-      const ehp = state.data.entityData[1919 + occ] & 0xff;
-      const emax = state.data.entityData[6767 + occ] & 0xff;
+      const ehp = state.data.entityData[1919 + expandedOcc] & 0xff;
+      const emax = state.data.entityData[6767 + expandedOcc] & 0xff;
       state.message = `Chiến binh địch (HP ${ehp}/${emax}) — hãy chọn chiến binh của bạn trước để tấn công!`;
       render();
     } else if (isEnemyBldOcc) {
@@ -8446,14 +8909,22 @@ function confirm() {
         ? `${ebld.spec.name} của địch (HP ${ebld.hp}/${ebld.maxHp}) — hãy chọn chiến binh để phá hủy!`
         : 'Công trình của địch — hãy chọn chiến binh để tấn công!';
       render();
+    } else if (expandedOcc >= 101 && expandedOcc <= 122) {
+      state.message = '🦌 Thú hoang — hãy chọn dân làng trước để săn bắt!';
+      render();
+    } else if (expandedGather) {
+      state.message = `🪵 Nguồn ${expandedGather.label} — hãy chọn dân làng trước (click dân hoặc nhấn I) để thu thập!`;
+      render();
     } else {
-      state.message = 'Hãy chọn một dân làng trước (click vào dân, kéo khung chọn nhóm, hoặc nhấn Tab).';
+      state.message = 'Hãy chọn một dân làng trước (click vào dân, kéo khung chọn nhóm, hoặc nhấn Tab / I).';
       render();
     }
   }
 }
 
 function back() {
+  midiSynth.unlock();
+  midiSynth.playSfx('ui_cancel');
   if (state.phase === 'game') {
     if (state.storyDialog) {
       state.storyDialog = null;
@@ -8517,6 +8988,11 @@ function back() {
   } else if (state.phase === 'mode') {
     setPhase('mainMenu');
   } else if (state.phase === 'mainMenu') {
+    if (state.menuModal) {
+      state.menuModal = null;
+      render();
+      return;
+    }
     setPhase('music');
   } else if (state.phase === 'music') {
     setPhase('language');
@@ -8562,8 +9038,16 @@ window.addEventListener('keydown', (event) => {
   // Never steal keystrokes while typing in lobby inputs or while Multiplayer Lobby is open!
   const tag = event.target?.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  midiSynth.unlock();
   const lobbyEl = document.getElementById('mp-lobby');
-  if (lobbyEl && !lobbyEl.classList.contains('hidden')) return;
+  if (lobbyEl && !lobbyEl.classList.contains('hidden')) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      showMpLobby(false);
+      if (state.phase === 'lobby') setPhase('mainMenu');
+    }
+    return;
+  }
 
   const key = event.key.toLowerCase();
   if (state.phase === 'game') {
@@ -8590,6 +9074,7 @@ window.addEventListener('keydown', (event) => {
     else if (event.key === 'ArrowUp' || key === 'w') { event.preventDefault(); moveCursor(0, -1); }
     else if (event.key === 'ArrowDown' || key === 's') { event.preventDefault(); moveCursor(0, 1); }
     else if (event.key === 'Tab') { event.preventDefault(); cycleUnit(); }
+    else if (key === 'i') { event.preventDefault(); cycleIdleVillager(); }
     else if (event.key === '7' || event.key === '&') { event.preventDefault(); if (event.shiftKey) assignGroup(7); else recallGroup(7); }
     else if (event.key === '9' || event.key === '(') { event.preventDefault(); if (event.shiftKey) assignGroup(9); else recallGroup(9); }
     else if (key === 'r') { event.preventDefault(); rallyAllVillagers(); }
@@ -8615,14 +9100,29 @@ window.addEventListener('keydown', (event) => {
     return;
   }
 
+  if (state.phase === 'mainMenu' && state.menuModal === 'options') {
+    if (key === 'm') { event.preventDefault(); toggleMusic(); render(); return; }
+    if (key === 'f' || key === 'x') { event.preventDefault(); toggleSfx(); render(); return; }
+    if (key === 'l' || event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+      event.preventDefault();
+      const dir = event.key === 'ArrowLeft' ? -1 : 1;
+      applyLanguage((state.language + dir + 5) % 5);
+      midiSynth.playSfx('ui_move');
+      render();
+      return;
+    }
+  }
+
   const options = PHASES[state.phase]?.options || [];
   if (event.key === 'ArrowDown' || event.key === 'ArrowRight' || key === 's' || key === 'd') {
     event.preventDefault();
     state.selected = (state.selected + 1) % options.length;
+    midiSynth.playSfx('ui_move');
     render();
   } else if (event.key === 'ArrowUp' || event.key === 'ArrowLeft' || key === 'w' || key === 'a') {
     event.preventDefault();
     state.selected = (state.selected + options.length - 1) % options.length;
+    midiSynth.playSfx('ui_move');
     render();
   } else if (event.key === 'Enter' || event.key === ' ') {
     event.preventDefault();
@@ -8709,9 +9209,11 @@ canvas.addEventListener('contextmenu', (event) => {
 let lastMapClick = { time: 0, x: -99, y: -99 };
 
 canvas.addEventListener('pointerdown', (event) => {
+  midiSynth.unlock();
   if (event.button === 2) return; // Right-click handled by contextmenu (deselect / cancel)
   const { x, y } = canvasCoords(event);
   if (state.phase === 'game' && state.data) {
+    state.pointerPos = { x, y, visible: true };
     if (state.storyDialog) {
       advanceStoryDialog();
       return;
@@ -8735,6 +9237,8 @@ canvas.addEventListener('pointerdown', (event) => {
         } else {
           openCanvasActionsMenu();
         }
+      } else if (lx >= 35 && lx <= 90) {
+        cycleIdleVillager();
       } else if (lx >= 92 && lx <= 118) {
         if (event.shiftKey) assignGroup(7);
         else recallGroup(7);
@@ -8794,18 +9298,28 @@ canvas.addEventListener('pointerdown', (event) => {
   }
 
   if (state.phase === 'music') {
-    state.selected = x < LOGICAL_WIDTH / 2 ? 0 : 1;
+    const rect = getOpeningFrameRect();
+    const fx = ((x - rect.x) * 240) / rect.w;
+    state.selected = fx < 120 ? 0 : 1;
     confirm();
     return;
   }
 
   if (state.phase === 'customSetup') return;
 
+  if (state.phase === 'mainMenu' && state.menuModal) {
+    state.menuModal = null;
+    render();
+    return;
+  }
+
   const phaseDef = PHASES[state.phase];
   if (!phaseDef) return;
-  const top = state.phase === 'language' ? 92 : state.phase === 'campaignMenu' ? 124 : 144;
-  const row = Math.round((y - top) / 20);
-  if (row >= 0 && row < phaseDef.options.length && Math.abs(y - (top + row * 20)) <= 12) {
+  const rect = getOpeningFrameRect();
+  const fy = ((y - rect.y) * 320) / rect.h;
+  const top = state.phase === 'language' ? 92 : state.phase === 'mainMenu' ? 97 : (state.phase === 'campaignMenu' || state.phase === 'mode') ? 124 : 144;
+  const row = Math.round((fy - top) / 20);
+  if (row >= 0 && row < phaseDef.options.length && Math.abs(fy - (top + row * 20)) <= 12) {
     state.selected = row;
     confirm();
   }
@@ -8853,6 +9367,7 @@ function finishCanvasPointerDrag(event, cancelled = false) {
     }
     return;
   }
+  state.pointerPos = { x, y, visible: true };
   const cell = screenToMapCell(x, y);
   const now = performance.now();
   const hasSelection = state.selectedUnit > 0 || state.selectedUnits.size > 0;
@@ -8971,6 +9486,7 @@ Promise.all([
     }
     if (saBytes) {
       midiSynth.loadTracks(saBytes);
+      updateDynamicBgm(true);
     }
 
     state.baseData = baseData;
@@ -9019,7 +9535,7 @@ Promise.all([
         state.smoothCamY = state.cameraY;
       }
       if (viewportBadgeEl) {
-        viewportBadgeEl.innerHTML = `<span></span> ${w}×${h} · ${effScale}x WebGL`;
+        viewportBadgeEl.innerHTML = `<span></span> ${w}×${h} · ${effScale}x · ${state.liveFps || 60} FPS`;
       }
       if (zoomBtnEl) {
         zoomBtnEl.textContent = `🔍 ${effScale}x`;
@@ -9049,7 +9565,14 @@ Promise.all([
       canvas,
       width: LOGICAL_WIDTH,
       height: LOGICAL_HEIGHT,
-      tickMs: 120,
+      tickMs: 100,
+      onFpsUpdate(fps) {
+        state.liveFps = fps;
+        if (viewportBadgeEl) {
+          const vp = computeWindowViewport();
+          viewportBadgeEl.innerHTML = `<span></span> ${vp.w}×${vp.h} · ${vp.effScale}x · ${fps} FPS`;
+        }
+      },
       onStepSimulation() {
         try {
           stepSimulation();
@@ -9059,6 +9582,7 @@ Promise.all([
       },
       onFrameInterpolate(subTick, dt) {
         if (state.phase !== 'game' || !state.data) return false;
+        state.simSubTick = subTick;
         let changed = false;
 
         // 0. RTS Mouse Edge-Scrolling (60 FPS smooth camera pan when cursor touches window edges)
@@ -9169,6 +9693,16 @@ Promise.all([
           };
           for (const [uid, task] of state.tasks.entries()) interpUnit(uid, task);
           for (const [eid, task] of state.enemyTasks.entries()) interpUnit(eid, task);
+          // Smooth sub-tick wild animal interpolation (60–120+ FPS instead of 8 Hz jumps!)
+          for (const [aid, mv] of state.animalMoves.entries()) {
+            const frac = Math.min(1, ((mv.progress || 0) + subTick) / Math.max(1, mv.total || 1));
+            e[9403 + aid] = Math.round(-mv.dx * CELL_WIDTH * (1 - frac)) & 0xff;
+            e[9425 + aid] = Math.round(-mv.dy * CELL_HEIGHT * (1 - frac)) & 0xff;
+            changed = true;
+          }
+          if (state.projectiles.length > 0 || state.hitEffects.length > 0 || state.dustEffects.length > 0 || state.deathEffects.length > 0) {
+            changed = true;
+          }
         }
         return changed;
       },
@@ -9294,8 +9828,9 @@ Promise.all([
       state.buildPreview = null;
       state.showMinimap = false;
       state.tasks.clear();
-  state.skillXp.clear();
+      state.skillXp.clear();
       state.savedJobs.clear();
+      state.combatLocks.clear();
       state.enemyTasks.clear();
       state.weaponQueues.clear();
       state.siteMaterials.clear();
@@ -9329,6 +9864,7 @@ Promise.all([
         : `${f.icon} Trận đấu ${activeTribes.length} người bắt đầu! Bạn điều khiển ${f.name.toUpperCase()}${mpClient?.role === 'host' ? ' (Chủ phòng)' : ''}.`;
       clampCamera();
       showMpLobby(false);
+      updateDynamicBgm(true);
       render();
     };
 
@@ -9519,35 +10055,51 @@ Promise.all([
     });
     mpLeaveBtn?.addEventListener('click', () => {
       mpClient.leaveRoom();
-      state.phase = 'lobby';
-      state.paused = true;
+      if (state.mpMode || !state.data) {
+        state.mpMode = false;
+        state.phase = 'lobby';
+        state.paused = true;
+      }
       updateLobbyUI({ ...mpClient.lobby, role: null, connected: false });
     });
     openLobbyToolbarBtn?.addEventListener('click', () => {
       const el = document.getElementById('mp-lobby');
       showMpLobby(el?.classList.contains('hidden'));
     });
-
-    // Stay cleanly in 'lobby' phase (no game/HUD/shortcuts active) until both players are Ready!
-    state.phase = 'lobby';
-    state.paused = true;
-    state.data = null;
+    document.getElementById('mp-close-btn')?.addEventListener('click', () => {
+      showMpLobby(false);
+      if (state.phase === 'lobby') setPhase('mainMenu');
+    });
+    document.getElementById('btn-toolbar-toggle')?.addEventListener('click', () => {
+      document.getElementById('floating-toolbar')?.classList.toggle('expanded');
+    });
 
     const roomParam = params.get('room');
     if (roomParam) {
+      state.phase = 'lobby';
+      state.paused = true;
+      state.data = null;
       if (mpCodeInput) mpCodeInput.value = roomParam;
       if (mpNameInput) mpNameInput.value = 'Tù trưởng Đỏ';
       showMpLobby(true);
       if (params.get('autojoin') === '1') {
         mpClient.joinRoom(roomParam, 'Tù trưởng Đỏ');
       }
+    } else if (requested === 'lobby' || requested === 'mp') {
+      state.phase = 'lobby';
+      state.paused = true;
+      state.data = null;
+      showMpLobby(true);
     } else if (requested === 'game' || requested === 'strategy') {
       state.mpMode = false;
       state.paused = false;
       showMpLobby(false);
       loadScenario(startScenario, { showStory: wantStory });
     } else {
-      showMpLobby(true);
+      state.mpMode = false;
+      state.paused = false;
+      showMpLobby(false);
+      setPhase('language');
     }
   })
   .catch((err) => {

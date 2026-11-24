@@ -83,7 +83,8 @@ function getFactionRecoloredSheet(imageCache, sheetIndex, factionCode) {
 
 export function createImageCache(onLoad) {
   const cache = new Map();
-  return {
+  const wrapper = {
+    _loadVersion: 0,
     get(group, index) {
       const key = `${group}:${index}`;
       let img = cache.get(key);
@@ -91,7 +92,10 @@ export function createImageCache(onLoad) {
         const folder = group === 1 ? 'pi9' : group === 2 ? 'pi8' : 'pi0';
         img = new Image();
         img.src = `assets/${folder}/${String(index).padStart(2, '0')}.png`;
-        if (onLoad) img.onload = onLoad;
+        img.onload = () => {
+          wrapper._loadVersion++;
+          if (onLoad) onLoad();
+        };
         cache.set(key, img);
       }
       return img;
@@ -101,6 +105,7 @@ export function createImageCache(onLoad) {
       for (let i = 0; i < 6; i++) this.get(1, i);
     },
   };
+  return wrapper;
 }
 
 function buildingOwner(occ, data = null) {
@@ -211,11 +216,16 @@ export function drawLeaf(ctx, data, spriteIndex, x, y, imageCache, paletteSwap =
   }
 
   const colorIdx = ((bytes[20][spriteIndex] & 0xff) >>> 5) | ((bytes[21][spriteIndex] & 0x80) >>> 4);
-  const rgb = bytes[17];
-  const r = rgb[colorIdx * 3] & 0xff;
-  const g = rgb[colorIdx * 3 + 1] & 0xff;
-  const b = rgb[colorIdx * 3 + 2] & 0xff;
-  const color = `rgb(${r},${g},${b})`;
+  if (!imageCache._leafColors) imageCache._leafColors = [];
+  let color = imageCache._leafColors[colorIdx];
+  if (!color) {
+    const rgb = bytes[17];
+    const r = rgb[colorIdx * 3] & 0xff;
+    const g = rgb[colorIdx * 3 + 1] & 0xff;
+    const b = rgb[colorIdx * 3 + 2] & 0xff;
+    color = `rgb(${r},${g},${b})`;
+    imageCache._leafColors[colorIdx] = color;
+  }
 
   if (sheetIndex === 27) {
     ctx.strokeStyle = color;
@@ -731,6 +741,19 @@ function drawEntitySprite(ctx, data, entityId, screenX, screenY, dir, fieldOffse
       const jobBadge = e[2222 + entityId] & 0xff;
       if (jobBadge > 0) {
         drawComposite(ctx, data, 577 + Math.min(16, jobBadge), hx, hy, imageCache);
+      } else if (thought < 0 && uiState.idleUnits?.has?.(entityId)) {
+        // Subtle indicator above adult villagers currently having NO active task (Rảnh / Chưa có việc)
+        const bob = ((uiState.animTick || 0) >> 2) & 1;
+        ctx.save();
+        ctx.font = 'bold 7px monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'bottom';
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#241605';
+        ctx.strokeText('?', hx + 4, hy - 2 - bob);
+        ctx.fillStyle = '#ffe566';
+        ctx.fillText('?', hx + 4, hy - 2 - bob);
+        ctx.restore();
       }
 
       // Authentic original rank chevrons (^, ^^, ^^^) from f.java:1399-1402 (composites 602..606)
@@ -854,7 +877,7 @@ export function drawOriginalVillagerHud(ctx, data, state, imageCache) {
     ctx.fillStyle = '#000000';
     ctx.fillRect(100 + hpW + 1, y0 + 6, 16 - hpW, 4);
   }
-  drawPanel4Text(ctx, String(maxHp), 119, y0 + 10, 'center', 7, '#fff55a');
+  drawPanel4Text(ctx, String(maxHp), 108, y0 + 12, 'center', 6, '#fff55a');
 
   // Middle bar (comp 552 at y0+21): Food / Satiety bar (e[2121 + uid], restored by eating in Bếp!)
   drawComposite(ctx, data, 552, 92, y0 + 21, imageCache);
@@ -917,9 +940,14 @@ export function drawOriginalVillagerHud(ctx, data, state, imageCache) {
 
   // 9. Bottom right row: Current Job (154), Civil Skill 1 (185), Civil Skill 2 (213)
   const jobBadge = e[2222 + uid] & 0xff;
-  drawComposite(ctx, data, 560 + Math.min(16, jobBadge), 154, y0 + 25, imageCache);
+  const showPanelIdleTag = jobBadge === 0 && Boolean(state.idleUnits?.has?.(uid));
+  drawComposite(ctx, data, 560 + Math.min(16, jobBadge), showPanelIdleTag ? 151 : 154, y0 + 25, imageCache);
   const jobVal = getSkillVal(jobBadge);
-  if (jobVal !== null) drawPanel4Text(ctx, String(jobVal), 172, y0 + 27, 'center', 7, '#fff55a');
+  if (jobVal !== null) {
+    drawPanel4Text(ctx, String(jobVal), 172, y0 + 27, 'center', 7, '#fff55a');
+  } else if (showPanelIdleTag) {
+    drawPanel4Text(ctx, 'RẢNH', 173, y0 + 29, 'center', 5, '#ffe566');
+  }
 
   const skW1 = e[2323 + uid] & 0xff;
   if (skW1 > 0) {
@@ -985,6 +1013,17 @@ export function drawOriginalHud(ctx, data, state, imageCache) {
     drawComposite(ctx, data, 541, ox + 172, bottomTop + 12, imageCache);
     drawComposite(ctx, data, 542, ox + 97, bottomTop + 8, imageCache);
     drawComposite(ctx, data, 545, ox + 126, bottomTop + 8, imageCache);
+    // Idle adult villagers status pill (clickable / key I) on bottom HUD bar
+    const idleCount = state.idleVillagerCount || 0;
+    drawPanel4Text(
+      ctx,
+      idleCount > 0 ? `RẢNH:${idleCount}` : '0 RẢNH',
+      ox + 58,
+      bottomTop + 7,
+      'center',
+      7,
+      idleCount > 0 ? '#ffe566' : '#a9c87a'
+    );
     // Highlight assigned combat groups 7 and 9 on bottom HUD bar
     if (state.groups?.[7]?.size > 0) {
       ctx.fillStyle = state.activeGroupId === 7 ? '#fff36b' : '#7ae665';
@@ -1056,18 +1095,18 @@ function drawAuthenticBottomMenu(ctx, data, state, imageCache) {
     drawComposite(ctx, data, 1656, boardX + 5, boardY + 2, imageCache);
 
     const items = menu.items || [];
-    const visibleCount = Math.min(7, items.length);
+    const visibleCount = Math.min(5, items.length);
     const scroll = menu.scroll || 0;
-    const rowH = 22;
+    const rowH = 19;
 
     // Header title inside Panel 10 board
     ctx.fillStyle = '#4f2808';
     ctx.font = 'bold 10px monospace';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
-    ctx.fillText(menu.title || 'MENU TẠM DỪNG', LOGICAL_WIDTH / 2, boardY + 18);
+    ctx.fillText(menu.title || 'MENU TẠM DỪNG', LOGICAL_WIDTH / 2, boardY + 16);
 
-    const listTop = boardY + 38;
+    const listTop = boardY + 34;
     const selX = Math.floor(LOGICAL_WIDTH / 2) - 72;
     for (let i = 0; i < visibleCount; i++) {
       const idx = scroll + i;
@@ -1100,7 +1139,7 @@ function drawAuthenticBottomMenu(ctx, data, state, imageCache) {
       ctx.fillStyle = '#5a2d0c';
       ctx.font = 'bold 7px monospace';
       ctx.textAlign = 'center';
-      ctx.fillText(`▲ ▼ CUỘN (${menu.selected + 1}/${items.length})`, LOGICAL_WIDTH / 2, listTop + visibleCount * rowH + 4);
+      ctx.fillText(`▲ ▼ CUỘN (${menu.selected + 1}/${items.length})`, LOGICAL_WIDTH / 2, listTop + visibleCount * rowH + 2);
     }
 
     // Bottom Panel 17 softkeys: Left green ✓ (529), Right red ✕ (534)
@@ -1324,6 +1363,8 @@ function drawAuthenticBottomMenu(ctx, data, state, imageCache) {
       drawMenuVillagerFullBody(ctx, data, item.unitId, sx, sy, imageCache);
       if (item.rankBadge !== undefined) {
         drawPanel4Text(ctx, `^${item.rankBadge}`, sx + 22, sy + 14, 'center', 8, '#fff55a');
+      } else if (item.isIdle) {
+        drawPanel4Text(ctx, 'RẢNH', sx + 18, sy + 15, 'center', 6, '#ffe566');
       }
     } else if (item.glyph) {
       ctx.fillStyle = isSel ? '#fff582' : '#2e1d08';
@@ -1348,6 +1389,38 @@ function drawAuthenticBottomMenu(ctx, data, state, imageCache) {
   ctx.restore();
 }
 
+let _terrainCache = null;
+
+function getTerrainCacheCanvas(data, imageCache) {
+  if (typeof document === 'undefined' || !data?.terrain) return null;
+  const ver = `${data.width}x${data.height}:${data._terrainVer || 0}:${imageCache?._loadVersion || 0}`;
+  if (_terrainCache && _terrainCache.dataRef === data && _terrainCache.ver === ver) {
+    return _terrainCache.canvas;
+  }
+  const c = _terrainCache?.canvas || document.createElement('canvas');
+  const fullW = data.width * CELL_WIDTH;
+  const fullH = data.height * CELL_HEIGHT;
+  if (c.width !== fullW) c.width = fullW;
+  if (c.height !== fullH) c.height = fullH;
+  const tctx = c.getContext('2d');
+  tctx.imageSmoothingEnabled = false;
+  tctx.clearRect(0, 0, fullW, fullH);
+  for (let wy = 0; wy < data.height; wy++) {
+    const row = data.terrain[wy];
+    const py = wy * CELL_HEIGHT;
+    for (let wx = 0; wx < data.width; wx++) {
+      const tileId = row[wx] & 0xff;
+      if (tileId < 175) {
+        drawComposite(tctx, data, tileId, wx * CELL_WIDTH, py, imageCache);
+      } else if (tileId <= 178) {
+        drawComposite(tctx, data, 0, wx * CELL_WIDTH, py, imageCache);
+      }
+    }
+  }
+  _terrainCache = { dataRef: data, ver, canvas: c };
+  return c;
+}
+
 export function renderOriginalMap(ctx, data, state, imageCache) {
   const camXFull = state.smoothCamX ?? state.cameraX ?? data.cameraX ?? 0;
   const camYFull = state.smoothCamY ?? state.cameraY ?? data.cameraY ?? 0;
@@ -1370,25 +1443,53 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
   ctx.clip();
   ctx.translate(-fracX, -fracY);
 
-  // Pass 1: Ground terrain & base footprints (f.java o())
-  for (let sy = 0; sy < rows; sy++) {
-    const wy = camY + sy;
-    if (wy < 0 || wy >= data.height) continue;
-    for (let sx = 0; sx < cols; sx++) {
-      const wx = camX + sx;
-      if (wx < 0 || wx >= data.width) continue;
-      const tileId = data.terrain[wy][wx] & 0xff;
-      if (tileId < 175) {
-        drawComposite(ctx, data, tileId, sx * CELL_WIDTH, originY + sy * CELL_HEIGHT, imageCache);
-      } else if (tileId >= 175 && tileId <= 178) {
-        // Berry bushes & mushrooms sit on plain grass (tile 0); their bush graphic is drawn via occ (-61..-110)
-        drawComposite(ctx, data, 0, sx * CELL_WIDTH, originY + sy * CELL_HEIGHT, imageCache);
-      } else {
-        drawMapObject(ctx, data, tileId, 0, sx, sy, camX, camY, originY, animTick, imageCache, state);
+  // Pass 1: Static ground terrain (cached 1-shot blit) + dynamic base footprints (f.java o())
+  const terrainCanvas = getTerrainCacheCanvas(data, imageCache);
+  if (terrainCanvas) {
+    const srcX = Math.max(0, camX * CELL_WIDTH);
+    const srcY = Math.max(0, camY * CELL_HEIGHT);
+    const srcW = Math.min(terrainCanvas.width - srcX, cols * CELL_WIDTH);
+    const srcH = Math.min(terrainCanvas.height - srcY, rows * CELL_HEIGHT);
+    if (srcW > 0 && srcH > 0) {
+      const dstX = (srcX / CELL_WIDTH - camX) * CELL_WIDTH;
+      const dstY = originY + (srcY / CELL_HEIGHT - camY) * CELL_HEIGHT;
+      ctx.drawImage(terrainCanvas, srcX, srcY, srcW, srcH, dstX, dstY, srcW, srcH);
+    }
+    for (let sy = 0; sy < rows; sy++) {
+      const wy = camY + sy;
+      if (wy < 0 || wy >= data.height) continue;
+      for (let sx = 0; sx < cols; sx++) {
+        const wx = camX + sx;
+        if (wx < 0 || wx >= data.width) continue;
+        const tileId = data.terrain[wy][wx] & 0xff;
+        if (tileId >= 179) {
+          drawMapObject(ctx, data, tileId, 0, sx, sy, camX, camY, originY, animTick, imageCache, state);
+        }
+        const occ = data.occupancy[wy][wx];
+        if (occ < 0 && occ >= -123) {
+          drawMapObject(ctx, data, occ, 0, sx, sy, camX, camY, originY, animTick, imageCache, state);
+        }
       }
-      const occ = data.occupancy[wy][wx];
-      if (occ < 0 && occ >= -123) {
-        drawMapObject(ctx, data, occ, 0, sx, sy, camX, camY, originY, animTick, imageCache, state);
+    }
+  } else {
+    for (let sy = 0; sy < rows; sy++) {
+      const wy = camY + sy;
+      if (wy < 0 || wy >= data.height) continue;
+      for (let sx = 0; sx < cols; sx++) {
+        const wx = camX + sx;
+        if (wx < 0 || wx >= data.width) continue;
+        const tileId = data.terrain[wy][wx] & 0xff;
+        if (tileId < 175) {
+          drawComposite(ctx, data, tileId, sx * CELL_WIDTH, originY + sy * CELL_HEIGHT, imageCache);
+        } else if (tileId >= 175 && tileId <= 178) {
+          drawComposite(ctx, data, 0, sx * CELL_WIDTH, originY + sy * CELL_HEIGHT, imageCache);
+        } else {
+          drawMapObject(ctx, data, tileId, 0, sx, sy, camX, camY, originY, animTick, imageCache, state);
+        }
+        const occ = data.occupancy[wy][wx];
+        if (occ < 0 && occ >= -123) {
+          drawMapObject(ctx, data, occ, 0, sx, sy, camX, camY, originY, animTick, imageCache, state);
+        }
       }
     }
   }
@@ -1417,11 +1518,32 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
   // Pass 3: Foreground objects, trees, buildings, villagers, animals, fog of war (f.java u())
   const drawnBuildings = new Set();
   const drawnUnits = new Set();
+  // O(100) pre-index living outside units by tile key instead of scanning 100 units per tile (300,000 -> 100 checks/frame)
+  const unitsByTile = new Map();
+  if (data.entityData) {
+    const e = data.entityData;
+    const myTribe = state.localTribe ?? 0;
+    for (let uid = 1; uid <= 100; uid++) {
+      if ((e[1919 + uid] & 0xff) <= 0) continue;
+      if (toSignedByte(e[4646 + uid]) >= 0) continue; // inside a building slot
+      if (unitOwner(uid, data) !== myTribe && (e[7979 + uid] & 2) !== 0) continue;
+      const ux = e[uid] & 0xff;
+      const uy = e[101 + uid] & 0xff;
+      const key = uy * data.width + ux;
+      let bucket = unitsByTile.get(key);
+      if (!bucket) {
+        bucket = [];
+        unitsByTile.set(key, bucket);
+      }
+      bucket.push(uid);
+    }
+  }
   const hoverCellOcc =
     curWY >= 0 && curWY < data.height && curWX >= 0 && curWX < data.width ? data.occupancy[curWY][curWX] : 0;
   const uiState = {
     selectedUnit: state.selectedUnit || 0,
     selectedUnits: state.selectedUnits || null,
+    idleUnits: state.idleUnits || null,
     hoverUnit: hoverCellOcc >= 1 && hoverCellOcc <= 100 ? hoverCellOcc : 0,
     localTribe: state.localTribe ?? 0,
     animTick,
@@ -1430,9 +1552,22 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
   for (let ai = -1; ai < rows + 3; ai++) {
     const wy = camY + ai;
     if (wy >= data.height) continue;
+    let solidFogStart = -1;
+    let solidFogEnd = -1;
+    const flushSolidFog = () => {
+      if (solidFogStart >= 0) {
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(solidFogEnd * CELL_WIDTH, originY + ai * CELL_HEIGHT, (solidFogStart - solidFogEnd + 1) * CELL_WIDTH, CELL_HEIGHT);
+        solidFogStart = -1;
+        solidFogEnd = -1;
+      }
+    };
     for (let ah = cols; ah >= -1; ah--) {
       const wx = camX + ah;
-      if (wy < 0 || wx < 0 || wx >= data.width) continue;
+      if (wy < 0 || wx < 0 || wx >= data.width) {
+        flushSolidFog();
+        continue;
+      }
 
       const px = ah * CELL_WIDTH;
       const py = originY + ai * CELL_HEIGHT;
@@ -1549,35 +1684,35 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
         }
       }
 
-      // Draw all living ground units (1..100) located on tile (wx, wy) directly from entityData coordinates (e[uid], e[101+uid])
-      // so a villager never vanishes if occupancy[wy][wx] is shared or touched by another entity or building!
+      // Draw all living ground units (1..100) located on tile (wx, wy) via O(1) tile bucket lookup
       if (fog < 1) {
-        const e = data.entityData;
-        for (let uid = 1; uid <= 100; uid++) {
-          if (drawnUnits.has(uid)) continue;
-          if ((e[1919 + uid] & 0xff) <= 0) continue;
-          if (toSignedByte(e[4646 + uid]) >= 0) continue; // inside a building slot
-          if ((e[uid] & 0xff) !== wx || (e[101 + uid] & 0xff) !== wy) continue;
-          if (unitOwner(uid, data) !== (state.localTribe ?? 0) && (e[7979 + uid] & 2) !== 0) continue;
-          if (data.occupancy[wy]?.[wx] === 0) {
-            data.occupancy[wy][wx] = uid;
+        const bucket = unitsByTile.get(wy * data.width + wx);
+        if (bucket) {
+          const e = data.entityData;
+          for (let bi = 0; bi < bucket.length; bi++) {
+            const uid = bucket[bi];
+            if (drawnUnits.has(uid)) continue;
+            if (data.occupancy[wy]?.[wx] === 0) {
+              data.occupancy[wy][wx] = uid;
+            }
+            drawnUnits.add(uid);
+            drawEntitySprite(
+              ctx,
+              data,
+              uid,
+              px + toSignedByte(e[202 + uid]),
+              py + toSignedByte(e[303 + uid]),
+              e[606 + uid],
+              29,
+              imageCache,
+              uiState
+            );
           }
-          drawnUnits.add(uid);
-          drawEntitySprite(
-            ctx,
-            data,
-            uid,
-            px + toSignedByte(e[202 + uid]),
-            py + toSignedByte(e[303 + uid]),
-            e[606 + uid],
-            29,
-            imageCache,
-            uiState
-          );
         }
       }
 
       if (fog === 1) {
+        flushSolidFog();
         drawLeaf(ctx, data, 12, px - 2, py - 4, imageCache);
       } else if (fog === 2) {
         const edge =
@@ -1590,13 +1725,17 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
           getFogState(data, wx, wy - 1) !== 2 ||
           getFogState(data, wx, wy + 1) !== 2;
         if (edge) {
+          flushSolidFog();
           drawLeaf(ctx, data, 11, px - 3, py - 2, imageCache);
         } else {
-          ctx.fillStyle = '#000000';
-          ctx.fillRect(px, py, CELL_WIDTH, CELL_HEIGHT);
+          if (solidFogStart < 0) solidFogStart = ah;
+          solidFogEnd = ah;
         }
+      } else {
+        flushSolidFog();
       }
     }
+    flushSolidFog();
   }
 
   // Fallback pass for any living ground units (1..100) whose tile was shared or overlapped by another entity/building footprint
@@ -1809,7 +1948,8 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
     const m = data.mapTableData;
     const mo = data.mapTableOffsets;
     for (const p of state.projectiles) {
-      const t = Math.max(0, Math.min(1, p.age / Math.max(1, p.duration)));
+      const sub = p.targetType === 'training' ? 0 : (state.simSubTick || 0);
+      const t = Math.max(0, Math.min(1, (p.age + sub) / Math.max(1, p.duration)));
       const wx = p.x0 + (p.x1 - p.x0) * t;
       const wy = p.y0 + (p.y1 - p.y0) * t;
       const arc = Math.round(Math.sin(t * Math.PI) * 14);
@@ -2019,7 +2159,11 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
     let cursorAnim = 32;
     if (!state.canvasMenu && !state.showMinimap && !state.missionResult && (state.selectedUnit > 0 || state.selectedUnits?.size > 0)) {
       const targetOcc = hoverCellOcc;
-      const isEnemyUnit = targetOcc >= 1 && targetOcc <= 100 && unitOwner(targetOcc, data) !== myTribe;
+      const belowOcc =
+        curWY + 1 < data.height && curWX >= 0 && curWX < data.width ? (data.occupancy[curWY + 1]?.[curWX] ?? 0) : 0;
+      const isEnemyUnit =
+        (targetOcc >= 1 && targetOcc <= 100 && unitOwner(targetOcc, data) !== myTribe) ||
+        (targetOcc === 0 && belowOcc >= 1 && belowOcc <= 100 && unitOwner(belowOcc, data) !== myTribe);
       const isEnemyBld = buildingOwner(targetOcc, data) >= 0 && buildingOwner(targetOcc, data) !== myTribe;
       const isGatherCell = (gx, gy, treesOnly = false) => {
         if (gx < 0 || gy < 0 || gx >= data.width || gy >= data.height) return false;
@@ -2041,18 +2185,21 @@ export function renderOriginalMap(ctx, data, state, imageCache) {
       };
       const worldPxX = state.pointerPos.x + camXFull * CELL_WIDTH;
       const subX = (((worldPxX % CELL_WIDTH) + CELL_WIDTH) % CELL_WIDTH) / CELL_WIDTH;
+      const canHitExpanded = targetOcc === 0 || (targetOcc >= 1 && targetOcc <= 100 && unitOwner(targetOcc, data) === myTribe);
       const hasExpandedGatherable =
         isGatherCell(curWX, curWY) ||
-        (targetOcc === 0 &&
+        (canHitExpanded &&
           (isGatherCell(curWX, curWY + 1) ||
             isGatherCell(curWX, curWY + 2, true) ||
-            (subX < 0.38 && (isGatherCell(curWX - 1, curWY) || isGatherCell(curWX - 1, curWY + 1))) ||
-            (subX > 0.62 && (isGatherCell(curWX + 1, curWY) || isGatherCell(curWX + 1, curWY + 1)))));
+            isGatherCell(curWX, curWY + 3, true) ||
+            (subX < 0.58 && (isGatherCell(curWX - 1, curWY) || isGatherCell(curWX - 1, curWY + 1) || isGatherCell(curWX - 1, curWY + 2, true))) ||
+            (subX > 0.42 && (isGatherCell(curWX + 1, curWY) || isGatherCell(curWX + 1, curWY + 1) || isGatherCell(curWX + 1, curWY + 2, true)))));
       const isHostileOrGatherable =
         hasExpandedGatherable ||
         isEnemyBld ||
         isEnemyUnit ||
-        isWildAnimal(targetOcc);
+        isWildAnimal(targetOcc) ||
+        (targetOcc === 0 && isWildAnimal(belowOcc));
       cursorAnim = isHostileOrGatherable ? 34 : 33;
     }
     drawAnimation(ctx, data, cursorAnim, Math.round(state.pointerPos.x), Math.round(state.pointerPos.y), Math.floor(animTick / 2), imageCache);
