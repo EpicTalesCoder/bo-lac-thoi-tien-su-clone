@@ -165,7 +165,7 @@ export function decodeCa(bytes) {
       }
     }
     return Array.from(bytes.subarray(start, start + rowLength), (value, index) => {
-      if (FULL_CA_ROWS.has(row) && index % 3 === 2) {
+      if (index % 3 === 2) {
         const signedFrame = s8(value);
         if (signedFrame > 60 && signedFrame < 65) return 0;
         return signedFrame < 0 ? signedFrame + 256 : signedFrame;

@@ -12,7 +12,7 @@ import {
   PROJECTILE_SPRITE_BASE,
   DEFAULT_SETTINGS,
 } from './tt-match.js';
-import { loadSave, saveSave } from './storage-i18n.js';
+import { loadSave, saveSave, LANG, getLang } from './storage-i18n.js';
 
 const WIDTH = 240;
 const HEIGHT = 320;
@@ -27,6 +27,7 @@ const app = {
   screen: 'startup',
   J: true,
   K: 0,
+  lang: getLang(savedState),
   mode: MODE.DEATHMATCH,
   character: 0, // 0 = Soldier, 1 = Mutant
   levelIndex: 0,
@@ -49,9 +50,26 @@ const app = {
   },
 };
 
+function t() {
+  return LANG[app.lang === 'en' ? 'en' : 'vi'];
+}
+
+function syncLangButton() {
+  if (typeof document === 'undefined') return;
+  const btn = document.getElementById('btn-lang');
+  if (btn) btn.textContent = app.lang === 'en' ? '🌐 EN' : '🌐 VI';
+}
+
+export function toggleLanguage() {
+  app.lang = app.lang === 'vi' ? 'en' : 'vi';
+  syncLangButton();
+  persistSettings();
+}
+
 function persistSettings() {
   saveSave({
     ...loadSave(),
+    lang: app.lang,
     soundEnabled: app.soundEnabled,
     vibroEnabled: app.vibroEnabled,
     detailLevel: app.detailLevel,
@@ -83,8 +101,65 @@ function drawCu2Frame(ctx2d, frameId, x, y, facing = 1) {
   });
 }
 
-function drawText(ctx2d, text, x, y, anchor = 20) {
-  app.font.draw(ctx2d, text, x, y, anchor);
+const UI_FONT = 'bold 9px "DejaVu Sans", "Liberation Sans", Arial, sans-serif';
+const UI_LINE_HEIGHT = 11;
+
+function measureUiText(ctx2d, text) {
+  const str = String(text ?? '');
+  if (!ctx2d) return str.length * 6;
+  ctx2d.save();
+  ctx2d.font = UI_FONT;
+  const w = Math.ceil(ctx2d.measureText(str).width);
+  ctx2d.restore();
+  return w;
+}
+
+function wrapUiText(ctx2d, text, maxWidth) {
+  const paragraphs = String(text ?? '').split(/[\r\n]+/);
+  const lines = [];
+  for (const para of paragraphs) {
+    const words = para.trim().split(/\s+/).filter(Boolean);
+    if (!words.length) continue;
+    let current = '';
+    for (const word of words) {
+      const next = current ? `${current} ${word}` : word;
+      if (current && measureUiText(ctx2d, next) > maxWidth) {
+        lines.push(current);
+        current = word;
+      } else {
+        current = next;
+      }
+    }
+    if (current) lines.push(current);
+  }
+  return lines;
+}
+
+function drawText(ctx2d, text, x, y, anchor = 20, color = '#ffffff') {
+  const str = String(text ?? '');
+  if (!str) return;
+  ctx2d.save();
+  ctx2d.font = UI_FONT;
+  ctx2d.textBaseline = 'top';
+  ctx2d.textAlign = 'left';
+  let drawX = Math.round(x);
+  const drawY = Math.round(y);
+  if (anchor & 1) drawX -= measureUiText(ctx2d, str) >> 1;
+  ctx2d.fillStyle = '#000000';
+  ctx2d.fillText(str, drawX + 1, drawY + 1);
+  ctx2d.fillText(str, drawX - 1, drawY);
+  ctx2d.fillText(str, drawX + 1, drawY);
+  ctx2d.fillText(str, drawX, drawY - 1);
+  ctx2d.fillText(str, drawX, drawY + 1);
+  ctx2d.fillStyle = color;
+  ctx2d.fillText(str, drawX, drawY);
+  ctx2d.restore();
+}
+
+function localizedLevelLabels() {
+  const tr = t();
+  return Array.from({ length: 12 }, (_, index) =>
+    index === 11 ? tr.back : `${index + 1}. ${tr.levelPrefix} ${index + 1}`);
 }
 
 // Draw softkeys (OK left, Back right) using original ccs sprites 32 & 33 (c.java:300-310).
@@ -137,10 +212,11 @@ function getChoiceGeometry(labels, state) {
 }
 
 function drawChoicePage(ctx2d, labels, state) {
-  const fontHeight = app.font.lineHeight;
+  const tr = t();
+  const fontHeight = UI_LINE_HEIGHT;
   const g = getChoiceGeometry(labels, state);
   const confirmation = state === 0;
-  const { sourceCursor, sourceCursorHeight, modeSelection, characterSelection, rowHeight, Q, m, n, P, S, R, listTop, firstVisible } = g;
+  const { sourceCursor, sourceCursorHeight, modeSelection, characterSelection, rowHeight, Q, n, P, S, R, listTop, firstVisible } = g;
 
   if (characterSelection) {
     app.character = app.selection === 1 ? 1 : 0;
@@ -179,7 +255,7 @@ function drawChoicePage(ctx2d, labels, state) {
       withMIDPClip(ctx2d, S, y - n, P, sourceCursorHeight, () => ctx2d.drawImage(sourceCursor, S, y - n));
     }
     const label = labels[app.selection] || labels[0] || '';
-    drawText(ctx2d, label, Q - (app.font.measure(label) >> 1), y - (fontHeight >> 1) - 1, 20);
+    drawText(ctx2d, label, Q, y - (fontHeight >> 1), 21);
     drawSoftkeys(ctx2d);
     return;
   }
@@ -191,11 +267,12 @@ function drawChoicePage(ctx2d, labels, state) {
     const y = listTop + visibleIndex * rowHeight + (rowHeight >> 1);
     let label = rawLabel;
     if (state === 1) {
-      if (absoluteIndex === 3) label = `${label}${app.soundEnabled ? app.data.statusRows[1] || 'Вкл' : app.data.statusRows[0] || 'Выкл'}`;
+      if (absoluteIndex === 3) label = `${label}${app.soundEnabled ? tr.on : tr.off}`;
       if (absoluteIndex === 4) label = `${label}${app.detailLevel}`;
     } else if (state === 2) {
-      if (absoluteIndex === 0) label = `${label}${app.vibroEnabled ? app.data.statusRows[1] || 'Вкл' : app.data.statusRows[0] || 'Выкл'}`;
-      if (absoluteIndex === 1) label = `${label}${app.soundEnabled ? app.data.statusRows[1] || 'Вкл' : app.data.statusRows[0] || 'Выкл'}`;
+      if (absoluteIndex === 0) label = `${label}${app.vibroEnabled ? tr.on : tr.off}`;
+      if (absoluteIndex === 1) label = `${label}${app.soundEnabled ? tr.on : tr.off}`;
+      if (absoluteIndex === 2) label = `${label}${tr.label}`;
     }
     const inset = selected ? P >> 2 : 0;
     const panelX = Q - ((R - S + P) >> 1) + 5 - inset;
@@ -216,7 +293,7 @@ function drawChoicePage(ctx2d, labels, state) {
       ctx2d.lineTo(R + (inset << 1), y - n + offset);
       ctx2d.stroke();
     }
-    drawText(ctx2d, label, Q - (app.font.measure(label) >> 1), y - (fontHeight >> 1) - 1, 20);
+    drawText(ctx2d, label, Q, y - (fontHeight >> 1), 21);
   });
 
   // Scroll arrows if list > 5 (c.java:1424-1431)
@@ -236,7 +313,7 @@ function drawChoicePage(ctx2d, labels, state) {
 
   // Mode description box at bottom of K=5 (c.java:621-651)
   if (modeSelection && app.selection < 5) {
-    const desc = app.data.text3Rows[7 + app.selection] || '';
+    const desc = tr.modeDesc[app.selection] || '';
     const boxY = listTop + 5 * rowHeight + 16;
     const boxH = HEIGHT - boxY - 22;
     if (boxH > 20) {
@@ -244,7 +321,7 @@ function drawChoicePage(ctx2d, labels, state) {
       ctx2d.fillRect(P, boxY, WIDTH - (P << 1), boxH);
       ctx2d.strokeStyle = '#884800';
       ctx2d.strokeRect(P, boxY, WIDTH - (P << 1), boxH);
-      const wrapped = wrapJ2meText(desc, app.font, WIDTH - (P << 1) - 10);
+      const wrapped = wrapUiText(ctx2d, desc, WIDTH - (P << 1) - 10);
       const maxLines = Math.max(1, Math.floor((boxH - 6) / fontHeight));
       wrapped.slice(0, maxLines).forEach((line, idx) => {
         drawText(ctx2d, line, P + 5, boxY + 4 + idx * fontHeight, 20);
@@ -253,37 +330,33 @@ function drawChoicePage(ctx2d, labels, state) {
   }
 
   if (confirmation) {
-    const prompt = app.data.text[0]?.[2] || '';
-    drawText(ctx2d, prompt, Q - (app.font.measure(prompt) >> 1), HEIGHT >> 3, 20);
+    drawText(ctx2d, tr.soundPrompt, Q, HEIGHT >> 3, 21, '#ffff66');
   }
   drawSoftkeys(ctx2d);
 }
 
 // Port of c.java:802-843 — Help & About scrollable text pages.
 function drawTextPage(ctx2d, text) {
-  const lines = String(text).split(/[\r\n]+/).filter(Boolean);
-  const lineHeight = app.font.lineHeight;
-  const maxWidth = WIDTH - (Math.trunc(WIDTH / 13) << 1) - 4;
-  const visible = [];
-  for (const rawLine of lines) {
-    const wrapped = wrapJ2meText(rawLine.replace(/^\|/, ''), app.font, maxWidth);
-    visible.push(...wrapped);
-  }
-  const rowCapacity = Math.max(1, Math.floor((HEIGHT - 4 * lineHeight) / lineHeight));
+  const lineHeight = UI_LINE_HEIGHT + 2;
+  const maxWidth = WIDTH - 24;
+  const visible = wrapUiText(ctx2d, text, maxWidth);
+  const rowCapacity = Math.max(1, Math.floor((HEIGHT - 44) / lineHeight));
   const scroll = Math.max(0, Math.min(app.configPage, Math.max(0, visible.length - rowCapacity)));
   visible.slice(scroll, scroll + rowCapacity).forEach((line, index) => {
-    drawText(ctx2d, line, WIDTH >> 4, lineHeight * 2 + index * lineHeight, 20);
+    const isHeader = index === 0 && scroll === 0;
+    drawText(ctx2d, line, isHeader ? (WIDTH >> 1) : 12, 16 + index * lineHeight, isHeader ? 21 : 20, isHeader ? '#ffff66' : '#ffffff');
   });
   drawSoftkeys(ctx2d);
 }
 
 // Port of c.java:1090-1325 — Match configuration pages K=6..10.
 function drawConfigurationPage(ctx2d, labels, state) {
+  const tr = t();
   const parameters = app.settings;
   const mode = state - 6;
   const primary = [parameters.F, parameters.F, parameters.D, parameters.E, parameters.G][mode];
   const values = [primary, parameters.H, parameters.I, `${parameters.balance[0]}:${parameters.balance[1]}`];
-  const fontHeight = app.font.lineHeight;
+  const fontHeight = UI_LINE_HEIGHT;
   const layout = app.data.uiLayout;
   const rowHeight = layout.optionRowHeight;
   const rowStart = layout.optionStartY;
@@ -291,11 +364,11 @@ function drawConfigurationPage(ctx2d, labels, state) {
   const valueSpriteX = layout.statSpriteX ?? (WIDTH - 56);
 
   // Mode title header at top
-  const title = labels[4] || '';
+  const title = tr.modeTitles[mode] || '';
   if (title) {
     ctx2d.fillStyle = '#cc0000';
     ctx2d.fillRect(28, 4, WIDTH - 56, fontHeight + 6);
-    drawText(ctx2d, title, (WIDTH >> 1) - (app.font.measure(title) >> 1), 7, 20);
+    drawText(ctx2d, title, WIDTH >> 1, 7, 21);
   }
 
   for (let index = 0; index < Math.min(4, labels.length); index++) {
@@ -309,7 +382,7 @@ function drawConfigurationPage(ctx2d, labels, state) {
     }
     drawText(ctx2d, labels[index] || '', layout.leftTextX, y + 2, 20);
     const value = String(values[index] ?? '');
-    drawText(ctx2d, value, layout.valueX - (app.font.measure(value) >> 1), y + 2, 20);
+    drawText(ctx2d, value, layout.valueX, y + 2, 21);
     const spriteId = index === 3 ? 40 : (index === 0 ? (mode === 2 ? 30 : mode === 3 ? 31 : 27) : 27 + index);
     drawSprite(ctx2d, spriteId, valueSpriteX, y - 2);
     if (isSel) {
@@ -320,14 +393,14 @@ function drawConfigurationPage(ctx2d, labels, state) {
 
   // Explanation box
   const descIdx = selected === 0 ? (mode === 2 ? 5 : mode === 3 ? 4 : mode === 4 ? 6 : 0) : selected;
-  const explanation = app.data.text3Rows[descIdx] || '';
+  const explanation = tr.configDesc[descIdx] || '';
   const boxY = rowStart + 4 * rowHeight + 12;
   const boxH = HEIGHT - boxY - 24;
   ctx2d.fillStyle = '#172200';
   ctx2d.fillRect(layout.leftTextX, boxY, WIDTH - (layout.leftTextX << 1), boxH);
   ctx2d.strokeStyle = '#884800';
   ctx2d.strokeRect(layout.leftTextX, boxY, WIDTH - (layout.leftTextX << 1), boxH);
-  const explanationLines = wrapJ2meText(explanation, app.font, WIDTH - (layout.leftTextX << 1) - 10);
+  const explanationLines = wrapUiText(ctx2d, explanation, WIDTH - (layout.leftTextX << 1) - 10);
   const maxLines = Math.max(1, Math.floor((boxH - 8) / fontHeight));
   explanationLines.slice(0, maxLines).forEach((line, index) => {
     drawText(ctx2d, line, layout.leftTextX + 5, boxY + 5 + index * fontHeight, 20);
@@ -337,6 +410,7 @@ function drawConfigurationPage(ctx2d, labels, state) {
 
 // Live scoreboard (K=20) & End-of-match results (K=22) (c.java:185-196).
 function drawScoreboardPage(ctx2d, isFinal) {
+  const tr = t();
   const match = app.match;
   if (!match) return;
   ctx2d.fillStyle = '#111a00';
@@ -344,13 +418,13 @@ function drawScoreboardPage(ctx2d, isFinal) {
   ctx2d.fillStyle = isFinal ? (match.winner === 'player' ? '#006600' : '#880000') : '#2d4700';
   ctx2d.fillRect(0, 0, WIDTH, 22);
   const header = isFinal
-    ? (match.winner === 'player' ? 'ПОБЕДА!' : match.winner === 'draw' ? 'НИЧЬЯ' : 'КОНЕЦ ИГРЫ')
-    : (app.data.text[1]?.[1] || 'Статистика');
-  drawText(ctx2d, header, (WIDTH >> 1) - (app.font.measure(header) >> 1), 6, 20);
+    ? (match.winner === 'player' ? tr.win : match.winner === 'draw' ? tr.draw : tr.lose)
+    : tr.statsTitle;
+  drawText(ctx2d, header, WIDTH >> 1, 6, 21);
 
   if (match.mode === MODE.TEAM_DEATHMATCH || match.mode === MODE.CAPTURE_FLAG) {
     const scoreStr = `S ${match.teamScore[0]} : ${match.teamScore[1]} M`;
-    drawText(ctx2d, scoreStr, (WIDTH >> 1) - (app.font.measure(scoreStr) >> 1), 28, 20);
+    drawText(ctx2d, scoreStr, WIDTH >> 1, 28, 21);
   }
 
   const rows = match.rankings?.length
@@ -361,10 +435,10 @@ function drawScoreboardPage(ctx2d, isFinal) {
 
   const startY = 48;
   const rowH = 22;
-  drawText(ctx2d, '#', 10, startY - 12, 20);
-  drawText(ctx2d, 'ИГРОК', 32, startY - 12, 20);
-  drawText(ctx2d, 'K', 160, startY - 12, 20);
-  drawText(ctx2d, 'D', 202, startY - 12, 20);
+  drawText(ctx2d, '#', 10, startY - 12, 20, '#ffff66');
+  drawText(ctx2d, tr.colPlayer, 32, startY - 12, 20, '#ffff66');
+  drawText(ctx2d, tr.colKills, 160, startY - 12, 20, '#ffff66');
+  drawText(ctx2d, tr.colDeaths, 202, startY - 12, 20, '#ffff66');
 
   rows.slice(0, 10).forEach((row, i) => {
     const y = startY + i * rowH;
@@ -383,26 +457,27 @@ function drawScoreboardPage(ctx2d, isFinal) {
 }
 
 function drawOriginalUi(ctx2d) {
+  const tr = t();
   if (app.K === 0) {
-    drawChoicePage(ctx2d, (app.data.text[0] || []).slice(0, 2), 0);
+    drawChoicePage(ctx2d, tr.yesNo, 0);
   } else if (app.K === 1) {
-    drawChoicePage(ctx2d, (app.data.text[1] || []).slice(0, 6), 1);
+    drawChoicePage(ctx2d, tr.pauseMenu, 1);
   } else if (app.K === 2) {
-    drawChoicePage(ctx2d, app.data.text[2] || [], 2);
+    drawChoicePage(ctx2d, tr.options, 2);
   } else if (app.K === 3) {
-    drawChoicePage(ctx2d, app.data.text[3] || [], 3);
+    drawChoicePage(ctx2d, tr.mainMenu, 3);
   } else if (app.K === 4 || app.K === 19) {
-    drawChoicePage(ctx2d, (app.data.text[4] || []).slice(0, 2), app.K);
+    drawChoicePage(ctx2d, tr.characters, app.K);
   } else if (app.K === 5) {
-    drawChoicePage(ctx2d, app.data.text[5] || [], 5);
+    drawChoicePage(ctx2d, tr.modes, 5);
   } else if (app.K >= 6 && app.K <= 10) {
-    drawConfigurationPage(ctx2d, app.data.text[app.K] || [], app.K);
+    drawConfigurationPage(ctx2d, tr.configRows[app.K - 6] || tr.configRows[0], app.K);
   } else if (app.K === 11) {
-    drawTextPage(ctx2d, app.data.help);
+    drawTextPage(ctx2d, tr.help);
   } else if (app.K === 12) {
-    drawTextPage(ctx2d, app.data.about);
+    drawTextPage(ctx2d, tr.about);
   } else if (app.K === 13 || app.K === 14) {
-    drawChoicePage(ctx2d, app.data.levelLabels, app.K);
+    drawChoicePage(ctx2d, localizedLevelLabels(), app.K);
   } else if (app.K === 20) {
     drawScoreboardPage(ctx2d, false);
   } else if (app.K === 22) {
@@ -501,7 +576,7 @@ function drawOriginalHud(ctx2d) {
 
   // Top-center: Countdown timer
   const timeStr = `${match.minutes}:${String(match.seconds).padStart(2, '0')}`;
-  drawText(ctx2d, timeStr, halfW - (app.font.measure(timeStr) >> 1), 2, 20);
+  drawText(ctx2d, timeStr, halfW, 3, 21);
 
   // Top-right: Mode score (CTF / TDM / DM kills)
   if (match.mode === MODE.CAPTURE_FLAG || match.mode === MODE.TEAM_DEATHMATCH) {
@@ -517,7 +592,7 @@ function drawOriginalHud(ctx2d) {
 
   // Quad damage indicator (e.java:2501-2503)
   if (p.quadTimer > 0) {
-    drawCu2Frame(ctx2d, 76, halfW - 8, app.font.lineHeight + 4);
+    drawCu2Frame(ctx2d, 76, halfW - 8, UI_LINE_HEIGHT + 4);
   }
 
   // Bottom-center: Health box + Heart icon + Weapon icon + Ammo box
@@ -531,10 +606,10 @@ function drawOriginalHud(ctx2d) {
 
   // Round banner in Last Hero mode (e.java:2532-2536)
   if (match.roundBannerTimer > 0) {
-    const banner = `${app.data.statusRows[4] || 'Раунд '}${match.round}`;
+    const banner = `${t().roundPrefix}${match.round}`;
     ctx2d.fillStyle = '#cc0000';
-    ctx2d.fillRect(0, 26, WIDTH, app.font.lineHeight + 4);
-    drawText(ctx2d, banner, halfW - (app.font.measure(banner) >> 1), 28, 20);
+    ctx2d.fillRect(0, 26, WIDTH, UI_LINE_HEIGHT + 4);
+    drawText(ctx2d, banner, halfW, 28, 21);
   }
 }
 
@@ -611,13 +686,14 @@ export function adjustConfigSetting(state, row, delta) {
 
 export function menuLength(state) {
   if (!app.data) return 1;
+  const tr = t();
   if (state === 0) return 2;
-  if (state === 1) return Math.min(6, app.data.text[1]?.length ?? 6);
-  if (state === 2) return app.data.text[2]?.length ?? 3;
-  if (state === 3) return app.data.text[3]?.length ?? 5;
-  if (state === 5) return app.data.text[5]?.length ?? 6;
+  if (state === 1) return tr.pauseMenu.length;
+  if (state === 2) return tr.options.length;
+  if (state === 3) return tr.mainMenu.length;
+  if (state === 5) return tr.modes.length;
   if (state >= 6 && state <= 10) return 4;
-  if (state === 13 || state === 14) return app.data.levelLabels.length;
+  if (state === 13 || state === 14) return 12;
   if (state === 19 || state === 4) return 2;
   return 1;
 }
@@ -679,6 +755,7 @@ export function activateCurrentSelection() {
   } else if (app.K === 2) {
     if (selected === 0) { app.vibroEnabled = !app.vibroEnabled; persistSettings(); }
     else if (selected === 1) { app.soundEnabled = !app.soundEnabled; persistSettings(); }
+    else if (selected === 2) { toggleLanguage(); }
     else resetMenuSelection(3);
   } else if (app.K === 3) {
     if (selected === 0) resetMenuSelection(5);
@@ -846,13 +923,14 @@ function handleCanvasPointer(clientX, clientY) {
   }
 
   // Choice pages (K=0, 1, 2, 3, 5, 13)
+  const tr = t();
   let labels = [];
-  if (app.K === 0) labels = (app.data.text[0] || []).slice(0, 2);
-  else if (app.K === 1) labels = (app.data.text[1] || []).slice(0, 6);
-  else if (app.K === 2) labels = app.data.text[2] || [];
-  else if (app.K === 3) labels = app.data.text[3] || [];
-  else if (app.K === 5) labels = app.data.text[5] || [];
-  else if (app.K === 13 || app.K === 14) labels = app.data.levelLabels;
+  if (app.K === 0) labels = tr.yesNo;
+  else if (app.K === 1) labels = tr.pauseMenu;
+  else if (app.K === 2) labels = tr.options;
+  else if (app.K === 3) labels = tr.mainMenu;
+  else if (app.K === 5) labels = tr.modes;
+  else if (app.K === 13 || app.K === 14) labels = localizedLevelLabels();
 
   const g = getChoiceGeometry(labels, app.K);
   const clickedVisible = Math.floor((y - g.listTop) / g.rowHeight);
@@ -888,6 +966,10 @@ async function boot() {
 
     canvas.addEventListener('pointerdown', (e) => {
       handleCanvasPointer(e.clientX, e.clientY);
+    });
+    syncLangButton();
+    document.getElementById('btn-lang')?.addEventListener('click', () => {
+      toggleLanguage();
     });
 
     app.loop = createEngineLoop({
