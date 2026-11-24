@@ -61,10 +61,10 @@ function drawMapTile(ctx, assets, rawTile, x, y) {
 // Port of i.java:2907-2948 and i.java:3180-3410. Renders decoded terrain,
 // range highlights (alpha.png), movement path (i.java:3434), units, and cursor.
 export function renderOriginalBoard(ctx, {
-  map, assets, cameraX = 0, cameraY = 0, viewportWidth = 240, viewportHeight = 264,
+  map, assets, cameraX = 0, cameraY = 0, viewportWidth = 240, viewportHeight = 288,
   units = map.units, cursor = null, overlays = [],
   rangeCells = null, targetCells = null, path = null,
-  waterAnimFrame = 0, floatTexts = null,
+  waterAnimFrame = 0, floatTexts = null, mapEffects = null,
 }) {
   if (!ctx || !map || !assets) throw new TypeError('renderOriginalBoard requires context, map and decoded assets');
   ctx.imageSmoothingEnabled = false;
@@ -264,6 +264,18 @@ export function renderOriginalBoard(ctx, {
     if (cursor) {
       drawFrame(ctx, assets, 'cursor', cursor.frameIndex ?? 0,
         cursor.x * 24 - cameraX, cursor.y * 24 - cameraY, MIDP.LEFT | MIDP.TOP);
+    }
+
+    // Port of i.java:4958-4970, 5163-5176, 5350-5388: scripted/map spell & smoke effects (redspark, spark, b_smoke)
+    if (mapEffects && mapEffects.length > 0) {
+      for (const fx of mapEffects) {
+        const meta = assets.sprites?.[fx.sprite];
+        if (!meta) continue;
+        const fxFrame = Math.min(Math.max(0, fx.frame ?? 0), Math.max(0, (meta.frames?.length ?? 1) - 1));
+        const px = fx.x * 24 + 12 - cameraX + (fx.offsetX ?? 0);
+        const py = fx.y * 24 + 12 - cameraY + (fx.offsetY ?? 0);
+        drawFrame(ctx, assets, fx.sprite, fxFrame, px, py, MIDP.HCENTER | MIDP.VCENTER);
+      }
     }
 
     // Port of i.java:2382: floating +20 heal / combat popups on strategic map

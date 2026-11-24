@@ -177,6 +177,81 @@ export const CAMPAIGN_STAGE_META = Object.freeze({
   },
 });
 
+// Port of i.java:4922-5395: scripted in-map choreography (unit marches, camera pans, spell/smoke VFX, back-and-forth exchanges)
+export const CAMPAIGN_STAGE_SCRIPTS = Object.freeze({
+  m0: {
+    opening: [
+      { kind: 'pan', target: [5, 9], pauseMs: 120 },
+      {
+        kind: 'moveGroup',
+        moves: [
+          { from: [0, 8], to: [3, 8] },
+          { from: [1, 9], to: [4, 9] },
+          { from: [0, 10], to: [3, 10] },
+        ],
+        pauseMs: 250,
+      },
+      { kind: 'pan', target: [9, 3], pauseMs: 320 },
+      { kind: 'dialog', langIdx: 221, portrait: 2, focus: [9, 3] },
+      { kind: 'fx', sprite: 'redspark', target: [9, 3], pauseMs: 420, sfx: 'hit' },
+      { kind: 'dialog', langIdx: 222, portrait: 2, focus: [9, 3] },
+      { kind: 'fxBurst', target: [9, 3], sprites: ['spark', 'b_smoke'], removeUnitAt: [9, 3], pauseMs: 480, sfx: 'die' },
+      { kind: 'pan', target: [4, 9], pauseMs: 260 },
+      { kind: 'dialog', langIdx: 223, portrait: 0, focus: [4, 9] },
+      { kind: 'dialog', langIdx: 224, portrait: 5, focus: [3, 8] },
+    ],
+    wave2: [
+      { kind: 'pan', target: [1, 1], pauseMs: 200 },
+      { kind: 'spawnMove', type: 1, playerSelector: 2, from: [1, 1], to: [1, 2], pauseMs: 240 },
+      { kind: 'pan', target: [10, 10], pauseMs: 200 },
+      { kind: 'spawnMove', type: 0, playerSelector: 2, from: [10, 10], to: [10, 9], pauseMs: 240 },
+      { kind: 'focusHero', pauseMs: 200 },
+      { kind: 'dialog', langIdx: 225, portrait: 5 },
+      { kind: 'dialog', langIdx: 226, portrait: 0 },
+    ],
+  },
+  m1: {
+    opening: [
+      { kind: 'pan', target: [12, 3], pauseMs: 280 },
+      { kind: 'dialog', langIdx: 231, portrait: 1, focus: [8, 11] },
+      { kind: 'dialog', langIdx: 232, portrait: 3, focus: [12, 3] },
+      { kind: 'pan', target: [7, 3], pauseMs: 250 },
+      { kind: 'dialog', langIdx: 233, portrait: 5, focus: [7, 3] },
+      {
+        kind: 'escortRetreat',
+        units: [
+          { type: 0, playerSelector: 2, from: [7, 3], to: [6, 0] },
+          { type: 11, playerSelector: 2, from: [7, 3], to: [6, 0] },
+          { type: 0, playerSelector: 2, from: [7, 3], to: [6, 2], role: 'sacrifice' },
+        ],
+        pauseMs: 400,
+      },
+      { kind: 'dialog', langIdx: 234, portrait: 2, focus: [6, 2] },
+      { kind: 'fx', sprite: 'redspark', target: [6, 2], pauseMs: 400, sfx: 'hit' },
+      { kind: 'dialog', langIdx: 235, portrait: 2, focus: [6, 2] },
+      { kind: 'fxBurst', target: [6, 2], sprites: ['spark', 'b_smoke'], clearTempEscorts: true, pauseMs: 450, sfx: 'die' },
+      { kind: 'pan', target: [8, 11], pauseMs: 250 },
+      { kind: 'dialog', langIdx: 236, portrait: 5, focus: [8, 11] },
+      { kind: 'dialog', langIdx: 237, portrait: 1, focus: [8, 11] },
+      { kind: 'pan', target: [3, 5], pauseMs: 250 },
+      { kind: 'dialog', langIdx: 238, portrait: 5, focus: [3, 5] },
+      { kind: 'pan', target: [8, 11], pauseMs: 200 },
+    ],
+  },
+  m2: {
+    turn2: [
+      { kind: 'pan', target: [4, 8], pauseMs: 220 },
+      { kind: 'fx', sprite: 'spark', target: [3, 8], pauseMs: 120 },
+      { kind: 'fx', sprite: 'spark', target: [4, 7], pauseMs: 120 },
+      { kind: 'fx', sprite: 'spark', target: [5, 8], pauseMs: 220, sfx: 'raise' },
+      { kind: 'dialog', langIdx: 244, portrait: 5, focus: [4, 8] },
+      { kind: 'dialog', langIdx: 245, portrait: 5, focus: [4, 8] },
+      { kind: 'dialog', langIdx: 246, portrait: -1, focus: [4, 8] },
+      { kind: 'dialog', langIdx: 247, portrait: 0, focus: [4, 8] },
+    ],
+  },
+});
+
 export function wrapText(ctx, text, maxWidth) {
   const paragraphs = String(text || '').split('\n');
   const lines = [];
@@ -200,7 +275,9 @@ export function wrapText(ctx, text, maxWidth) {
   return lines;
 }
 
-export function renderCutsceneScreen(ctx, { image, text, scrollPx, width, height }) {
+import { UI_COLORS, drawMenuFrame, drawSoftkeyButton, drawUiText } from './ae2-ui.js';
+
+export function renderCutsceneScreen(ctx, { assets = null, image, text, scrollPx, width, height }) {
   ctx.fillStyle = '#000000';
   ctx.fillRect(0, 0, width, height);
 
@@ -210,17 +287,17 @@ export function renderCutsceneScreen(ctx, { image, text, scrollPx, width, height
     const drawW = Math.min(width, image.naturalWidth || width);
     const drawX = (width - drawW) >> 1;
     ctx.drawImage(image, 0, 0, image.naturalWidth, image.naturalHeight, drawX, 0, drawW, imgH);
-    ctx.fillStyle = '#8b6f47';
+    ctx.fillStyle = UI_COLORS.borderHilight;
     ctx.fillRect(0, imgH, width, 1);
   }
 
   const textTop = imgH + 8;
-  const textBottom = height - 26;
+  const textBottom = height - 30;
   ctx.save();
   ctx.beginPath();
   ctx.rect(8, textTop, width - 16, Math.max(40, textBottom - textTop));
   ctx.clip();
-  ctx.font = '10px Georgia, serif';
+  ctx.font = '10px Arial, sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
   const lines = wrapText(ctx, text, width - 22);
@@ -232,70 +309,21 @@ export function renderCutsceneScreen(ctx, { image, text, scrollPx, width, height
     let alpha = 1;
     if (y < textTop + 14) alpha = Math.max(0.15, (y - textTop) / 14);
     else if (y > textBottom - 16) alpha = Math.max(0.15, (textBottom - y) / 16);
-    ctx.fillStyle = `rgba(223, 223, 202, ${alpha.toFixed(2)})`;
+    ctx.fillStyle = `rgba(255, 255, 255, ${alpha.toFixed(2)})`;
     ctx.fillText(lines[i], width >> 1, y);
   }
   ctx.restore();
 
-  ctx.fillStyle = '#18141c';
+  ctx.fillStyle = UI_COLORS.titleBg;
   ctx.fillRect(0, height - 24, width, 24);
-  ctx.fillStyle = '#caa568';
+  ctx.fillStyle = UI_COLORS.borderHilight;
   ctx.fillRect(0, height - 24, width, 1);
-  ctx.font = 'bold 8px monospace';
-  ctx.fillStyle = '#ffd84d';
-  ctx.textAlign = 'left';
-  ctx.fillText('NEXT · ENTER / TAP', 10, height - 9);
-  ctx.textAlign = 'right';
-  ctx.fillStyle = '#9eb092';
-  ctx.fillText('SKIP · ESC', width - 10, height - 9);
+  drawSoftkeyButton(ctx, assets, { x: 6, y: height - 20, w: 72, h: 16, iconIdx: 3, label: 'NEXT' });
+  drawSoftkeyButton(ctx, assets, { x: width - 78, y: height - 20, w: 72, h: 16, iconIdx: 2, label: 'SKIP', alignRight: true });
 
   return lines.length * lineH + (textBottom - textTop) + 20;
 }
 
-export function renderStoryDialogOverlay(ctx, { portraitsImg, portrait, text, width, height }) {
-  const boxH = 98;
-  const boxY = height - boxH - 30;
-  ctx.fillStyle = 'rgba(18, 16, 26, 0.94)';
-  ctx.fillRect(4, boxY, width - 8, boxH);
-  ctx.strokeStyle = '#caa568';
-  ctx.lineWidth = 2;
-  ctx.strokeRect(4, boxY, width - 8, boxH);
-  ctx.strokeStyle = '#4b3b24';
-  ctx.lineWidth = 1;
-  ctx.strokeRect(7, boxY + 3, width - 14, boxH - 6);
-
-  let textX = 14;
-  let textW = width - 28;
-  if (portraitsImg && portrait >= 0 && portrait < 6) {
-    const px = 10;
-    const py = boxY + 7;
-    const ps = 84;
-    ctx.fillStyle = '#0e1118';
-    ctx.fillRect(px, py, ps, ps);
-    ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(portraitsImg, portrait * 85, 0, 85, 85, px, py, ps, ps);
-    ctx.strokeStyle = '#8b6f47';
-    ctx.strokeRect(px, py, ps, ps);
-    textX = 100;
-    textW = width - 110;
-  }
-
-  const speaker = SPEAKER_NAMES[String(portrait)] ?? 'STORY';
-  ctx.font = 'bold 9px monospace';
-  ctx.fillStyle = '#ffd84d';
-  ctx.textAlign = 'left';
-  ctx.textBaseline = 'top';
-  ctx.fillText(speaker, textX, boxY + 8);
-
-  ctx.font = '9px monospace';
-  ctx.fillStyle = '#f1e7d2';
-  const lines = wrapText(ctx, text, textW);
-  for (let i = 0; i < Math.min(lines.length, 6); i++) {
-    ctx.fillText(lines[i], textX, boxY + 22 + i * 11);
-  }
-
-  ctx.font = 'bold 8px monospace';
-  ctx.fillStyle = '#a9d69d';
-  ctx.textAlign = 'right';
-  ctx.fillText('NEXT ▶  |  SKIP [ESC]', width - 12, boxY + boxH - 13);
+export function renderStoryDialogOverlay(ctx, opts) {
+  return drawMenuFrame(ctx, opts.assets, 4, opts.height - 78, opts.width - 8, 74, 0, 14);
 }

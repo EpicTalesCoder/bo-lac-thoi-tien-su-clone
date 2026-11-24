@@ -4,7 +4,8 @@ import test from 'node:test';
 import { decodeMap, decodeSprite, decodeTerrainProperties, decodeUnits } from '../ancient-empires-loader.js';
 import { renderOriginalBoard } from '../render-original.js';
 import { BattleScene } from '../ae2-battle.js';
-import { CAMPAIGN_STAGE_CONFIG, CAMPAIGN_STAGE_META } from '../ae2-story.js';
+import { CAMPAIGN_STAGE_CONFIG, CAMPAIGN_STAGE_META, CAMPAIGN_STAGE_SCRIPTS } from '../ae2-story.js';
+import { RingMenu, UI_COLORS, drawBitmapText, drawMenuFrame, drawRecruitDialog } from '../ae2-ui.js';
 
 const asset = name => new URL(`../assets/${name}`, import.meta.url);
 
@@ -250,4 +251,178 @@ test('BattleScene applies h.java anchorFlags alignment to king frames and uses u
   const headCall = calls.find(c => c[0] === 'drawImage' && c[1].name === 'king_heads');
   assert.ok(bodyCall && headCall);
   assert.equal(headCall[2], 2 * 22); // Valadorn (kingHead 2) source X offset
+});
+
+test('RingMenu distributes items on a circular ring, animates rotation, handles hitTest, and draws original menu/action icons', async () => {
+  const [bigBytes, iconBytes, sparkBytes, sideArrowBytes] = await Promise.all([
+    readFile(asset('big_circle.sprite')),
+    readFile(asset('action_icons.sprite')),
+    readFile(asset('small_spark.sprite')),
+    readFile(asset('side_arrow.sprite')),
+  ]);
+  const assets = {
+    sprites: {
+      big_circle: decodeSprite(new Uint8Array(bigBytes)),
+      action_icons: decodeSprite(new Uint8Array(iconBytes)),
+      small_spark: decodeSprite(new Uint8Array(sparkBytes)),
+      side_arrow: decodeSprite(new Uint8Array(sideArrowBytes)),
+    },
+    images: {
+      big_circle: { name: 'big_circle', naturalWidth: 64, naturalHeight: 33 },
+      action_icons: { name: 'action_icons', naturalWidth: 112, naturalHeight: 16 },
+      small_spark: { name: 'small_spark', naturalWidth: 21, naturalHeight: 7 },
+      side_arrow: { name: 'side_arrow', naturalWidth: 16, naturalHeight: 14 },
+    },
+  };
+
+  const ring = new RingMenu({
+    items: [
+      { id: 'attack', label: 'ATTACK', icon: 3 },
+      { id: 'occupy', label: 'OCCUPY', icon: 1 },
+      { id: 'wait', label: 'END MOVE', icon: 6 },
+      { id: 'cancel', label: 'CANCEL', icon: 5 },
+    ],
+    centerX: 120,
+    centerY: 160,
+    radius: 40,
+    iconSprite: 'action_icons',
+    immediate: true,
+  });
+
+  const nodes = ring.getNodePositions();
+  assert.equal(nodes.length, 4);
+  assert.deepEqual([nodes[0].x, nodes[0].y, nodes[0].selected], [120, 120, true]);
+  assert.deepEqual([nodes[1].x, nodes[1].y], [160, 160]);
+  assert.deepEqual([nodes[2].x, nodes[2].y], [120, 200]);
+  assert.deepEqual([nodes[3].x, nodes[3].y], [80, 160]);
+
+  assert.deepEqual(ring.hitTest(120, 120), { type: 'confirm', index: 0 });
+  assert.deepEqual(ring.hitTest(160, 160), { type: 'select', index: 1 });
+
+  ring.move(1);
+  assert.equal(ring.selectedIndex, 1);
+  assert.ok(ring.rotOffset > 80);
+  for (let i = 0; i < 12; i++) ring.tick();
+  assert.equal(ring.rotOffset, 0);
+
+  const { ctx, calls } = makeContext();
+  ctx.fillStyle = '';
+  ctx.fillRect = (...args) => calls.push(['fillRect', ...args]);
+  ctx.strokeRect = (...args) => calls.push(['strokeRect', ...args]);
+  ctx.fillText = (...args) => calls.push(['fillText', ...args]);
+  ctx.measureText = s => ({ width: String(s).length * 6 });
+
+  ring.render(ctx, assets);
+  const fills = calls.filter(c => c[0] === 'fillRect');
+  assert.ok(fills.length > 0);
+  const draws = calls.filter(c => c[0] === 'drawImage').map(c => [c[1].name, c[2]]);
+  assert.equal(draws.filter(d => d[0] === 'big_circle').length, 4);
+  assert.ok(draws.some(d => d[0] === 'small_spark'));
+  // Icon 1 in action_icons resolves sourceFrame=1 (House) at sx=16
+  assert.ok(draws.some(d => d[0] === 'action_icons' && d[1] === 16));
+});
+
+test('drawMenuFrame and drawBitmapText render 9-slice menu.png borders and bitmap chars/lchars without monospace fallback', async () => {
+  const [menuBytes, charsBytes, lcharsBytes] = await Promise.all([
+    readFile(asset('menu.sprite')),
+    readFile(asset('chars.sprite')),
+    readFile(asset('lchars.sprite')),
+  ]);
+  const assets = {
+    sprites: {
+      menu: decodeSprite(new Uint8Array(menuBytes)),
+      chars: decodeSprite(new Uint8Array(charsBytes)),
+      lchars: decodeSprite(new Uint8Array(lcharsBytes)),
+    },
+    images: {
+      menu: { name: 'menu', naturalWidth: 128, naturalHeight: 16 },
+      chars: { name: 'chars', naturalWidth: 72, naturalHeight: 7 },
+      lchars: { name: 'lchars', naturalWidth: 104, naturalHeight: 11 },
+    },
+  };
+  const { ctx, calls } = makeContext();
+  ctx.fillStyle = '';
+  ctx.fillRect = (...args) => calls.push(['fillRect', ctx.fillStyle, ...args]);
+  ctx.fillText = (...args) => calls.push(['fillText', ...args]);
+
+  drawMenuFrame(ctx, assets, 10, 20, 120, 80, 0, 18);
+  assert.ok(calls.some(c => c[0] === 'fillRect' && c[1] === UI_COLORS.bg));
+  assert.ok(calls.some(c => c[0] === 'fillRect' && c[1] === UI_COLORS.titleBg));
+  assert.ok(calls.some(c => c[0] === 'drawImage' && c[1].name === 'menu'));
+
+  calls.length = 0;
+  drawBitmapText(ctx, assets, 'chars', '.15', 20, 30);
+  drawBitmapText(ctx, assets, 'lchars', '+4/8', 50, 30);
+  assert.equal(calls.some(c => c[0] === 'fillText'), false);
+  const charDraws = calls.filter(c => c[0] === 'drawImage' && c[1].name === 'chars').map(c => c[2]);
+  assert.deepEqual(charDraws, [11 * 6, 1 * 6, 5 * 6]);
+  const lcharDraws = calls.filter(c => c[0] === 'drawImage' && c[1].name === 'lchars').map(c => c[2]);
+  assert.deepEqual(lcharDraws, [12 * 8, 4 * 8, 10 * 8, 8 * 8]);
+});
+
+test('CAMPAIGN_STAGE_SCRIPTS matches m0 and m1 in-map unit marches, spell FX, and multi-speaker exchanges', () => {
+  const m0Open = CAMPAIGN_STAGE_SCRIPTS.m0.opening;
+  assert.equal(m0Open.some(s => s.kind === 'moveGroup' && s.moves.length === 3), true);
+  assert.equal(m0Open.some(s => s.kind === 'fx' && s.sprite === 'redspark' && s.target[0] === 9 && s.target[1] === 3), true);
+  assert.equal(m0Open.some(s => s.kind === 'fxBurst' && s.removeUnitAt?.[0] === 9 && s.removeUnitAt?.[1] === 3), true);
+  assert.deepEqual(
+    m0Open.filter(s => s.kind === 'dialog').map(s => [s.langIdx, s.portrait]),
+    [[221, 2], [222, 2], [223, 0], [224, 5]]
+  );
+  assert.equal(CAMPAIGN_STAGE_SCRIPTS.m1.opening.some(s => s.kind === 'escortRetreat' && s.units.length === 3), true);
+});
+
+test('drawRecruitDialog displays real Soldier ATK/DEF/MOV stats from units.bin record fields', async () => {
+  const [unitBytes, charsBytes, lcharsBytes, menuBytes, smallCircleBytes, bigCircleBytes, hudBytes, hud2Bytes] = await Promise.all([
+    readFile(asset('units.bin')),
+    readFile(asset('chars.sprite')),
+    readFile(asset('lchars.sprite')),
+    readFile(asset('menu.sprite')),
+    readFile(asset('small_circle.sprite')),
+    readFile(asset('big_circle.sprite')),
+    readFile(asset('hud_icons.sprite')),
+    readFile(asset('hud_icons_2.sprite')),
+  ]);
+  const unitRecords = decodeUnits(new Uint8Array(unitBytes));
+  const img = (name, w, h) => ({ name, naturalWidth: w, naturalHeight: h });
+  const assets = {
+    langStrings: [],
+    sprites: {
+      chars: decodeSprite(new Uint8Array(charsBytes)),
+      lchars: decodeSprite(new Uint8Array(lcharsBytes)),
+      menu: decodeSprite(new Uint8Array(menuBytes)),
+      small_circle: decodeSprite(new Uint8Array(smallCircleBytes)),
+      big_circle: decodeSprite(new Uint8Array(bigCircleBytes)),
+      hud_icons: decodeSprite(new Uint8Array(hudBytes)),
+      hud_icons_2: decodeSprite(new Uint8Array(hud2Bytes)),
+    },
+    images: {
+      chars: img('chars', 72, 7),
+      lchars: img('lchars', 104, 11),
+      menu: img('menu', 128, 16),
+      small_circle: img('small_circle', 40, 21),
+      big_circle: img('big_circle', 64, 33),
+      hud_icons: img('hud_icons', 39, 16),
+      hud_icons_2: img('hud_icons_2', 22, 11),
+    },
+  };
+  const { ctx, calls } = makeContext();
+  ctx.fillStyle = '';
+  ctx.fillRect = (...args) => calls.push(['fillRect', ...args]);
+  ctx.strokeRect = (...args) => calls.push(['strokeRect', ...args]);
+  ctx.fillText = (...args) => calls.push(['fillText', ...args]);
+  ctx.measureText = s => ({ width: String(s).length * 6 });
+
+  drawRecruitDialog(ctx, assets, {
+    list: [0, 1],
+    cursor: 0,
+    gold: 350,
+    unitRecords,
+    unitNameFn: () => 'SOLDIER',
+  });
+
+  // Soldier units.bin fields: [mov=5, atkMin=50, atkMax=55, def=5], shortValue=150
+  const charFramesDrawn = calls.filter(c => c[0] === 'drawImage' && c[1].name === 'chars').map(c => c[2] / 6);
+  // Expect digits for "50-55", "5", "5" => frames [5,0,10,5,5, 5, 5]
+  assert.deepEqual(charFramesDrawn, [5, 0, 10, 5, 5, 5, 5]);
 });

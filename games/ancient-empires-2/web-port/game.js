@@ -17,7 +17,23 @@ import {
 import { drawRegionMIDP, renderOriginalBoard } from './render-original.js';
 import { playAe2Sfx } from './ae2-audio.js';
 import { BattleScene } from './ae2-battle.js';
-import { CAMPAIGN_STAGE_CONFIG, CAMPAIGN_STAGE_META, renderCutsceneScreen, renderStoryDialogOverlay, wrapText } from './ae2-story.js';
+import { CAMPAIGN_STAGE_CONFIG, CAMPAIGN_STAGE_META, CAMPAIGN_STAGE_SCRIPTS, SPEAKER_NAMES, renderCutsceneScreen, wrapText } from './ae2-story.js';
+import {
+  RingMenu,
+  UI_COLORS,
+  drawBitmapText,
+  drawFramedListMenu,
+  drawMapHudBar,
+  drawMenuFrame,
+  drawOutlinedText,
+  drawRecruitDialog,
+  drawSoftkeyButton,
+  drawSpriteFrame,
+  drawStoryDialogBox,
+  drawTargetForecastBar,
+  drawUiText,
+  drawWrappedLines,
+} from './ae2-ui.js';
 
 const WIDTH = 240;
 const HEIGHT = 320;
@@ -70,6 +86,7 @@ async function loadAssets() {
     'tiles0', 'buildings', 'unit_icons', 'king_head_icons', 'cursor', 'buttons', 'menu', 'menu_icons',
     'hud_icons', 'hud_icons_2', 'action_icons', 'side_arrow', 'arrow', 'arrow_icons', 'mini_icons',
     'portraits', 'alpha', 'status', 'levelup', 'king_heads', 'king_heads_back',
+    'chars', 'lchars', 'small_spark',
     'road', 'grass', 'mountain', 'water', 'bridge', 'town', 'mountain_bg',
     'slash', 'archer_arrow', 'kingwave', 'kingslash', 'spell', 'watermagic', 'fish', 'crater',
     'b_smoke', 'big_circle', 'small_circle', 'smoke', 'spark', 'redspark',
@@ -97,7 +114,7 @@ async function loadAssets() {
   }));
 
   await Promise.all([
-    'splash', 'logo', 'tombstone', 'gameover',
+    'splash', 'logo', 'glow', 'ms_logo', 'tombstone', 'gameover',
     'intro0', 'intro1', 'intro2', 'intro3', 'intro4', 'intro5',
     'town_bg', 'woods_bg', 'hill_bg', 'bridge_bg',
   ].map(async name => {
@@ -183,8 +200,12 @@ class AncientEmpiresWeb {
     this.ctx = canvas.getContext('2d', { alpha: false });
     this.assets = assets;
     this.status = status;
-    this.state = 'splash'; // splash | menu | levelSelect | skirmishSetup | settings | instructions | cutscene | stageBanner | storyDialog | pauseMenu | play | moveAnim | targetSelect | actionMenu | recruitMenu | battle | dialog | victory | defeat
+    this.state = 'splash'; // splash | menu | about | levelSelect | skirmishSetup | settings | instructions | cutscene | stageBanner | script | storyDialog | pauseMenu | play | moveAnim | targetSelect | actionMenu | recruitMenu | battle | dialog | victory | defeat
     this.menuCursor = 0;
+    this.mainRing = null;
+    this.actionRing = null;
+    this.glowX = -67;
+    this.aboutScroll = 0;
     this.pauseCursor = 0;
     this.subMenuReturnState = 'menu';
     this.settings = this.loadSettings();
@@ -239,13 +260,15 @@ class AncientEmpiresWeb {
     this.animTick = 0;
     this.waterAnimFrame = 0;
     this.floatTexts = [];
+    this.mapEffects = [];
+    this.scriptState = null;
     this.saveKey = 'ae2-local-state-v2';
     this.settingsKey = 'ae2-settings-v1';
     this.lastTick = 0;
     this.accumulator = 0;
     this.boardCanvas = document.createElement('canvas');
     this.boardCanvas.width = WIDTH;
-    this.boardCanvas.height = HEIGHT - 56;
+    this.boardCanvas.height = HEIGHT - 32;
     this.boardCtx = this.boardCanvas.getContext('2d', { alpha: false });
     this.initMapState(assets.map, 'm0');
     this.bindInput();
@@ -275,7 +298,7 @@ class AncientEmpiresWeb {
   }
 
   getBoardGeometry() {
-    const boardH = HEIGHT - 56;
+    const boardH = HEIGHT - 32;
     const mapW = (this.assets.map?.width ?? 0) * 24;
     const mapH = (this.assets.map?.height ?? 0) * 24;
     const offsetX = mapW > 0 && mapW < WIDTH ? ((WIDTH - mapW) >> 1) : 0;
@@ -284,17 +307,29 @@ class AncientEmpiresWeb {
   }
 
   getLevelSelectStart() {
-    return Math.max(0, Math.min(this.mapList.length - 11, this.mapIndex - 5));
+    return Math.max(0, Math.min(this.mapList.length - 9, this.mapIndex - 4));
   }
 
   getRecruitPanelLayout() {
     const list = this.getRecruitList();
-    const rowHeight = 20;
-    const headerHeight = 22;
-    const cancelHeight = 20;
-    const panelH = headerHeight + list.length * rowHeight + cancelHeight + 6;
-    const panelY = Math.max(14, (HEIGHT - panelH) >> 1);
-    return { list, rowHeight, headerHeight, cancelHeight, panelH, panelY };
+    return { list, slotSpacing: 38, baseCx: 120, baseCy: 258, visibleSlots: Math.min(5, list.length) };
+  }
+
+  initMainRing() {
+    const items = this.getMainMenuItems();
+    this.mainRing = new RingMenu({
+      items,
+      selectedIndex: Math.min(items.length - 1, Math.max(0, this.menuCursor)),
+      centerX: 120,
+      centerY: 214,
+      radius: 58,
+      circleSprite: 'big_circle',
+      iconSprite: 'menu_icons',
+      maxW: WIDTH,
+      maxH: HEIGHT,
+      titleW: WIDTH,
+      titleY: 104,
+    });
   }
 
   openMenu(state = 'menu', returnState = 'menu') {
@@ -303,6 +338,8 @@ class AncientEmpiresWeb {
     this.aiPending = false;
     this.moveAnim = null;
     this.battleScene = null;
+    this.scriptState = null;
+    this.mapEffects = [];
     this.selected = null;
     this.moveOrigin = null;
     this.reachable = null;
@@ -310,6 +347,8 @@ class AncientEmpiresWeb {
     this.attackTargets = [];
     this.targetCandidates = [];
     this.recruitCastle = null;
+    this.actionRing = null;
+    if (state === 'menu') this.initMainRing();
     if (state === 'menu' || state === 'levelSelect' || state === 'skirmishSetup') {
       this.status.textContent = 'READY · OFFLINE';
     }
@@ -435,6 +474,8 @@ class AncientEmpiresWeb {
     this.m6Stage = 0;
     this.waterAnimFrame = 0;
     this.floatTexts = [];
+    this.mapEffects = [];
+    this.scriptState = null;
     this.stageBannerPrompt = 'TAP OR ENTER TO BEGIN';
     const rawUnits = stageCfg?.removeInitialCrystals
       ? mapData.units.filter(u => u.type !== 11)
@@ -565,6 +606,280 @@ class AncientEmpiresWeb {
     this.paint();
   }
 
+  playStageScript(steps, onDone) {
+    if (!steps || steps.length === 0) {
+      onDone?.();
+      return;
+    }
+    this.scriptState = {
+      steps: steps.map(s => ({ ...s })),
+      index: -1,
+      active: null,
+      waitMs: 0,
+      dialog: null,
+      onDone,
+    };
+    this.state = 'script';
+    this.advanceScriptStep();
+    this.paint();
+  }
+
+  spawnMapEffect(sprite, x, y, durationMs = 450, stepMs = 75) {
+    const meta = this.assets.sprites?.[sprite];
+    const maxFrames = Math.max(1, meta?.frames?.length ?? 4);
+    this.mapEffects.push({ sprite, x, y, frame: 0, timer: 0, stepMs, remainingMs: durationMs, maxFrames });
+  }
+
+  targetCameraFor(tx, ty) {
+    const boardH = HEIGHT - 32;
+    const maxCamX = Math.max(0, this.assets.map.width * 24 - WIDTH);
+    const maxCamY = Math.max(0, this.assets.map.height * 24 - boardH);
+    return {
+      cx: Math.max(0, Math.min(maxCamX, tx * 24 - (WIDTH >> 1) + 12)),
+      cy: Math.max(0, Math.min(maxCamY, ty * 24 - (boardH >> 1) + 12)),
+    };
+  }
+
+  // Port of i.java:4922-5395: executes in-map pans, unit marches, spell effects, & multi-speaker exchanges
+  advanceScriptStep() {
+    const st = this.scriptState;
+    if (!st) return;
+    st.index++;
+    if (st.index >= st.steps.length) {
+      this.units = this.units.filter(u => !u.tempEscort);
+      const fn = st.onDone;
+      this.scriptState = null;
+      this.state = 'play';
+      fn?.();
+      return;
+    }
+    const step = st.steps[st.index];
+    st.active = step;
+    st.waitMs = 0;
+    st.dialog = null;
+
+    if (step.kind === 'pan' || step.kind === 'focusHero') {
+      const targetPos = step.kind === 'focusHero'
+        ? (() => {
+            const hero = this.units.find(u => u.playerSelector === 1 && u.type === 9 && u.action !== 3 && u.action !== 4 && u.hp > 0)
+              || this.units.find(u => u.playerSelector === 1 && u.action !== 3 && u.action !== 4 && u.hp > 0);
+            return [hero?.x ?? 0, hero?.y ?? 0];
+          })()
+        : step.target;
+      this.cursor = { x: targetPos[0], y: targetPos[1] };
+      const { cx, cy } = this.targetCameraFor(targetPos[0], targetPos[1]);
+      step._targetCam = { cx, cy };
+      step._pauseLeft = step.pauseMs ?? 200;
+      return;
+    }
+
+    if (step.kind === 'moveGroup') {
+      step._movers = (step.moves || []).map(m => {
+        const u = this.unitAt(m.from[0], m.from[1]);
+        const path = [];
+        let cx = m.from[0];
+        let cy = m.from[1];
+        while (cx !== m.to[0]) {
+          cx += Math.sign(m.to[0] - cx);
+          path.push([cx, cy]);
+        }
+        while (cy !== m.to[1]) {
+          cy += Math.sign(m.to[1] - cy);
+          path.push([cx, cy]);
+        }
+        return { unit: u, path, idx: 0 };
+      }).filter(item => item.unit);
+      step._tickCount = 0;
+      step._pauseLeft = step.pauseMs ?? 200;
+      return;
+    }
+
+    if (step.kind === 'spawnMove') {
+      let u = this.unitAt(step.from[0], step.from[1]);
+      if (!u) u = this.spawnStageUnit(step.type, step.playerSelector, step.from[0], step.from[1]);
+      const path = [];
+      let cx = step.from[0];
+      let cy = step.from[1];
+      while (cx !== step.to[0]) { cx += Math.sign(step.to[0] - cx); path.push([cx, cy]); }
+      while (cy !== step.to[1]) { cy += Math.sign(step.to[1] - cy); path.push([cx, cy]); }
+      step._movers = u ? [{ unit: u, path, idx: 0 }] : [];
+      step._tickCount = 0;
+      step._pauseLeft = step.pauseMs ?? 200;
+      return;
+    }
+
+    if (step.kind === 'escortRetreat') {
+      step._movers = (step.units || []).map(spec => {
+        const u = this.spawnStageUnit(spec.type, spec.playerSelector, spec.from[0], spec.from[1], { tempEscort: true, role: spec.role });
+        const path = [];
+        let cx = spec.from[0];
+        let cy = spec.from[1];
+        while (cy !== spec.to[1]) { cy += Math.sign(spec.to[1] - cy); path.push([cx, cy]); }
+        while (cx !== spec.to[0]) { cx += Math.sign(spec.to[0] - cx); path.push([cx, cy]); }
+        return { unit: u, path, idx: 0, removeOnArrive: spec.to[1] <= 0 };
+      }).filter(item => item.unit);
+      step._tickCount = 0;
+      step._pauseLeft = step.pauseMs ?? 300;
+      return;
+    }
+
+    if (step.kind === 'fx') {
+      if (step.sfx) this.sfx(step.sfx);
+      this.cursor = { x: step.target[0], y: step.target[1] };
+      this.spawnMapEffect(step.sprite, step.target[0], step.target[1], step.pauseMs ?? 450, 70);
+      step._pauseLeft = step.pauseMs ?? 450;
+      return;
+    }
+
+    if (step.kind === 'fxBurst') {
+      if (step.sfx) this.sfx(step.sfx);
+      this.cursor = { x: step.target[0], y: step.target[1] };
+      for (const sp of (step.sprites || [])) {
+        this.spawnMapEffect(sp, step.target[0], step.target[1], step.pauseMs ?? 500, 75);
+      }
+      if (step.removeUnitAt) {
+        const target = this.unitAt(step.removeUnitAt[0], step.removeUnitAt[1]);
+        if (target) target.action = 4;
+      }
+      if (step.clearTempEscorts) {
+        this.units = this.units.filter(u => !u.tempEscort);
+      }
+      step._pauseLeft = step.pauseMs ?? 500;
+      return;
+    }
+
+    if (step.kind === 'dialog') {
+      if (step.focus) {
+        this.cursor = { x: step.focus[0], y: step.focus[1] };
+        this.centerCameraOn(step.focus[0], step.focus[1]);
+      }
+      st.dialog = {
+        portrait: step.portrait ?? -1,
+        speaker: SPEAKER_NAMES[String(step.portrait)] ?? 'STORY',
+        text: this.assets.langStrings?.[step.langIdx] || '',
+      };
+      return;
+    }
+
+    this.advanceScriptStep();
+  }
+
+  tickScript() {
+    const st = this.scriptState;
+    if (!st || !st.active) return;
+    const step = st.active;
+    if (st.dialog) return;
+
+    if (step.kind === 'pan' || step.kind === 'focusHero') {
+      const { cx, cy } = step._targetCam;
+      const dx = cx - this.cameraX;
+      const dy = cy - this.cameraY;
+      if (Math.abs(dx) > 2 || Math.abs(dy) > 2) {
+        this.cameraX += Math.abs(dx) <= 14 ? dx : Math.sign(dx) * 14;
+        this.cameraY += Math.abs(dy) <= 14 ? dy : Math.sign(dy) * 14;
+      } else {
+        this.cameraX = cx;
+        this.cameraY = cy;
+        step._pauseLeft -= 50;
+        if (step._pauseLeft <= 0) this.advanceScriptStep();
+      }
+      return;
+    }
+
+    if (step.kind === 'moveGroup' || step.kind === 'spawnMove' || step.kind === 'escortRetreat') {
+      step._tickCount++;
+      let allDone = true;
+      for (const m of step._movers) {
+        if (m.idx < m.path.length) allDone = false;
+      }
+      if (!allDone) {
+        if (step._tickCount % 3 === 1) {
+          for (const m of step._movers) {
+            if (m.idx < m.path.length) {
+              const [nx, ny] = m.path[m.idx++];
+              m.unit.x = nx;
+              m.unit.y = ny;
+              this.cursor = { x: nx, y: ny };
+              if (m.removeOnArrive && m.idx >= m.path.length) {
+                m.unit.action = 4;
+              }
+            }
+          }
+          this.sfx('select');
+        }
+        return;
+      }
+      step._pauseLeft -= 50;
+      if (step._pauseLeft <= 0) this.advanceScriptStep();
+      return;
+    }
+
+    if (step.kind === 'fx' || step.kind === 'fxBurst') {
+      step._pauseLeft -= 50;
+      if (step._pauseLeft <= 0) this.advanceScriptStep();
+    }
+  }
+
+  advanceScriptDialog(skipAll = false) {
+    const st = this.scriptState;
+    if (!st) return;
+    if (skipAll) {
+      this.fastFinishScript();
+      return;
+    }
+    if (st.dialog) {
+      st.dialog = null;
+      this.advanceScriptStep();
+      this.paint();
+    } else {
+      // Allow clicking/Enter during a walk/pan to snap immediately to next dialog or step
+      const step = st.active;
+      if (step?._movers) {
+        for (const m of step._movers) {
+          const last = m.path[m.path.length - 1];
+          if (last) { m.unit.x = last[0]; m.unit.y = last[1]; }
+          if (m.removeOnArrive) m.unit.action = 4;
+        }
+      }
+      if (step?._targetCam) {
+        this.cameraX = step._targetCam.cx;
+        this.cameraY = step._targetCam.cy;
+      }
+      this.advanceScriptStep();
+      this.paint();
+    }
+  }
+
+  fastFinishScript() {
+    const st = this.scriptState;
+    if (!st) return;
+    for (let i = Math.max(0, st.index); i < st.steps.length; i++) {
+      const s = st.steps[i];
+      if (s.kind === 'moveGroup') {
+        for (const m of (s.moves || [])) {
+          const u = this.unitAt(m.from[0], m.from[1]);
+          if (u) { u.x = m.to[0]; u.y = m.to[1]; }
+        }
+      } else if (s.kind === 'spawnMove') {
+        const existing = this.unitAt(s.to[0], s.to[1]) || this.unitAt(s.from[0], s.from[1]);
+        if (existing) { existing.x = s.to[0]; existing.y = s.to[1]; }
+        else this.spawnStageUnit(s.type, s.playerSelector, s.to[0], s.to[1]);
+      } else if (s.kind === 'fxBurst') {
+        if (s.removeUnitAt) {
+          const target = this.unitAt(s.removeUnitAt[0], s.removeUnitAt[1]);
+          if (target) target.action = 4;
+        }
+      }
+    }
+    this.units = this.units.filter(u => !u.tempEscort);
+    this.mapEffects = [];
+    const fn = st.onDone;
+    this.scriptState = null;
+    this.state = 'play';
+    fn?.();
+    this.paint();
+  }
+
   async loadAndStartMap(mapId, options = {}) {
     try {
       this.status.textContent = `LOADING ${mapId.toUpperCase()}...`;
@@ -573,6 +888,7 @@ class AncientEmpiresWeb {
       this.status.textContent = `${mapId.toUpperCase()} · READY`;
 
       const meta = CAMPAIGN_STAGE_META[mapId];
+      const stageScript = CAMPAIGN_STAGE_SCRIPTS[mapId]?.opening;
       const runStageIntroDialogs = () => {
         const startPlay = () => {
           const hero = this.units.find(u => u.playerSelector === 1 && u.action !== 3 && u.action !== 4 && u.hp > 0);
@@ -583,11 +899,14 @@ class AncientEmpiresWeb {
           this.state = 'play';
           this.paint();
         };
-        if (meta && this.settings.showStory && meta.openingDialogs?.length > 0) {
+        if (meta && this.settings.showStory && (stageScript?.length || meta.openingDialogs?.length)) {
           this.stageBannerTitle = this.assets.langStrings?.[meta.titleIdx] || mapId.toUpperCase();
           this.stageBannerObjective = this.assets.langStrings?.[meta.objectiveIdx] || '';
           this.stageBannerPrompt = 'TAP OR ENTER TO BEGIN';
-          this.stageBannerNext = () => this.playStoryDialogs(meta.openingDialogs, startPlay);
+          this.stageBannerNext = () => {
+            if (stageScript?.length) this.playStageScript(stageScript, startPlay);
+            else this.playStoryDialogs(meta.openingDialogs, startPlay);
+          };
           this.state = 'stageBanner';
           this.paint();
         } else {
@@ -668,6 +987,28 @@ class AncientEmpiresWeb {
         if (u.action !== 3 && u.action !== 4) u.frameIndex = (u.frameIndex + 1) % 2;
       }
     }
+    if (this.state === 'splash' || this.state === 'menu') {
+      const logoW = this.assets.images.logo?.naturalWidth || 238;
+      this.glowX = this.glowX >= WIDTH * 3 ? -(this.assets.images.glow?.naturalWidth || 67) : this.glowX + Math.floor(logoW / 8);
+      if (this.state === 'menu') this.mainRing?.tick();
+      return;
+    }
+    if (this.state === 'actionMenu') {
+      this.actionRing?.tick();
+      return;
+    }
+    if (this.mapEffects.length > 0) {
+      for (let i = this.mapEffects.length - 1; i >= 0; i--) {
+        const fx = this.mapEffects[i];
+        fx.remainingMs -= 50;
+        fx.timer += 50;
+        if (fx.timer >= fx.stepMs) {
+          fx.timer -= fx.stepMs;
+          fx.frame = Math.min(fx.maxFrames - 1, fx.frame + 1);
+        }
+        if (fx.remainingMs <= 0) this.mapEffects.splice(i, 1);
+      }
+    }
     if (this.floatTexts.length > 0) {
       for (let i = this.floatTexts.length - 1; i >= 0; i--) {
         const ft = this.floatTexts[i];
@@ -675,6 +1016,10 @@ class AncientEmpiresWeb {
         ft.timer -= 50;
         if (ft.timer <= 0) this.floatTexts.splice(i, 1);
       }
+    }
+    if (this.state === 'script') {
+      this.tickScript();
+      return;
     }
     if (this.state === 'cutscene') {
       if (this.cutsceneScroll < this.cutsceneMaxScroll) {
@@ -733,38 +1078,73 @@ class AncientEmpiresWeb {
   }
 
   getMainMenuItems() {
+    // Port of i.java:33, 946-952, 1589-1680: authentic menu_icons indices on circular wheel
     return [
-      { label: this.assets.langStrings?.[2] || 'NEW GAME', icon: 0 },
-      { label: 'CONTINUE SAVED', icon: 8 },
-      { label: this.assets.langStrings?.[3] || 'SELECT LEVEL', icon: 1 },
-      { label: this.assets.langStrings?.[6] || 'SKIRMISH', icon: 3 },
-      { label: this.assets.langStrings?.[8] || 'SETTINGS', icon: 4 },
-      { label: this.assets.langStrings?.[9] || 'INSTRUCTIONS', icon: 6 },
+      { id: 'newGame', label: this.assets.langStrings?.[2] || 'NEW GAME', icon: 1 },
+      { id: 'load', label: this.assets.langStrings?.[5] || 'LOAD GAME', icon: 2 },
+      { id: 'selectLevel', label: this.assets.langStrings?.[3] || 'SELECT LEVEL', icon: 3 },
+      { id: 'skirmish', label: this.assets.langStrings?.[6] || 'SKIRMISH', icon: 4 },
+      { id: 'settings', label: this.assets.langStrings?.[8] || 'SETTINGS', icon: 5 },
+      { id: 'instructions', label: this.assets.langStrings?.[9] || 'INSTRUCTIONS', icon: 7 },
+      { id: 'about', label: this.assets.langStrings?.[10] || 'ABOUT', icon: 8 },
     ];
   }
 
   confirmMainMenuOption(idx) {
+    this.menuCursor = idx;
     if (idx === 0) this.startCampaign();
     else if (idx === 1) this.loadSavedGame();
     else if (idx === 2) this.openMenu('levelSelect', 'menu');
     else if (idx === 3) this.openMenu('skirmishSetup', 'menu');
     else if (idx === 4) { this.settingsCursor = 0; this.openMenu('settings', 'menu'); }
-    else { this.helpScroll = 0; this.openMenu('instructions', 'menu'); }
+    else if (idx === 5) { this.helpScroll = 0; this.openMenu('instructions', 'menu'); }
+    else { this.aboutScroll = 0; this.openMenu('about', 'menu'); }
   }
 
   pointer(x, y) {
-    if (this.state === 'splash') { this.openMenu('menu'); return; }
+    if (this.state === 'splash') { this.sfx('select'); this.openMenu('menu'); return; }
     if (this.state === 'menu') {
-      const idx = Math.floor((y - 114) / 26);
-      if (x >= 26 && x <= 214 && idx >= 0 && idx < 6) {
-        this.menuCursor = idx;
-        this.confirmMainMenuOption(idx);
+      if (!this.mainRing) this.initMainRing();
+      const hit = this.mainRing.hitTest(x, y);
+      if (hit?.type === 'confirm') {
+        this.sfx('select');
+        this.confirmMainMenuOption(hit.index);
+      } else if (hit?.type === 'select') {
+        this.sfx('select');
+        this.mainRing.selectIndex(hit.index);
+        this.menuCursor = this.mainRing.selectedIndex;
+        this.paint();
+      } else if (hit?.type === 'prev') {
+        this.sfx('select');
+        this.mainRing.move(-1);
+        this.menuCursor = this.mainRing.selectedIndex;
+        this.paint();
+      } else if (hit?.type === 'next') {
+        this.sfx('select');
+        this.mainRing.move(1);
+        this.menuCursor = this.mainRing.selectedIndex;
+        this.paint();
+      } else if (y >= HEIGHT - 28 && x <= 74) {
+        this.sfx('select');
+        this.confirmMainMenuOption(this.mainRing.selectedIndex);
       }
+      return;
+    }
+    if (this.state === 'about') {
+      this.openMenu('menu');
       return;
     }
     if (this.state === 'cutscene') {
       if (y >= HEIGHT - 26 && x >= WIDTH - 88) this.advanceCutscene(true);
       else this.advanceCutscene(false);
+      return;
+    }
+    if (this.state === 'script') {
+      if (this.scriptState?.dialog && x >= WIDTH - 90 && y >= HEIGHT - 84 && y <= HEIGHT - 50) {
+        this.advanceScriptDialog(true);
+      } else {
+        this.advanceScriptDialog(false);
+      }
       return;
     }
     if (this.state === 'stageBanner') {
@@ -774,7 +1154,7 @@ class AncientEmpiresWeb {
       return;
     }
     if (this.state === 'storyDialog') {
-      if (x >= WIDTH - 90 && y >= HEIGHT - 50) this.advanceStoryDialog(true);
+      if (x >= WIDTH - 90 && y >= HEIGHT - 84 && y <= HEIGHT - 50) this.advanceStoryDialog(true);
       else this.advanceStoryDialog(false);
       return;
     }
@@ -786,27 +1166,29 @@ class AncientEmpiresWeb {
       return;
     }
     if (this.state === 'skirmishSetup') {
-      if (y >= 280) {
+      if (y >= HEIGHT - 28) {
         if (x < WIDTH / 2) this.startConfiguredSkirmish();
         else this.openMenu('menu');
         return;
       }
       const maxRows = 2 + this.getSkirmishPlayerCount();
-      const row = Math.floor((y - 44) / 33);
+      const row = Math.floor((y - 59) / 26);
       if (row >= 0 && row < maxRows) {
         this.skirmishCursor = row;
         this.adjustSkirmishOption(row, x >= WIDTH / 2 ? 1 : -1);
+      } else if (row === maxRows) {
+        this.startConfiguredSkirmish();
       }
       return;
     }
     if (this.state === 'settings') {
-      if (y >= 280) {
+      if (y >= HEIGHT - 28) {
         this.saveSettings();
         this.state = this.subMenuReturnState;
         this.paint();
         return;
       }
-      const row = Math.floor((y - 76) / 36);
+      const row = Math.floor((y - 59) / 28);
       if (row >= 0 && row < 3) {
         this.settingsCursor = row;
         this.toggleSettingOption(row);
@@ -814,7 +1196,7 @@ class AncientEmpiresWeb {
       return;
     }
     if (this.state === 'instructions') {
-      if (y >= 280) {
+      if (y >= HEIGHT - 28) {
         this.state = this.subMenuReturnState;
         this.paint();
       } else if (y < 160) {
@@ -827,32 +1209,40 @@ class AncientEmpiresWeb {
       return;
     }
     if (this.state === 'levelSelect') {
-      if (y >= 280) { this.openMenu('menu'); return; }
-      if (y >= 34 && y <= 52) {
+      if (y >= HEIGHT - 28) {
+        if (x < WIDTH / 2) this.loadAndStartMap(this.mapList[this.mapIndex], { includeIntro: false });
+        else this.openMenu('menu');
+        return;
+      }
+      const start = this.getLevelSelectStart();
+      if (y >= 40 && y <= 56) {
         this.mapIndex = Math.max(0, this.mapIndex - 1);
         this.paint();
         return;
       }
-      if (y >= 254 && y < 280) {
+      if (y >= 237 && y < HEIGHT - 28) {
         this.mapIndex = Math.min(this.mapList.length - 1, this.mapIndex + 1);
         this.paint();
         return;
       }
-      const start = this.getLevelSelectStart();
-      const row = Math.floor((y - 54) / 18);
-      if (row >= 0 && row < 11 && start + row < this.mapList.length) {
+      const row = Math.floor((y - 57) / 20);
+      if (row >= 0 && row < 9 && start + row < this.mapList.length) {
         const idx = start + row;
-        this.mapIndex = idx;
-        this.loadAndStartMap(this.mapList[idx], { includeIntro: false });
+        if (idx === this.mapIndex) this.loadAndStartMap(this.mapList[idx], { includeIntro: false });
+        else { this.mapIndex = idx; this.paint(); }
       }
       return;
     }
     if (this.state === 'pauseMenu') {
+      if (y >= HEIGHT - 28) {
+        if (x < WIDTH / 2) this.confirmPauseOption(this.pauseCursor);
+        else { this.state = 'play'; this.paint(); }
+        return;
+      }
       const opts = this.getPauseOptions();
-      const panelH = 28 + opts.length * 22 + 8;
-      const panelY = (HEIGHT - panelH) >> 1;
-      const idx = Math.floor((y - panelY - 26) / 22);
-      if (x >= 32 && x <= 208 && idx >= 0 && idx < opts.length) {
+      const idx = Math.floor((y - 68) / 22);
+      if (x >= 20 && x <= 220 && idx >= 0 && idx < opts.length) {
+        this.pauseCursor = idx;
         this.confirmPauseOption(idx);
       } else {
         this.state = 'play';
@@ -873,15 +1263,12 @@ class AncientEmpiresWeb {
     }
     if (this.state === 'dialog') { this.state = 'play'; this.paint(); return; }
     if (this.state === 'targetSelect') {
-      if (y >= HEIGHT - 28) {
-        if (x >= WIDTH - 84) this.confirmTargetSelection();
-        else this.backFromTargetSelect();
-        return;
-      }
-      if (y >= 28) {
+      if (y >= HEIGHT - 49 && x >= WIDTH - 68) { this.confirmTargetSelection(); return; }
+      if (y >= HEIGHT - 49 && x <= 58) { this.backFromTargetSelect(); return; }
+      if (y < HEIGHT - 32) {
         const { offsetX, offsetY } = this.getBoardGeometry();
         const tileX = Math.floor((x - offsetX + this.cameraX) / 24);
-        const tileY = Math.floor((y - 28 - offsetY + this.cameraY) / 24);
+        const tileY = Math.floor((y - offsetY + this.cameraY) / 24);
         const hitIdx = this.targetCandidates.findIndex(t => t.x === tileX && t.y === tileY);
         if (hitIdx >= 0) {
           if (hitIdx === this.targetCursor) this.confirmTargetSelection();
@@ -898,33 +1285,82 @@ class AncientEmpiresWeb {
       return;
     }
     if (this.state === 'actionMenu') {
-      const boxTop = 98;
-      const idx = Math.floor((y - boxTop - 8) / 22);
-      if (idx >= 0 && idx < this.actionOptions.length && x >= 44 && x <= 196) {
-        this.confirmActionOption(idx);
-      } else {
-        this.cancelSelection();
+      if (this.actionRing) {
+        const hit = this.actionRing.hitTest(x, y);
+        if (hit?.type === 'confirm') {
+          this.actionCursor = hit.index;
+          this.confirmActionOption(hit.index);
+          return;
+        }
+        if (hit?.type === 'select') {
+          this.sfx('select');
+          this.actionRing.selectIndex(hit.index);
+          this.actionCursor = this.actionRing.selectedIndex;
+          this.paint();
+          return;
+        }
+        if (hit?.type === 'prev' || hit?.type === 'next') {
+          this.sfx('select');
+          this.actionRing.move(hit.type === 'prev' ? -1 : 1);
+          this.actionCursor = this.actionRing.selectedIndex;
+          this.paint();
+          return;
+        }
       }
+      this.cancelSelection();
       return;
     }
     if (this.state === 'recruitMenu') {
-      const { list, rowHeight, headerHeight, panelY } = this.getRecruitPanelLayout();
-      const idx = Math.floor((y - panelY - headerHeight) / rowHeight);
-      if (x >= 20 && x <= 220 && idx >= 0 && idx < list.length) {
-        this.confirmRecruit(idx);
-      } else {
-        this.state = 'play';
-        this.recruitCastle = null;
-        this.paint();
+      const { list, slotSpacing, baseCx, baseCy, visibleSlots } = this.getRecruitPanelLayout();
+      if (y >= HEIGHT - 28) {
+        if (x < WIDTH / 2) this.confirmRecruit(this.recruitCursor);
+        else { this.state = 'play'; this.recruitCastle = null; this.paint(); }
+        return;
       }
+      if (y >= 228 && y <= 288) {
+        if (x <= 32) {
+          this.recruitCursor = (this.recruitCursor + list.length - 1) % list.length;
+          this.paint();
+          return;
+        }
+        if (x >= WIDTH - 32) {
+          this.recruitCursor = (this.recruitCursor + 1) % list.length;
+          this.paint();
+          return;
+        }
+        const half = Math.floor(visibleSlots / 2);
+        const slotOff = Math.round((x - baseCx) / slotSpacing);
+        if (Math.abs(y - baseCy) <= 24 && Math.abs(slotOff) <= half) {
+          const idx = (this.recruitCursor + slotOff + list.length) % list.length;
+          if (slotOff === 0) this.confirmRecruit(idx);
+          else { this.recruitCursor = idx; this.paint(); }
+          return;
+        }
+      }
+      if (y < 228 && x >= 170) {
+        this.confirmRecruit(this.recruitCursor);
+        return;
+      }
+      this.state = 'play';
+      this.recruitCastle = null;
+      this.paint();
       return;
     }
     if (this.state !== 'play') return;
 
-    // Bottom HUD bar buttons: END TURN (right) & MENU (left)
-    if (y >= HEIGHT - 28) {
-      if (x >= WIDTH - 84) this.endTurn();
-      else if (x <= 66) {
+    // Corner softkeys above 32px bottom HUD (`END TURN` right & `MENU` left)
+    if (y >= HEIGHT - 49 && y <= HEIGHT - 32) {
+      if (x >= WIDTH - 68) { this.endTurn(); return; }
+      if (x <= 56) {
+        this.persistState();
+        this.pauseCursor = 0;
+        this.state = 'pauseMenu';
+        this.paint();
+        return;
+      }
+    }
+    if (y >= HEIGHT - 32) {
+      if (x <= 56) {
         this.persistState();
         this.pauseCursor = 0;
         this.state = 'pauseMenu';
@@ -932,14 +1368,9 @@ class AncientEmpiresWeb {
       }
       return;
     }
-    // Top bar pan / camera nudges
-    if (y < 28) {
-      if (x > 180) this.pan(x > 210 ? 0 : x > 195 ? 1 : 2);
-      return;
-    }
     const { offsetX, offsetY } = this.getBoardGeometry();
     const tileX = Math.floor((x - offsetX + this.cameraX) / 24);
-    const tileY = Math.floor((y - 28 - offsetY + this.cameraY) / 24);
+    const tileY = Math.floor((y - offsetY + this.cameraY) / 24);
     if (tileX >= 0 && tileY >= 0 && tileX < this.assets.map.width && tileY < this.assets.map.height) {
       this.selectTile(tileX, tileY);
     }
@@ -983,10 +1414,19 @@ class AncientEmpiresWeb {
 
   key(event) {
     const code = event.code;
-    if (this.state === 'splash') { this.openMenu('menu'); return; }
+    if (this.state === 'splash') { this.sfx('select'); this.openMenu('menu'); return; }
+    if (this.state === 'about') {
+      if (code === 'Escape' || code === 'Enter' || code === 'Space') this.openMenu('menu');
+      return;
+    }
     if (this.state === 'cutscene') {
       if (code === 'Escape') this.advanceCutscene(true);
       else if (code === 'Enter' || code === 'Space' || code === 'Digit5') this.advanceCutscene(false);
+      return;
+    }
+    if (this.state === 'script') {
+      if (code === 'Escape') this.advanceScriptDialog(true);
+      else if (code === 'Enter' || code === 'Space' || code === 'Digit5') this.advanceScriptDialog(false);
       return;
     }
     if (this.state === 'stageBanner') {
@@ -1011,10 +1451,19 @@ class AncientEmpiresWeb {
     }
     if (this.state === 'moveAnim') return;
     if (this.state === 'menu') {
-      if (code === 'ArrowUp' || code === 'KeyW') this.menuCursor = (this.menuCursor + 5) % 6;
-      else if (code === 'ArrowDown' || code === 'KeyS') this.menuCursor = (this.menuCursor + 1) % 6;
-      else if (code === 'Enter' || code === 'Space' || code === 'Digit5') {
-        this.confirmMainMenuOption(this.menuCursor);
+      if (!this.mainRing) this.initMainRing();
+      const total = this.mainRing.items.length;
+      if (code === 'ArrowUp' || code === 'KeyW' || code === 'ArrowLeft' || code === 'KeyA' || code === 'Digit4' || code === 'Digit8') {
+        this.sfx('select');
+        this.mainRing.move(-1);
+        this.menuCursor = this.mainRing.selectedIndex;
+      } else if (code === 'ArrowDown' || code === 'KeyS' || code === 'ArrowRight' || code === 'KeyD' || code === 'Digit6' || code === 'Digit2') {
+        this.sfx('select');
+        this.mainRing.move(1);
+        this.menuCursor = this.mainRing.selectedIndex;
+      } else if (code === 'Enter' || code === 'Space' || code === 'Digit5') {
+        this.sfx('select');
+        this.confirmMainMenuOption(this.mainRing.selectedIndex);
         return;
       }
       this.paint();
@@ -1098,19 +1547,31 @@ class AncientEmpiresWeb {
       return;
     }
     if (this.state === 'actionMenu') {
-      if (code === 'ArrowUp' || code === 'KeyW') this.actionCursor = (this.actionCursor + this.actionOptions.length - 1) % this.actionOptions.length;
-      else if (code === 'ArrowDown' || code === 'KeyS') this.actionCursor = (this.actionCursor + 1) % this.actionOptions.length;
-      else if (code === 'Enter' || code === 'Space' || code === 'Digit5') this.confirmActionOption(this.actionCursor);
-      else if (code === 'Escape') this.cancelSelection();
+      if (!this.actionRing) return;
+      if (code === 'ArrowUp' || code === 'KeyW' || code === 'ArrowLeft' || code === 'KeyA' || code === 'Digit4' || code === 'Digit8') {
+        this.sfx('select');
+        this.actionRing.move(-1);
+        this.actionCursor = this.actionRing.selectedIndex;
+      } else if (code === 'ArrowDown' || code === 'KeyS' || code === 'ArrowRight' || code === 'KeyD' || code === 'Digit6' || code === 'Digit2') {
+        this.sfx('select');
+        this.actionRing.move(1);
+        this.actionCursor = this.actionRing.selectedIndex;
+      } else if (code === 'Enter' || code === 'Space' || code === 'Digit5') {
+        this.confirmActionOption(this.actionRing.selectedIndex);
+        return;
+      } else if (code === 'Escape' || code === 'KeyQ') {
+        this.cancelSelection();
+        return;
+      }
       this.paint();
       return;
     }
     if (this.state === 'recruitMenu') {
       const len = this.getRecruitList().length;
-      if (code === 'ArrowUp' || code === 'KeyW') this.recruitCursor = (this.recruitCursor + len - 1) % len;
-      else if (code === 'ArrowDown' || code === 'KeyS') this.recruitCursor = (this.recruitCursor + 1) % len;
+      if (code === 'ArrowLeft' || code === 'KeyA' || code === 'ArrowUp' || code === 'KeyW') this.recruitCursor = (this.recruitCursor + len - 1) % len;
+      else if (code === 'ArrowRight' || code === 'KeyD' || code === 'ArrowDown' || code === 'KeyS') this.recruitCursor = (this.recruitCursor + 1) % len;
       else if (code === 'Enter' || code === 'Space' || code === 'Digit5') this.confirmRecruit(this.recruitCursor);
-      else if (code === 'Escape') { this.state = 'play'; this.recruitCastle = null; }
+      else if (code === 'Escape' || code === 'KeyQ') { this.state = 'play'; this.recruitCastle = null; }
       this.paint();
       return;
     }
@@ -1192,10 +1653,11 @@ class AncientEmpiresWeb {
   }
 
   centerCameraOn(tx, ty) {
+    const boardH = HEIGHT - 32;
     const maxCamX = Math.max(0, this.assets.map.width * 24 - WIDTH);
-    const maxCamY = Math.max(0, this.assets.map.height * 24 - (HEIGHT - 56));
+    const maxCamY = Math.max(0, this.assets.map.height * 24 - boardH);
     this.cameraX = Math.max(0, Math.min(maxCamX, tx * 24 - (WIDTH >> 1) + 12));
-    this.cameraY = Math.max(0, Math.min(maxCamY, ty * 24 - ((HEIGHT - 56) >> 1) + 12));
+    this.cameraY = Math.max(0, Math.min(maxCamY, ty * 24 - (boardH >> 1) + 12));
   }
 
   cancelSelection() {
@@ -1314,30 +1776,48 @@ class AncientEmpiresWeb {
     const opts = [];
     const targets = getAttackableTargets(unit, this.units, p => this.teamFor(p));
     if (targets.length > 0) {
-      opts.push({ kind: 'attack', icon: 2, label: this.assets.langStrings?.[62] || 'ATTACK', targets });
+      opts.push({ kind: 'attack', icon: 3, label: this.assets.langStrings?.[62] || 'ATTACK', targets });
     }
     const townTargets = this.targetableTownsFor(unit);
     if (townTargets.length > 0) {
-      opts.push({ kind: 'destroyTown', icon: 2, label: 'BOMBARD TOWN', targets: townTargets });
+      opts.push({ kind: 'destroyTown', icon: 7, label: 'BOMBARD', targets: townTargets });
     }
     const myPal = this.playerPalette[unit.playerSelector] ?? unit.playerSelector;
     const tileAct = getTileActionForUnit(unit, this.rawTile(unit.x, unit.y), this.tileProperty(unit.x, unit.y), myPal);
     if (tileAct === 'capture') opts.push({ kind: 'capture', icon: 1, label: this.assets.langStrings?.[67] || 'OCCUPY' });
-    else if (tileAct === 'repair') opts.push({ kind: 'repair', icon: 1, label: this.assets.langStrings?.[68] || 'REPAIR' });
+    else if (tileAct === 'repair') opts.push({ kind: 'repair', icon: 2, label: this.assets.langStrings?.[68] || 'REPAIR' });
 
-    // Sorceress (type 3) can raise Skeleton from adjacent tombstone (i.java:2515-2530)
+    // Sorceress (type 3) can raise Skeleton from adjacent tombstone (`action_icons[4]` Raise)
     if (unit.type === 3) {
       const tombs = this.units.filter(
         u => u.action === 3 && u.type !== 9 && u.x >= 0 && u.y >= 0 && Math.abs(u.x - unit.x) + Math.abs(u.y - unit.y) === 1 && !this.unitAt(u.x, u.y)
       );
-      if (tombs.length > 0) opts.push({ kind: 'raise', icon: 3, label: this.assets.langStrings?.[69] || 'RAISE', tombs });
+      if (tombs.length > 0) opts.push({ kind: 'raise', icon: 4, label: this.assets.langStrings?.[69] || 'RAISE', tombs });
     }
 
-    opts.push({ kind: 'wait', icon: 5, label: this.assets.langStrings?.[64] || 'END MOVE' });
-    opts.push({ kind: 'cancel', icon: 6, label: this.assets.langStrings?.[65] || 'CANCEL' });
+    opts.push({ kind: 'wait', icon: 6, label: this.assets.langStrings?.[64] || 'END MOVE' });
+    opts.push({ kind: 'cancel', icon: 5, label: this.assets.langStrings?.[65] || 'CANCEL' });
     this.actionOptions = opts;
     this.actionCursor = 0;
     this.attackTargets = [...targets, ...townTargets];
+
+    // Port of i.java:974-978: bottom-left ring if cursor in upper half, else top-right ring
+    const boardH = HEIGHT - 32;
+    const upperHalf = this.cursor.y * 24 <= (boardH >> 1) - 24;
+    this.actionRing = new RingMenu({
+      items: opts,
+      selectedIndex: 0,
+      centerX: upperHalf ? 64 : 176,
+      centerY: upperHalf ? 222 : 82,
+      radius: 40,
+      circleSprite: 'big_circle',
+      iconSprite: 'action_icons',
+      maxW: WIDTH,
+      maxH: boardH,
+      titleX: upperHalf ? 4 : 118,
+      titleW: 118,
+      titleY: upperHalf ? 142 : 4,
+    });
     this.state = 'actionMenu';
     this.paint();
   }
@@ -1599,8 +2079,9 @@ class AncientEmpiresWeb {
   }
 
   pan(direction) {
+    const boardH = HEIGHT - 32;
     if (direction === 0) this.cameraX = Math.min(Math.max(0, this.assets.map.width * 24 - WIDTH), this.cameraX + 24);
-    else if (direction === 1) this.cameraY = Math.min(Math.max(0, this.assets.map.height * 24 - 264), this.cameraY + 24);
+    else if (direction === 1) this.cameraY = Math.min(Math.max(0, this.assets.map.height * 24 - boardH), this.cameraY + 24);
     else this.cameraX = Math.max(0, this.cameraX - 24);
     this.paint();
   }
@@ -1641,6 +2122,14 @@ class AncientEmpiresWeb {
       for (const [ex, ey] of CAMPAIGN_STAGE_CONFIG.m2.turn2Elementals) {
         if (!this.unitAt(ex, ey)) this.spawnStageUnit(2, 1, ex, ey);
       }
+      if (this.settings.showStory && CAMPAIGN_STAGE_SCRIPTS.m2?.turn2) {
+        this.triggeredTurnDialogs.add(roundNum);
+        this.playStageScript(CAMPAIGN_STAGE_SCRIPTS.m2.turn2, () => {
+          this.showToast(`PLAYER ${this.playerIndex + 1} TURN (+${res.income}G)`, 900);
+          this.paint();
+        });
+        return;
+      }
     }
 
     if (this.playerModes[this.playerIndex] === 0) {
@@ -1660,7 +2149,7 @@ class AncientEmpiresWeb {
         });
         return;
       }
-      if (this.state !== 'storyDialog') {
+      if (this.state !== 'storyDialog' && this.state !== 'script') {
         this.showToast(`PLAYER ${this.playerIndex + 1} TURN (+${res.income}G)`, 900);
       }
     }
@@ -1888,14 +2377,7 @@ class AncientEmpiresWeb {
     if (this.currentMapId === 'm0' && this.settings.showStory && !this.m0Reinforced && !this.hasLivingUnit(2)) {
       this.m0Reinforced = true;
       this.aiPending = false;
-      const p1 = !this.unitAt(1, 2) ? [1, 2] : [1, 1];
-      const p2 = !this.unitAt(10, 9) ? [10, 9] : [10, 10];
-      if (!this.unitAt(p1[0], p1[1])) this.spawnStageUnit(1, 2, p1[0], p1[1]);
-      if (!this.unitAt(p2[0], p2[1])) this.spawnStageUnit(0, 2, p2[0], p2[1]);
-      this.playStoryDialogs([
-        { langIdx: 225, portrait: 5, focus: p1 },
-        { langIdx: 226, portrait: 0, focus: p2 },
-      ], () => {
+      this.playStageScript(CAMPAIGN_STAGE_SCRIPTS.m0.wave2, () => {
         this.state = 'play';
         this.persistState();
         this.paint();
@@ -2000,47 +2482,19 @@ class AncientEmpiresWeb {
     return name ? `${id.toUpperCase()} ${name}` : id.toUpperCase();
   }
 
-  drawHudIcon(ctx, hoverUnit) {
-    if (hoverUnit) {
-      const acted = hoverUnit.action === 1 || hoverUnit.action === 2;
-      const teamPal = Math.max(1, hoverUnit.palette ?? 1);
-      const pal = acted ? 0 : teamPal;
-      const sheet = this.assets.unitIconPalettes?.[pal] ?? this.assets.images.unit_icons;
-      const frame = ((hoverUnit.frameIndex ?? 0) & 1) * 12 + (hoverUnit.type ?? 0);
-      const sx = (frame % 12) * 24;
-      const sy = Math.floor(frame / 12) * 24;
-      if (sheet) drawRegionMIDP(ctx, sheet, sx, sy, 24, 24, 0, 2, 2, MIDP.LEFT | MIDP.TOP);
-      if (hoverUnit.type === 9 && this.assets.sprites.king_head_icons) {
-        const headMeta = this.assets.sprites.king_head_icons;
-        const headImg = acted ? (this.assets.kingHeadPalettes?.[0] ?? this.assets.images.king_head_icons) : this.assets.images.king_head_icons;
-        const headTeam = Number.isInteger(hoverUnit.kingHead)
-          ? hoverUnit.kingHead
-          : Math.max(0, Math.min(3, teamPal - 1));
-        const headFrame = headMeta.frames?.[headTeam * 2 + ((hoverUnit.frameIndex ?? 0) & 1)];
-        if (headImg && headFrame) {
-          drawRegionMIDP(ctx, headImg, headFrame.sourceFrame * headMeta.frameWidth, 0, headMeta.frameWidth, headMeta.frameHeight,
-            headFrame.transform ?? 0, 2 + (headFrame.offsetX ?? 0), 2 + (headFrame.offsetY ?? 0), MIDP.LEFT | MIDP.TOP);
-        }
-      }
-      return;
-    }
-    const tomb = this.tombstoneAt(this.cursor.x, this.cursor.y);
-    if (tomb && this.assets.images.tombstone) {
-      drawRegionMIDP(ctx, this.assets.images.tombstone, 0, 0, 24, 24, 0, 2, 2, MIDP.LEFT | MIDP.TOP);
-      return;
-    }
+  drawCursorTile(ctx, dx = 2, dy = 2) {
     const rawTile = this.rawTile(this.cursor.x, this.cursor.y);
     if (rawTile >= 37) {
       const enc = rawTile - 37;
       const pal = Math.floor(enc / 2);
       const bImg = this.assets.buildingPaletteImages?.[pal] ?? this.assets.images.buildings;
-      if (bImg) drawRegionMIDP(ctx, bImg, (enc % 2) * 24, 0, 24, 24, 0, 2, 2, MIDP.LEFT | MIDP.TOP);
+      if (bImg) drawRegionMIDP(ctx, bImg, (enc % 2) * 24, 0, 24, 24, 0, dx, dy, MIDP.LEFT | MIDP.TOP);
     } else {
       const meta = this.assets.sprites.tiles0;
       const frame = meta?.frames?.[rawTile];
       const tileImg = frame ? this.assets.frameImages.tiles0?.[frame.sourceFrame] : null;
       if (tileImg) {
-        drawRegionMIDP(ctx, tileImg, 0, 0, meta.frameWidth, meta.frameHeight, frame.transform ?? 0, 2, 2, MIDP.LEFT | MIDP.TOP);
+        drawRegionMIDP(ctx, tileImg, 0, 0, meta.frameWidth, meta.frameHeight, frame.transform ?? 0, dx, dy, MIDP.LEFT | MIDP.TOP);
       }
     }
   }
@@ -2050,22 +2504,17 @@ class AncientEmpiresWeb {
     const target = this.targetCandidates[this.targetCursor];
     if (!attacker || !target) return;
     const isAttack = this.targetKind === 'attack';
-    const isTown = this.targetKind === 'destroyTown';
-    const boxY = 30;
-    ctx.fillStyle = 'rgba(20, 16, 26, 0.94)';
-    ctx.fillRect(6, boxY, WIDTH - 12, 36);
-    ctx.strokeStyle = isAttack ? '#ff4b4b' : isTown ? '#ffa640' : '#9cff7b';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(6, boxY, WIDTH - 12, 36);
+    const boardH = HEIGHT - 32;
+    const barY = (this.cursor.y * 24 - this.cameraY <= (boardH >> 1) - 24) ? boardH - 26 : 0;
 
-    if (isTown) {
-      centerText(ctx, `BOMBARD TOWN (${target.x},${target.y}) · DESTROYS TOWN`, boxY + 12, { font: 'bold 8px monospace', color: '#ffa640' });
-      centerText(ctx, 'ENTER / TAP TARGET · ESC BACK', boxY + 26, { font: '8px monospace', color: '#e6decb' });
-      return;
-    }
     if (!isAttack) {
-      centerText(ctx, 'SELECT TOMBSTONE TO RAISE SKELETON', boxY + 12, { font: 'bold 8px monospace', color: '#9cff7b' });
-      centerText(ctx, 'ENTER / TAP TARGET · ESC BACK', boxY + 26, { font: '8px monospace', color: '#e6decb' });
+      drawTargetForecastBar(ctx, this.assets, {
+        width: WIDTH,
+        barY,
+        kind: this.targetKind,
+        attackerName: this.unitName(attacker.type, attacker.level),
+        targetName: `${target.x},${target.y}`,
+      });
       return;
     }
 
@@ -2074,46 +2523,80 @@ class AncientEmpiresWeb {
     const aMod = attackModifierFor(attacker, target, attacker.x, attacker.y, aProp, this.rawTile(attacker.x, attacker.y));
     const aDef = defenseModifierFor(attacker, attacker.x, attacker.y, aProp, this.rawTile(attacker.x, attacker.y));
     const dDef = defenseModifierFor(target, target.x, target.y, dProp, this.rawTile(target.x, target.y));
+    const dist = Math.abs(attacker.x - target.x) + Math.abs(attacker.y - target.y);
+    const canCounter = dist >= (target.attackRangeMin ?? 1) && dist <= (target.attackRangeMax ?? 1);
+    const cMod = canCounter
+      ? attackModifierFor(target, attacker, target.x, target.y, dProp, this.rawTile(target.x, target.y))
+      : 0;
 
-    const hudImg = this.assets.images.hud_icons;
-    if (hudImg) {
-      drawRegionMIDP(ctx, hudImg, 0, 0, 13, 16, 0, 12, boxY + 3, MIDP.LEFT | MIDP.TOP);
-      drawRegionMIDP(ctx, hudImg, 13, 0, 13, 16, 0, 12, boxY + 19, MIDP.LEFT | MIDP.TOP);
+    drawTargetForecastBar(ctx, this.assets, {
+      width: WIDTH,
+      barY,
+      kind: 'attack',
+      attackerName: this.unitName(attacker.type, attacker.level),
+      targetName: this.unitName(target.type, target.level),
+      attackerPalette: attacker.palette ?? 1,
+      targetPalette: target.palette ?? 2,
+      atkRangeText: `${attacker.atkMin + aMod}-${attacker.atkMax + aMod}`,
+      defCounterText: canCounter ? `${target.atkMin + cMod}-${target.atkMax + cMod}` : '0-0',
+      atkMod: aMod,
+      defCounterMod: canCounter ? cMod : 0,
+      attackerDef: attacker.defense + aDef,
+      targetDef: target.defense + dDef,
+      atkDefMod: aDef,
+      defDefMod: dDef,
+      attackerHp: attacker.hp,
+      targetHp: target.hp,
+    });
+  }
+
+  paintTitleBackdrop(ctx) {
+    drawImageAt(ctx, this.assets.images.splash, 0, 0, WIDTH, HEIGHT);
+    const logo = this.assets.images.logo;
+    if (logo) {
+      const lx = (WIDTH - (logo.naturalWidth || 238)) >> 1;
+      const ly = 10;
+      const lw = logo.naturalWidth || 238;
+      const lh = logo.naturalHeight || 85;
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(lx, ly, lw, lh);
+      ctx.clip();
+      ctx.drawImage(logo, lx, ly);
+      const glow = this.assets.images.glow;
+      if (glow && this.glowX < lw) {
+        ctx.drawImage(glow, lx + this.glowX, ly + 4);
+      }
+      ctx.restore();
     }
-    ctx.font = 'bold 8px monospace';
-    ctx.textAlign = 'left';
-    ctx.fillStyle = '#5bb8ff';
-    ctx.fillText(`${this.unitName(attacker.type, attacker.level).slice(0, 10)} (${attacker.hp})`, 28, boxY + 10);
-    ctx.fillStyle = '#f4dfb3';
-    ctx.fillText(`ATK:${attacker.atkMin + aMod}-${attacker.atkMax + aMod} DEF:${attacker.defense + aDef}`, 28, boxY + 26);
-
-    ctx.textAlign = 'right';
-    ctx.fillStyle = '#ff7272';
-    ctx.fillText(`${this.unitName(target.type, target.level).slice(0, 10)} (${target.hp})`, WIDTH - 12, boxY + 10);
-    ctx.fillStyle = '#e6decb';
-    ctx.fillText(`DEF:${target.defense + dDef} LV:${target.level}`, WIDTH - 12, boxY + 26);
   }
 
   paint() {
     const ctx = this.ctx;
     ctx.imageSmoothingEnabled = false;
     ctx.textBaseline = 'alphabetic';
-    ctx.fillStyle = '#0e131a';
+    ctx.fillStyle = UI_COLORS.titleBg;
     ctx.fillRect(0, 0, WIDTH, HEIGHT);
 
     if (this.state === 'splash') {
-      drawImageAt(ctx, this.assets.images.splash, 0, 0, WIDTH, HEIGHT);
-      ctx.fillStyle = 'rgba(14, 16, 24, 0.86)';
-      ctx.fillRect(42, 224, 156, 20);
-      ctx.strokeStyle = '#caa568';
-      ctx.strokeRect(42, 224, 156, 20);
-      centerText(ctx, 'PRESS ANY KEY / TAP', 234, { font: 'bold 9px monospace', color: '#ffd84d' });
+      this.paintTitleBackdrop(ctx);
+      if (Math.floor(this.animTick / 8) % 2 === 0) {
+        drawOutlinedText(ctx, this.assets.langStrings?.[60] || 'PRESS ANY KEY', WIDTH >> 1, 240, {
+          font: 'bold 11px Arial, sans-serif',
+          color: '#ffffff',
+        });
+      }
+      drawOutlinedText(ctx, this.assets.langStrings?.[22] || '©MACROSPACE LTD.', WIDTH >> 1, HEIGHT - 12, {
+        font: 'bold 8px Arial, sans-serif',
+        color: UI_COLORS.textMuted,
+      });
       return;
     }
 
     if (this.state === 'cutscene') {
       const cur = this.cutsceneQueue[0] ?? { image: null, text: '' };
       this.cutsceneMaxScroll = renderCutsceneScreen(ctx, {
+        assets: this.assets,
         image: cur.image,
         text: cur.text,
         scrollPx: this.cutsceneScroll,
@@ -2129,175 +2612,148 @@ class AncientEmpiresWeb {
     }
 
     if (this.state === 'menu') {
-      const grad = ctx.createLinearGradient(0, 0, 0, HEIGHT);
-      grad.addColorStop(0, '#1d1624');
-      grad.addColorStop(0.45, '#12151f');
-      grad.addColorStop(1, '#0b0e15');
-      ctx.fillStyle = grad;
-      ctx.fillRect(0, 0, WIDTH, HEIGHT);
-      drawImageAt(ctx, this.assets.images.logo, 1, 14, 238, 85);
-      const items = this.getMainMenuItems();
-      const menuSheet = this.assets.images.menu_icons;
-      items.forEach((item, i) => {
-        const y = 114 + i * 26;
-        ctx.fillStyle = i === this.menuCursor ? '#3c2a18' : '#1b1410';
-        ctx.fillRect(26, y, 188, 22);
-        ctx.strokeStyle = i === this.menuCursor ? '#ffd84d' : '#7b6344';
-        ctx.strokeRect(26, y, 188, 22);
-        if (menuSheet) {
-          const mMeta = this.assets.sprites.menu_icons;
-          const fw = mMeta?.frameWidth ?? 25;
-          const fh = mMeta?.frameHeight ?? 25;
-          ctx.drawImage(menuSheet, item.icon * fw, 0, fw, fh, 30, y + 1, 20, 20);
-        }
-        ctx.fillStyle = i === this.menuCursor ? '#ffd84d' : '#f1e7d2';
-        ctx.font = 'bold 9px monospace';
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(item.label, 54, y + 11, 152);
+      this.paintTitleBackdrop(ctx);
+      if (!this.mainRing) this.initMainRing();
+      this.mainRing.render(ctx, this.assets);
+      drawSoftkeyButton(ctx, this.assets, { x: 4, y: HEIGHT - 20, w: 68, h: 16, iconIdx: 0, label: 'SELECT' });
+      return;
+    }
+
+    if (this.state === 'about') {
+      this.paintTitleBackdrop(ctx);
+      const box = drawMenuFrame(ctx, this.assets, 10, 22, WIDTH - 20, HEIGHT - 54, 0, 22);
+      drawUiText(ctx, this.assets.langStrings?.[10] || 'ABOUT', box.ix + (box.iw >> 1), box.iy + 11, {
+        font: 'bold 10px Arial, sans-serif',
+        color: UI_COLORS.textActive,
+        align: 'center',
       });
-      centerText(ctx, 'TAP OR ARROWS · ENTER', 292, { font: '8px monospace', color: '#9eb092' });
+      if (this.assets.images.ms_logo) {
+        drawImageAt(ctx, this.assets.images.ms_logo, WIDTH >> 1, box.iy + 72, 89, 88, MIDP.HCENTER | MIDP.VCENTER);
+      }
+      const aboutTxt = (this.assets.langStrings?.[16] || 'Ancient Empires II by Macrospace Ltd.').replace(/%U/g, '1.0');
+      drawWrappedLines(ctx, aboutTxt, box.ix + 8, box.iy + 124, box.iw - 16, 13, 8, {
+        font: '9px Arial, sans-serif',
+        color: UI_COLORS.textActive,
+      });
+      drawSoftkeyButton(ctx, this.assets, { x: WIDTH - 74, y: HEIGHT - 24, w: 66, h: 16, iconIdx: 1, label: 'BACK', alignRight: true });
       return;
     }
 
     if (this.state === 'skirmishSetup') {
-      centerText(ctx, 'SKIRMISH SETUP', 18, { font: 'bold 11px monospace', color: '#ffd84d' });
+      this.paintTitleBackdrop(ctx);
       const mapId = SKIRMISH_MAPS[this.skirmishConfig.mapIdx] || 's0';
       const pCount = this.getSkirmishPlayerCount(mapId);
-      const colors = ['BLUE', 'RED', 'GREEN', 'YELLOW'];
-      const rows = [
-        ['MAP', this.mapLabel(mapId)],
-        ['STARTING GOLD', `${this.skirmishConfig.gold}G`],
-        ...Array.from({ length: pCount }, (_, i) => [
-          `PLAYER ${i + 1} (${colors[i]})`,
-          this.skirmishConfig.players[i] === 1 ? 'HUMAN' : 'CPU',
-        ]),
+      const colors = ['BLUE', 'RED', 'GREEN', 'BLACK'];
+      const items = [
+        { label: 'MAP', value: `< ${this.mapLabel(mapId).slice(0, 14)} >` },
+        { label: 'STARTING GOLD', value: `< ${this.skirmishConfig.gold} >` },
+        ...Array.from({ length: pCount }, (_, i) => ({
+          label: `P${i + 1} (${colors[i]})`,
+          value: `< ${this.skirmishConfig.players[i] === 1 ? 'HUMAN' : 'CPU'} >`,
+        })),
+        { label: 'START BATTLE', value: '▶' },
       ];
-      rows.forEach(([k, v], i) => {
-        const y = 44 + i * 33;
-        ctx.fillStyle = i === this.skirmishCursor ? '#3b2e1b' : '#181c24';
-        ctx.fillRect(18, y, WIDTH - 36, 28);
-        ctx.strokeStyle = i === this.skirmishCursor ? '#ffd84d' : '#524433';
-        ctx.strokeRect(18, y, WIDTH - 36, 28);
-        ctx.font = '8px monospace';
-        ctx.fillStyle = '#a9d69d';
-        ctx.textAlign = 'left';
-        ctx.fillText(k, 26, y + 11);
-        ctx.font = 'bold 9px monospace';
-        ctx.fillStyle = '#ffd84d';
-        ctx.fillText(`◀  ${v}  ▶`, 26, y + 23, WIDTH - 52);
+      drawFramedListMenu(ctx, this.assets, {
+        title: this.assets.langStrings?.[35] || 'SKIRMISH SETUP',
+        items,
+        selectedIndex: this.skirmishCursor,
+        rowHeight: 26,
+        maxVisible: 7,
+        x: 10,
+        y: 26,
+        w: WIDTH - 20,
+        h: HEIGHT - 58,
+        leftButton: 'START',
+        rightButton: 'BACK',
+        width: WIDTH,
+        height: HEIGHT,
       });
-      const startSel = this.skirmishCursor >= rows.length;
-      ctx.fillStyle = startSel ? '#3c2a18' : '#241a14';
-      ctx.fillRect(16, 280, 102, 24);
-      ctx.strokeStyle = startSel ? '#ffd84d' : '#8b6f47';
-      ctx.strokeRect(16, 280, 102, 24);
-      ctx.font = 'bold 9px monospace';
-      ctx.fillStyle = '#ffd84d';
-      ctx.textAlign = 'center';
-      ctx.fillText('START BATTLE', 67, 295);
-
-      ctx.fillStyle = '#1b1410';
-      ctx.fillRect(126, 280, 98, 24);
-      ctx.strokeStyle = '#8b6f47';
-      ctx.strokeRect(126, 280, 98, 24);
-      ctx.fillStyle = '#e6decb';
-      ctx.fillText('BACK · ESC', 175, 295);
       return;
     }
 
     if (this.state === 'settings') {
-      centerText(ctx, 'SETTINGS', 24, { font: 'bold 11px monospace', color: '#ffd84d' });
-      const rows = [
-        ['FIGHT ANIMATION', this.settings.fightAnimation ? 'ON' : 'OFF'],
-        ['SOUND FX', this.settings.sound ? 'ON' : 'OFF'],
-        ['CAMPAIGN STORY', this.settings.showStory ? 'ON' : 'OFF'],
+      this.paintTitleBackdrop(ctx);
+      const items = [
+        { label: this.assets.langStrings?.[25] || 'Fight Animation', value: this.settings.fightAnimation ? 'ON' : 'OFF' },
+        { label: this.assets.langStrings?.[28] || 'Sound', value: this.settings.sound ? 'ON' : 'OFF' },
+        { label: 'Campaign Story', value: this.settings.showStory ? 'ON' : 'OFF' },
       ];
-      rows.forEach(([label, val], i) => {
-        const y = 76 + i * 36;
-        ctx.fillStyle = i === this.settingsCursor ? '#3b2e1b' : '#181c24';
-        ctx.fillRect(24, y, WIDTH - 48, 28);
-        ctx.strokeStyle = i === this.settingsCursor ? '#ffd84d' : '#524433';
-        ctx.strokeRect(24, y, WIDTH - 48, 28);
-        ctx.font = 'bold 9px monospace';
-        ctx.fillStyle = '#f1e7d2';
-        ctx.textAlign = 'left';
-        ctx.fillText(label, 34, y + 17);
-        ctx.textAlign = 'right';
-        ctx.fillStyle = val === 'ON' ? '#9cff7b' : '#ff7b7b';
-        ctx.fillText(val, WIDTH - 34, y + 17);
+      drawFramedListMenu(ctx, this.assets, {
+        title: this.assets.langStrings?.[8] || 'SETTINGS',
+        items,
+        selectedIndex: this.settingsCursor,
+        rowHeight: 28,
+        maxVisible: 5,
+        x: 10,
+        y: 26,
+        w: WIDTH - 20,
+        h: HEIGHT - 58,
+        leftButton: 'CHANGE',
+        rightButton: 'BACK',
+        width: WIDTH,
+        height: HEIGHT,
       });
-      ctx.fillStyle = '#241a14';
-      ctx.fillRect(48, 282, 144, 22);
-      ctx.strokeStyle = '#8b6f47';
-      ctx.strokeRect(48, 282, 144, 22);
-      centerText(ctx, 'BACK · ESC', 293, { font: 'bold 8px monospace', color: '#e6decb' });
       return;
     }
 
     if (this.state === 'instructions') {
-      centerText(ctx, 'HOW TO PLAY & UNITS', 18, { font: 'bold 10px monospace', color: '#ffd84d' });
-      centerText(ctx, '▲ SCROLL UP', 36, { font: '8px monospace', color: this.helpScroll > 0 ? '#ffd84d' : '#4a5262' });
+      this.paintTitleBackdrop(ctx);
+      const frame = drawMenuFrame(ctx, this.assets, 8, 16, WIDTH - 16, HEIGHT - 46, 0, 22);
+      drawUiText(ctx, this.assets.langStrings?.[9] || 'INSTRUCTIONS', frame.ix + (frame.iw >> 1), frame.iy + 11, {
+        font: 'bold 10px Arial, sans-serif',
+        color: UI_COLORS.textActive,
+        align: 'center',
+      });
       const tips = [];
       for (let idx = 198; idx <= 214; idx++) {
         if (this.assets.langStrings?.[idx]) {
           const clean = this.assets.langStrings[idx].replace(/%KM/g, 'ARROWS').replace(/%K\d/g, 'ENTER');
-          tips.push(...wrapText(ctx, `• ${clean}`, WIDTH - 24));
+          tips.push(`• ${clean}`);
         }
       }
       ctx.save();
       ctx.beginPath();
-      ctx.rect(8, 46, WIDTH - 16, 226);
+      ctx.rect(frame.ix + 4, frame.iy + 26, frame.iw - 8, frame.ih - 34);
       ctx.clip();
-      ctx.font = '8px monospace';
+      const lines = wrapText(ctx, tips.join('\n'), frame.iw - 14);
+      ctx.font = '9px Arial, sans-serif';
       ctx.textAlign = 'left';
-      ctx.fillStyle = '#e6decb';
-      for (let i = 0; i < 18 && this.helpScroll + i < tips.length; i++) {
-        ctx.fillText(tips[this.helpScroll + i], 12, 56 + i * 12);
+      ctx.textBaseline = 'top';
+      ctx.fillStyle = UI_COLORS.textActive;
+      for (let i = 0; i < 16 && this.helpScroll + i < lines.length; i++) {
+        ctx.fillText(lines[this.helpScroll + i], frame.ix + 6, frame.iy + 28 + i * 13);
       }
       ctx.restore();
-      centerText(ctx, '▼ SCROLL DOWN', 274, { font: '8px monospace', color: this.helpScroll < Math.max(0, tips.length - 18) ? '#ffd84d' : '#4a5262' });
-      ctx.fillStyle = '#241a14';
-      ctx.fillRect(48, 282, 144, 22);
-      ctx.strokeStyle = '#8b6f47';
-      ctx.strokeRect(48, 282, 144, 22);
-      centerText(ctx, 'TAP PAGE / ESC BACK', 293, { font: 'bold 8px monospace', color: '#e6decb' });
+      if (this.helpScroll > 0) drawSpriteFrame(ctx, this.assets, 'arrow', 0, frame.ix + (frame.iw >> 1), frame.iy + 26, MIDP.HCENTER | MIDP.VCENTER);
+      if (this.helpScroll < Math.max(0, 80)) drawSpriteFrame(ctx, this.assets, 'arrow', 1, frame.ix + (frame.iw >> 1), frame.iy + frame.ih - 4, MIDP.HCENTER | MIDP.VCENTER);
+      drawSoftkeyButton(ctx, this.assets, { x: WIDTH - 74, y: HEIGHT - 24, w: 66, h: 16, iconIdx: 1, label: 'BACK', alignRight: true });
       return;
     }
 
     if (this.state === 'levelSelect') {
+      this.paintTitleBackdrop(ctx);
       const start = this.getLevelSelectStart();
-      centerText(ctx, `SELECT MAP (${this.mapIndex + 1}/${this.mapList.length})`, 20, { font: 'bold 10px monospace', color: '#ffd84d' });
-      centerText(ctx, '▲ SCROLL UP', 43, { font: '8px monospace', color: start > 0 ? '#ffd84d' : '#4a5262' });
-      for (let row = 0; row < 11 && start + row < this.mapList.length; row++) {
-        const idx = start + row;
-        const y = 54 + row * 18;
-        ctx.fillStyle = idx === this.mapIndex ? '#3b2e1b' : '#181c24';
-        ctx.fillRect(18, y, 188, 16);
-        if (idx === this.mapIndex) {
-          ctx.strokeStyle = '#ffd84d';
-          ctx.strokeRect(18, y, 188, 16);
-        }
-        centerText(ctx, this.mapLabel(this.mapList[idx]), y + 8, { font: '8px monospace', maxWidth: 180, color: idx === this.mapIndex ? '#ffd84d' : '#e6decb' });
-      }
-      // Visible scrollbar track & thumb
-      ctx.fillStyle = '#181c24';
-      ctx.fillRect(212, 54, 6, 196);
-      const maxStart = Math.max(1, this.mapList.length - 11);
-      const thumbH = Math.max(24, Math.floor(196 * 11 / this.mapList.length));
-      const thumbY = 54 + Math.floor((196 - thumbH) * (start / maxStart));
-      ctx.fillStyle = '#caa568';
-      ctx.fillRect(212, thumbY, 6, thumbH);
-      centerText(ctx, '▼ SCROLL DOWN', 266, { font: '8px monospace', color: start < maxStart ? '#ffd84d' : '#4a5262' });
-      ctx.fillStyle = '#241a14';
-      ctx.fillRect(48, 282, 144, 22);
-      ctx.strokeStyle = '#8b6f47';
-      ctx.strokeRect(48, 282, 144, 22);
-      centerText(ctx, 'BACK TO MENU · ESC', 293, { font: 'bold 8px monospace', color: '#e6decb' });
+      const items = this.mapList.map(id => this.mapLabel(id));
+      drawFramedListMenu(ctx, this.assets, {
+        title: `${this.assets.langStrings?.[3] || 'SELECT LEVEL'} (${this.mapIndex + 1}/${this.mapList.length})`,
+        items,
+        selectedIndex: this.mapIndex,
+        scrollStart: start,
+        maxVisible: 9,
+        rowHeight: 20,
+        x: 10,
+        y: 24,
+        w: WIDTH - 20,
+        h: HEIGHT - 54,
+        leftButton: 'PLAY',
+        rightButton: 'BACK',
+        width: WIDTH,
+        height: HEIGHT,
+      });
       return;
     }
 
-    // Strategic map board (y = 28..292)
+    // Strategic map board (y = 0..288) matching original AE2 full viewport
     const { boardH, offsetX, offsetY } = this.getBoardGeometry();
     this.boardCtx.fillStyle = '#0e131a';
     this.boardCtx.fillRect(0, 0, WIDTH, boardH);
@@ -2311,7 +2767,9 @@ class AncientEmpiresWeb {
       viewportWidth: WIDTH - offsetX * 2,
       viewportHeight: boardH - offsetY * 2,
       units: this.units,
-      cursor: { ...this.cursor, frameIndex: this.state === 'targetSelect' ? (this.animTick % 4 < 2 ? 1 : 0) : 0 },
+      cursor: this.state === 'script'
+        ? null
+        : { ...this.cursor, frameIndex: this.state === 'targetSelect' ? (this.animTick % 4 < 2 ? 1 : 0) : 0 },
       rangeCells: (this.state === 'play' || this.state === 'moveAnim') ? this.reachable?.cells : null,
       targetCells: (this.state === 'play' || this.state === 'targetSelect')
         ? (this.state === 'targetSelect' ? this.targetCandidates.map(t => [t.x, t.y]) : this.attackTargets.map(t => [t.x, t.y]))
@@ -2319,173 +2777,148 @@ class AncientEmpiresWeb {
       path: this.state === 'play' ? this.previewPath : null,
       waterAnimFrame: this.waterAnimFrame,
       floatTexts: this.floatTexts,
+      mapEffects: this.mapEffects,
     });
     this.boardCtx.restore();
-    ctx.drawImage(this.boardCanvas, 0, 28);
+    ctx.drawImage(this.boardCanvas, 0, 0);
 
-    // Top HUD bar (0..28) using hud_icons_2 gold & unit count
-    ctx.fillStyle = '#18141c';
-    ctx.fillRect(0, 0, WIDTH, 28);
+    // Authentic 32px bottom HUD bar (y = 288..320, i.java:3496-3586)
     const hoverUnit = this.unitAt(this.cursor.x, this.cursor.y);
-    this.drawHudIcon(ctx, hoverUnit);
     const myUnitsCount = this.units.filter(
       u => u.playerSelector === 1 + this.playerIndex && u.action !== 3 && u.action !== 4 && u.hp > 0
     ).length;
-    const roundHud = Math.floor(this.turn / Math.max(1, this.playerCount)) + 1;
-    const hud2 = this.assets.images.hud_icons_2;
-    if (hud2) {
-      ctx.drawImage(hud2, 11, 0, 11, 11, 30, 2, 11, 11);
-      ctx.drawImage(hud2, 0, 0, 11, 11, 108, 2, 11, 11);
-    }
-    ctx.fillStyle = '#f4dfb3';
-    ctx.font = 'bold 9px monospace';
-    ctx.textAlign = 'left';
-    ctx.fillText(`${this.balances[this.playerIndex] ?? 0}G`, 44, 11);
-    ctx.fillText(`${myUnitsCount} · R${roundHud} P${this.playerIndex + 1}`, 122, 11);
-
-    ctx.fillStyle = '#a9d69d';
-    ctx.font = '8px monospace';
+    const curPal = this.playerPalette[1 + this.playerIndex] ?? (1 + this.playerIndex);
     const tileProp = this.tileProperty(this.cursor.x, this.cursor.y);
-    const tombHover = this.tombstoneAt(this.cursor.x, this.cursor.y);
-    const subLabel = hoverUnit
-      ? `${this.unitName(hoverUnit.type, hoverUnit.level)} HP:${hoverUnit.hp} LV:${hoverUnit.level}`
-      : tombHover
-        ? `TOMBSTONE (${this.cursor.x},${this.cursor.y})`
-        : `${this.currentMapId.toUpperCase()} (${this.cursor.x},${this.cursor.y}) DEF:${[0, 5, 10, 10, 15, 0, 5, 15, 15, 15][tileProp ?? 0] ?? 0}`;
-    ctx.fillText(subLabel, 30, 23);
+    const tileDef = [0, 5, 10, 10, 15, 0, 5, 15, 15, 15][tileProp ?? 0] ?? 0;
 
-    // Bottom HUD bar (292..320)
-    ctx.fillStyle = '#18141c';
-    ctx.fillRect(0, HEIGHT - 28, WIDTH, 28);
-    ctx.fillStyle = '#2c2218';
-    ctx.fillRect(4, HEIGHT - 24, 58, 20);
-    ctx.strokeStyle = '#8b6f47';
-    ctx.strokeRect(4, HEIGHT - 24, 58, 20);
-    ctx.fillRect(WIDTH - 82, HEIGHT - 24, 78, 20);
-    ctx.strokeRect(WIDTH - 82, HEIGHT - 24, 78, 20);
-    ctx.fillStyle = '#ffd84d';
-    ctx.font = 'bold 9px monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText(this.state === 'targetSelect' ? 'BACK' : 'MENU', 33, HEIGHT - 11);
-    ctx.fillText(this.state === 'targetSelect' ? 'CONFIRM' : 'END TURN', WIDTH - 43, HEIGHT - 11);
+    drawMapHudBar(ctx, this.assets, {
+      width: WIDTH,
+      height: HEIGHT,
+      hudHeight: 32,
+      playerPalette: curPal,
+      gold: this.balances[this.playerIndex] ?? 0,
+      unitCount: myUnitsCount,
+      tileDef,
+      hoverUnit,
+      unitName: hoverUnit ? this.unitName(hoverUnit.type, hoverUnit.level) : '',
+      drawCursorTile: (c, dx, dy) => this.drawCursorTile(c, dx, dy),
+      isTargetSelect: this.state === 'targetSelect',
+    });
 
     if (this.state === 'targetSelect') {
       this.renderTargetForecast(ctx);
       return;
     }
 
+    if (this.state === 'script' && this.scriptState?.dialog) {
+      const dlg = this.scriptState.dialog;
+      drawStoryDialogBox(ctx, this.assets, {
+        portrait: dlg.portrait,
+        speaker: dlg.speaker,
+        text: dlg.text,
+        width: WIDTH,
+        height: HEIGHT,
+        animTick: this.animTick,
+      });
+      return;
+    }
+
     if (this.state === 'storyDialog') {
       const cur = this.storyQueue[0];
       if (cur) {
-        renderStoryDialogOverlay(ctx, {
-          portraitsImg: this.assets.images.portraits,
+        drawStoryDialogBox(ctx, this.assets, {
           portrait: cur.portrait,
+          speaker: SPEAKER_NAMES[String(cur.portrait)] ?? 'STORY',
           text: cur.text,
           width: WIDTH,
           height: HEIGHT,
+          animTick: this.animTick,
         });
       }
       return;
     }
 
     if (this.state === 'stageBanner') {
-      ctx.fillStyle = 'rgba(14, 16, 24, 0.94)';
-      ctx.fillRect(14, 106, WIDTH - 28, 104);
-      ctx.strokeStyle = '#ffd84d';
-      ctx.lineWidth = 2;
-      ctx.strokeRect(14, 106, WIDTH - 28, 104);
-      centerText(ctx, this.stageBannerTitle, 124, { font: 'bold 11px monospace', color: '#ffd84d' });
-      const lines = wrapText(ctx, this.stageBannerObjective, WIDTH - 48);
-      ctx.font = '9px monospace';
-      ctx.fillStyle = '#f1e7d2';
-      ctx.textAlign = 'center';
-      for (let i = 0; i < Math.min(lines.length, 3); i++) {
-        ctx.fillText(lines[i], WIDTH >> 1, 148 + i * 13);
-      }
-      centerText(ctx, this.stageBannerPrompt || 'TAP OR ENTER TO BEGIN', 194, { font: 'bold 8px monospace', color: '#a9d69d' });
+      const box = drawMenuFrame(ctx, this.assets, 12, 92, WIDTH - 24, 114, 0, 22);
+      drawUiText(ctx, this.stageBannerTitle, box.ix + (box.iw >> 1), box.iy + 11, {
+        font: 'bold 10px Arial, sans-serif',
+        color: UI_COLORS.textGold,
+        align: 'center',
+        maxWidth: box.iw - 12,
+      });
+      drawWrappedLines(ctx, this.stageBannerObjective, box.ix + 8, box.iy + 30, box.iw - 16, 13, 3, {
+        font: '9px Arial, sans-serif',
+        color: UI_COLORS.textActive,
+      });
+      drawUiText(ctx, this.stageBannerPrompt || 'TAP OR ENTER TO BEGIN', box.ix + (box.iw >> 1), box.iy + box.ih - 12, {
+        font: 'bold 8px Arial, sans-serif',
+        color: UI_COLORS.textGreen,
+        align: 'center',
+      });
       return;
     }
 
     if (this.state === 'actionMenu') {
-      const h = this.actionOptions.length * 22 + 14;
-      ctx.fillStyle = '#14101a';
-      ctx.fillRect(44, 98, 152, h);
-      ctx.strokeStyle = '#ffd84d';
-      ctx.strokeRect(44, 98, 152, h);
-      const actIcons = this.assets.images.action_icons;
-      this.actionOptions.forEach((opt, i) => {
-        const y = 105 + i * 22;
-        if (i === this.actionCursor) {
-          ctx.fillStyle = '#3b2e1b';
-          ctx.fillRect(50, y, 140, 20);
-        }
-        if (actIcons && opt.icon != null) {
-          ctx.drawImage(actIcons, opt.icon * 16, 0, 16, 16, 56, y + 2, 16, 16);
-        }
-        ctx.fillStyle = i === this.actionCursor ? '#ffd84d' : '#f1e7d2';
-        ctx.font = 'bold 9px monospace';
-        ctx.textAlign = 'left';
-        ctx.fillText(opt.label, 78, y + 13, 106);
-      });
-    } else if (this.state === 'recruitMenu') {
-      const { list, rowHeight, headerHeight, panelH, panelY } = this.getRecruitPanelLayout();
+      this.actionRing?.render(ctx, this.assets);
+      return;
+    }
+
+    if (this.state === 'recruitMenu') {
       const myPal = this.playerPalette[1 + this.playerIndex] ?? (1 + this.playerIndex);
-      const sheet = this.assets.unitIconPalettes?.[myPal] ?? this.assets.images.unit_icons;
-      ctx.fillStyle = '#14101a';
-      ctx.fillRect(20, panelY, 200, panelH);
-      ctx.strokeStyle = '#ffd84d';
-      ctx.strokeRect(20, panelY, 200, panelH);
-      centerText(ctx, `RECRUIT · GOLD: ${this.balances[this.playerIndex] ?? 0}`, panelY + 12, { font: 'bold 9px monospace', color: '#ffd84d' });
-      for (let i = 0; i < list.length; i++) {
-        const uType = list[i];
-        const y = panelY + headerHeight + i * rowHeight;
-        const cost = this.getRecruitCost(uType);
-        const canAfford = (this.balances[this.playerIndex] ?? 0) >= cost;
-        if (i === this.recruitCursor) {
-          ctx.fillStyle = '#3b2e1b';
-          ctx.fillRect(26, y, 188, 18);
-        }
-        if (sheet) ctx.drawImage(sheet, uType * 24, 0, 24, 24, 28, y + 1, 16, 16);
-        ctx.fillStyle = canAfford ? (uType === 9 ? '#ffd84d' : '#f1e7d2') : '#777';
-        ctx.font = '8px monospace';
-        ctx.textAlign = 'left';
-        ctx.fillText(uType === 9 ? `★ ${this.unitName(uType)}` : `${this.unitName(uType)}`, 48, y + 12);
-        ctx.textAlign = 'right';
-        ctx.fillText(`${cost}G`, 208, y + 12);
-      }
-      const cancelY = panelY + headerHeight + list.length * rowHeight + 2;
-      ctx.fillStyle = '#241a14';
-      ctx.fillRect(46, cancelY, 148, 16);
-      ctx.strokeStyle = '#8b6f47';
-      ctx.strokeRect(46, cancelY, 148, 16);
-      centerText(ctx, 'CANCEL · ESC', cancelY + 8, { font: '8px monospace', color: '#e6decb' });
-    } else if (this.state === 'pauseMenu') {
-      const opts = this.getPauseOptions();
-      const panelH = 28 + opts.length * 22 + 8;
-      const panelY = (HEIGHT - panelH) >> 1;
-      ctx.fillStyle = '#14101a';
-      ctx.fillRect(32, panelY, 176, panelH);
-      ctx.strokeStyle = '#ffd84d';
-      ctx.strokeRect(32, panelY, 176, panelH);
-      centerText(ctx, 'GAME MENU', panelY + 13, { font: 'bold 10px monospace', color: '#ffd84d' });
-      opts.forEach((label, i) => {
-        const y = panelY + 26 + i * 22;
-        if (i === this.pauseCursor) {
-          ctx.fillStyle = '#3b2e1b';
-          ctx.fillRect(40, y, 160, 19);
-        }
-        centerText(ctx, label, y + 9, { font: 'bold 9px monospace', color: i === this.pauseCursor ? '#ffd84d' : '#f1e7d2' });
+      drawRecruitDialog(ctx, this.assets, {
+        width: WIDTH,
+        height: HEIGHT,
+        list: this.getRecruitList(),
+        cursor: this.recruitCursor,
+        gold: this.balances[this.playerIndex] ?? 0,
+        playerPalette: myPal,
+        unitRecords: this.assets.unitRecords,
+        statsFn: t => computeUnitStats(this.assets.unitRecords[t], 0),
+        unitNameFn: t => this.unitName(t),
+        costFn: t => this.getRecruitCost(t),
+        animTick: this.animTick,
       });
-    } else if (this.state === 'dialog' || this.state === 'victory' || this.state === 'defeat') {
+      return;
+    }
+
+    if (this.state === 'pauseMenu') {
+      const opts = this.getPauseOptions();
+      drawFramedListMenu(ctx, this.assets, {
+        title: this.assets.langStrings?.[61] || 'GAME MENU',
+        items: opts,
+        selectedIndex: this.pauseCursor,
+        maxVisible: 8,
+        rowHeight: 22,
+        x: 20,
+        y: 36,
+        w: WIDTH - 40,
+        h: 44 + opts.length * 22,
+        leftButton: 'OK',
+        rightButton: 'BACK',
+        width: WIDTH,
+        height: HEIGHT,
+      });
+      return;
+    }
+
+    if (this.state === 'dialog' || this.state === 'victory' || this.state === 'defeat') {
       if (this.state === 'defeat' && this.assets.images.gameover) {
-        drawImageAt(ctx, this.assets.images.gameover, 0, 28, WIDTH, HEIGHT - 56);
+        drawImageAt(ctx, this.assets.images.gameover, 0, 0, WIDTH, HEIGHT);
       }
-      ctx.fillStyle = 'rgba(21, 13, 24, 0.92)';
-      ctx.fillRect(14, 130, 212, 58);
-      ctx.strokeStyle = this.state === 'victory' ? '#9cff7b' : this.state === 'defeat' ? '#ff6b6b' : '#caa568';
-      ctx.strokeRect(14, 130, 212, 58);
-      const txt = this.state === 'victory' ? 'VICTORY! TAP FOR NEXT MAP' : this.state === 'defeat' ? 'DEFEAT! TAP FOR MENU' : this.dialogText;
-      centerText(ctx, txt, 159, { font: 'bold 9px monospace', maxWidth: 200 });
+      const box = drawMenuFrame(ctx, this.assets, 14, 120, WIDTH - 28, 66, 0, 18);
+      const hdr = this.state === 'victory' ? 'VICTORY!' : this.state === 'defeat' ? 'GAME OVER' : 'INFO';
+      drawUiText(ctx, hdr, box.ix + (box.iw >> 1), box.iy + 9, {
+        font: 'bold 9px Arial, sans-serif',
+        color: this.state === 'victory' ? UI_COLORS.textGreen : this.state === 'defeat' ? UI_COLORS.textRed : UI_COLORS.textGold,
+        align: 'center',
+      });
+      const txt = this.state === 'victory' ? 'MISSION COMPLETE · TAP TO CONTINUE' : this.state === 'defeat' ? 'DEFEAT · TAP FOR MENU' : this.dialogText;
+      drawUiText(ctx, txt, box.ix + (box.iw >> 1), box.iy + 36, {
+        font: 'bold 9px Arial, sans-serif',
+        color: UI_COLORS.textActive,
+        align: 'center',
+        maxWidth: box.iw - 14,
+      });
     }
   }
 }
