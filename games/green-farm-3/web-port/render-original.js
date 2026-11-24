@@ -284,8 +284,13 @@ export function drawBSpriteBlockFrame(ctx, sprite, moduleImages, frameIndex, x, 
       const alpha = color >>> 24;
       const rgb = color & 0xffffff;
       // Skip pure-white 0xFE clipping/mask rectangles used by GLLib /7 UI frames (a.java:9909)
-      if ((alpha === 0xff || alpha === 0) && rgb !== 0xffffff) {
-        ctx.fillStyle = `#${rgb.toString(16).padStart(6, '0')}`;
+      if (rgb !== 0xffffff) {
+        const r = (rgb >>> 16) & 255;
+        const g = (rgb >>> 8) & 255;
+        const b = rgb & 255;
+        ctx.fillStyle = (alpha === 0xff || alpha === 0)
+          ? `rgb(${r},${g},${b})`
+          : `rgba(${r},${g},${b},${(alpha / 255).toFixed(3)})`;
         ctx.fillRect(
           Math.round(x + resolved.offsetX),
           Math.round(y + resolved.offsetY),
@@ -349,6 +354,26 @@ export function drawBSpriteBlockAnim(ctx, sprite, moduleImages, animIndex, tick,
     y + dy,
     combinedTransform,
   );
+}
+
+/**
+ * Draw any decoded /5 or /7 BSprite frame proportionally scaled & centered inside a (maxW x maxH) UI box.
+ * Prevents oversized world sprites from being cropped inside Shop/Barn/Manor cards.
+ */
+export function drawBSpriteBlockFrameScaled(ctx, sprite, moduleImages, frameIndex, cx, cy, maxW, maxH) {
+  if (!sprite || !Array.isArray(sprite.frames) || sprite.frames.length === 0) return;
+  const idx = Math.max(0, Math.min(sprite.frames.length - 1, frameIndex | 0));
+  const b = sprite.bounds?.[idx];
+  const bw = Math.max(1, b?.width || 32);
+  const bh = Math.max(1, b?.height || 32);
+  const bx = b?.x ?? -(bw >> 1);
+  const by = b?.y ?? -(bh >> 1);
+  const scale = Math.min(1, maxW / bw, maxH / bh);
+  ctx.save();
+  ctx.translate(Math.round(cx), Math.round(cy));
+  ctx.scale(scale, scale);
+  drawBSpriteBlockFrame(ctx, sprite, moduleImages, idx, -(bx + bw / 2), -(by + bh / 2), 0);
+  ctx.restore();
 }
 
 /**

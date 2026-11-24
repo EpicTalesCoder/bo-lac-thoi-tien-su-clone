@@ -9,6 +9,7 @@ import {
   plantFruitTree, placeDecoration, clearDebris, buyLandZone,
   startKitchenRecipe, collectKitchenDish, repairManorRoom,
   upgradeBarn, claimMail, helpNeighbor, openBuildingMenu,
+  visitNeighborFarm, helpNeighborEntity, returnHomeFarm, isWalkBlocked,
   serializeFarmSession, restoreFarmSession,
 } from '../gf-core.js';
 
@@ -88,7 +89,23 @@ test('full /9 catalog & all building/kitchen/tree/land/neighbor/mail systems wor
   assert.equal(openBuildingMenu(s, 10), 'barn');
   assert.equal(s.view, SOURCE_VIEW.BARN);
 
-  // 4. Serialize & Restore preserves all new systems
+  // 4. Visiting all 10 real neighbor farms (pack10[5..14]) + helping + returning home + collision
+  for (let n = 0; n < 10; n += 1) {
+    const ents = world.neighborFarmEntities(n);
+    assert.ok(ents.length >= 40, `Neighbor #${n} should decode real pack10[${5 + n}] entities`);
+  }
+  const visit = visitNeighborFarm(s, 1, world);
+  assert.equal(visit.ok, true);
+  assert.equal(s.visitingNeighbor.name, 'Edwina');
+  const target = s.visitingNeighbor.entities.find(e => e.category === 49 || e.category === 52 || e.category === 54);
+  assert.ok(target);
+  assert.equal(helpNeighborEntity(s, target.opaqueKey, target.x, target.y).ok, true);
+  assert.equal(s.visitingNeighbor.helpsToday, 1);
+  assert.equal(returnHomeFarm(s, world.tileMap).ok, true);
+  assert.equal(s.visitingNeighbor, null);
+  assert.equal(isWalkBlocked(1044, 603, world.tileMap), true); // Pond blocked
+
+  // 5. Serialize & Restore preserves all new systems
   const raw = serializeFarmSession(s);
   const restored = restoreFarmSession(raw, world, textData);
   assert.ok(restored.unlockedZones.includes('west'));

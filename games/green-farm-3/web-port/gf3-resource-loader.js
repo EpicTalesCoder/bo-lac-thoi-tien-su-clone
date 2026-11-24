@@ -352,11 +352,11 @@ export function decodeFarmCatalog(pack9, textData = {}) {
 }
 
 /**
- * Decode original starting farm world entities from /10 blocks 3 & 4 and join
- * each entity to its exact /5 BSprite block, frame, and palette via /9 tables.
+ * Decode farm world entities from /10 blocks (default [3, 4] for player's own farm;
+ * [3, 5..14] for the 10 neighbor farms per a.java:1712-1719) and join to /5 BSprites via /9.
  * Port of a.java:1881-1991 (u(int)) and a.java:13431-13564 (a(int, int)).
  */
-export function decodeFarmWorldEntities(pack9, pack10) {
+export function decodeFarmWorldEntities(pack9, pack10, pack10Blocks = [3, 4]) {
   const t0 = decodeConfigTable(readPackBlock(pack9, 0));
   const t2 = decodeConfigTable(readPackBlock(pack9, 2));
   const t3 = decodeConfigTable(readPackBlock(pack9, 3));
@@ -366,7 +366,7 @@ export function decodeFarmWorldEntities(pack9, pack10) {
   const t11 = decodeConfigTable(readPackBlock(pack9, 11));
 
   const entities = [];
-  for (const pack10Block of [3, 4]) {
+  for (const pack10Block of pack10Blocks) {
     const rawList = decodeWorldEntities(readPackBlock(pack10, pack10Block));
     for (const raw of rawList) {
       if (raw.recordType !== 50) continue;
@@ -507,7 +507,11 @@ export async function loadOriginalWorldResources({ baseUrl = new URL('assets/pac
     readPackBlock(pack10, 1),
   );
   const catalog = decodeFarmCatalog(pack9, textData);
-  const farmEntities = decodeFarmWorldEntities(pack9, pack10);
+  const farmEntities = decodeFarmWorldEntities(pack9, pack10, [3, 4]);
+  const neighborFarmEntities = (neighborIndex) => {
+    const idx = Math.max(0, Math.min(9, neighborIndex | 0));
+    return decodeFarmWorldEntities(pack9, pack10, [3, 5 + idx]);
+  };
   return {
     packs: { 6: pack6, 9: pack9, 10: pack10 },
     config15,
@@ -517,6 +521,7 @@ export async function loadOriginalWorldResources({ baseUrl = new URL('assets/pac
     tileMap,
     catalog,
     farmEntities,
+    neighborFarmEntities,
     table9,
     uiScreen,
   };

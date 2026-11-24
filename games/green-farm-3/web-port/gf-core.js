@@ -128,14 +128,40 @@ export function isoToWorld(ix, iy) {
   };
 }
 
-// Port of e.java:1117-1130: directional Farmer walk animation & horizontal flip.
+export function snapPlotToIso4x4(wx, wy) {
+  const iso = worldToIso(wx, wy);
+  const ix4 = Math.round(iso.ix / 4) * 4;
+  const iy4 = Math.round(iso.iy / 4) * 4;
+  return isoToWorld(ix4, iy4);
+}
+
+// Port of e.java:1117-1130 + horizontal/vertical fix so pure Left/Right never turns Farmer's back.
 export function pickFarmerWalkAnim(dx, dy) {
-  if (dx > 0) {
-    if (dy > 0) return { anim: 0, hFlip: true };   // Down-Right
-    return { anim: 1, hFlip: false };              // Up-Right
+  if (Math.abs(dy) < 0.001) {
+    return dx >= 0 ? { anim: 0, hFlip: true } : { anim: 0, hFlip: false };
   }
-  if (dy > 0) return { anim: 0, hFlip: false };    // Down-Left
-  return { anim: 1, hFlip: true };                 // Up-Left
+  if (Math.abs(dx) < 0.001) {
+    return dy > 0 ? { anim: 0, hFlip: false } : { anim: 1, hFlip: false };
+  }
+  if (dx > 0) {
+    return dy > 0 ? { anim: 0, hFlip: true } : { anim: 1, hFlip: false };
+  }
+  return dy > 0 ? { anim: 0, hFlip: false } : { anim: 1, hFlip: true };
+}
+
+// Port of a.java:16133-16150: prevent Farmer from walking into Pond (1044,603), Manor core (1215,382), or water/void
+export function isWalkBlocked(wx, wy, tileMap = null) {
+  if (wx < 48 || wx > 2040 || wy < 306 || wy > 1012) return true;
+  if (Math.hypot(wx - 1044, wy - 603) < 34) return true; // Pond (cat 50 entityId=17)
+  if (Math.hypot(wx - 1215, wy - 384) < 38) return true; // Manor core
+  if (tileMap) {
+    const col = Math.floor(wx / (tileMap.tileWidth || 36));
+    const row = Math.floor(wy / (tileMap.tileHeight || 18));
+    if (col < 0 || col >= tileMap.width || row < 16 || row >= tileMap.height) return true;
+    const tid = tileMap.tileIds[row * tileMap.width + col];
+    if (tid === 0xff) return true;
+  }
+  return false;
 }
 
 export function addPopup(session, wx, wy, text, color = '#ffd84d') {
@@ -148,9 +174,11 @@ export function clampWorldCamera(session, tileMap) {
   const th = tileMap?.tileHeight || 18;
   const mapW = (tileMap?.width || 58) * tw;
   const mapH = (tileMap?.height || 58) * th;
-  const viewH = SCREEN_H - 54;
-  session.cameraX = Math.max(0, Math.min(mapW - SCREEN_W, Math.round(session.cameraX)));
-  session.cameraY = Math.max(288, Math.min(mapH - viewH, Math.round(session.cameraY)));
+  const zoom = session.worldZoom || 1;
+  const viewW = SCREEN_W / zoom;
+  const viewH = SCREEN_H / zoom;
+  session.cameraX = Math.max(0, Math.min(Math.max(0, mapW - viewW), Math.round(session.cameraX)));
+  session.cameraY = Math.max(288, Math.min(Math.max(288, mapH - viewH), Math.round(session.cameraY)));
 }
 
 export function setFarmerWalkTarget(session, wx, wy, pendingAction = null) {
@@ -196,8 +224,16 @@ export function moveFarmerByVector(session, vx, vy, dtMs, tileMap = null) {
   const step = (f.speed * dtMs) / 1000;
   const dx = (vx / len) * step;
   const dy = (vy / len) * step;
-  f.x = Math.max(36, Math.min(2052, f.x + dx));
-  f.y = Math.max(306, Math.min(1026, f.y + dy));
+  const nextX = Math.max(48, Math.min(2040, f.x + dx));
+  const nextY = Math.max(306, Math.min(1012, f.y + dy));
+  if (!isWalkBlocked(nextX, nextY, tileMap)) {
+    f.x = nextX;
+    f.y = nextY;
+  } else if (!isWalkBlocked(nextX, f.y, tileMap)) {
+    f.x = nextX;
+  } else if (!isWalkBlocked(f.x, nextY, tileMap)) {
+    f.y = nextY;
+  }
   f.targetX = f.x;
   f.targetY = f.y;
   f.pendingAction = null;
@@ -211,8 +247,10 @@ export function moveFarmerByVector(session, vx, vy, dtMs, tileMap = null) {
   session.cursorCol = Math.max(0, Math.min((tileMap?.width || 58) - 1, Math.floor(f.x / tw)));
   session.cursorRow = Math.max(16, Math.min((tileMap?.height || 58) - 1, Math.floor(f.y / th)));
   // Port of a.java:1725-1728: camera smoothly tracks Farmer
-  const viewH = SCREEN_H - 54;
-  session.cameraX = f.x - SCREEN_W / 2;
+  const zoom = session.worldZoom || 1;
+  const viewW = SCREEN_W / zoom;
+  const viewH = SCREEN_H / zoom;
+  session.cameraX = f.x - viewW / 2;
   session.cameraY = f.y - viewH / 2;
   clampWorldCamera(session, tileMap);
   return true;
@@ -274,6 +312,12 @@ function executePendingFarmerAction(session) {
     const res = harvestFruitTree(session, act.uid);
     if (res?.ok) {
       addPopup(session, f.x, f.y - 24, `🍎 ${res.name}`, '#ffd84d');
+    }
+  } else if (act.type === 'neighbor_help') {
+    actionAnim = 3;
+    const res = helpNeighborEntity(session, act.opaqueKey, act.worldX, act.worldY);
+    if (res?.ok) {
+      addPopup(session, f.x, f.y - 24, '+20 Xu +8 XP', '#9cff7b');
     }
   } else if (act.type === 'animal') {
     actionAnim = 3;
@@ -485,6 +529,10 @@ export function createFarmSession(worldResources, textData = {}) {
     energy: 30,
     maxEnergy: 30,
     energyRegenMs: 0,
+    animTimeMs: 0,
+    worldZoom: 0.85, // Balanced overview zoom (a.J = 85%), toggleable 75% <-> 100%
+    visitingNeighbor: null, // null = own farm (N=0), or { index, id, name, entities, helpedKeys, helpsToday, maxHelps }
+    homeFarmerPos: null,
     barnCapacity: 40,
     siloLevel: 1,
     coopCapacity: 6,
@@ -553,6 +601,7 @@ export function awardFarmXp(session, amount) {
 export function stepFarmSession(session, dtMs, tileMap = null) {
   if (!session || session.view === SOURCE_VIEW.OPENING_SCRIPT) return false;
   let changed = false;
+  session.animTimeMs = (session.animTimeMs || 0) + dtMs;
   if (session.toastMs > 0) {
     session.toastMs = Math.max(0, session.toastMs - dtMs);
     if (session.toastMs === 0) session.toast = '';
@@ -642,6 +691,37 @@ export function stepFarmSession(session, dtMs, tileMap = null) {
         changed = true;
       }
     }
+    // Port of e.java:2330-2365: gentle pasture roaming around home coordinates
+    if (animal.worldX != null && animal.worldY != null) {
+      if (animal.homeX == null) { animal.homeX = animal.worldX; animal.homeY = animal.worldY; animal.roamWaitMs = 1500 + (animal.uid * 733) % 2500; }
+      if (animal.roamWaitMs > 0) {
+        animal.roamWaitMs -= dtMs;
+        animal.walking = false;
+        if (animal.roamWaitMs <= 0) {
+          const angle = ((session.animTimeMs + animal.uid * 137) % 360) * (Math.PI / 180);
+          const dist = 16 + ((animal.uid * 19 + Math.floor(session.animTimeMs / 100)) % 22);
+          animal.targetX = Math.max(80, Math.min(1980, animal.homeX + Math.cos(angle) * dist));
+          animal.targetY = Math.max(330, Math.min(980, animal.homeY + Math.sin(angle) * (dist * 0.5)));
+          animal.walking = true;
+        }
+      } else if (animal.walking && animal.targetX != null) {
+        const dx = animal.targetX - animal.worldX;
+        const dy = animal.targetY - animal.worldY;
+        const d = Math.hypot(dx, dy);
+        const step = (24 * dtMs) / 1000;
+        if (d <= step || d <= 2) {
+          animal.worldX = animal.targetX;
+          animal.worldY = animal.targetY;
+          animal.walking = false;
+          animal.roamWaitMs = 2200 + ((animal.uid * 571 + session.animTimeMs) % 2600);
+        } else {
+          animal.worldX += (dx / d) * step;
+          animal.worldY += (dy / d) * step;
+          animal.hFlip = dx > 0;
+        }
+        changed = true;
+      }
+    }
   }
   // Tick Kitchen cooking queue (table9[7])
   for (const job of session.kitchenQueue || []) {
@@ -691,15 +771,22 @@ export function plowPlot(session, row, col, worldX = null, worldY = null) {
     session.toastMs = 2000;
     return { ok: false, reason: 'no_coins' };
   }
-  session.coins -= plotCost;
   let wx = worldX ?? (col * 36 + 18);
   let wy = worldY ?? (row * 18 + 9);
   if (worldX != null && worldY != null) {
-    const iso = worldToIso(worldX, worldY);
-    const snapped = isoToWorld(iso.ix, iso.iy);
+    const snapped = snapPlotToIso4x4(worldX, worldY);
     wx = snapped.wx;
     wy = snapped.wy;
+    // Prevent overlapping an existing 4x4 (72x36) soil plot!
+    for (const p of session.plots.values()) {
+      if (Math.hypot((p.worldX ?? p.col * 36 + 18) - wx, (p.worldY ?? p.row * 18 + 9) - wy) < 34) {
+        session.toast = 'Ô đất đã có sẵn ở đây!';
+        session.toastMs = 1600;
+        return { ok: false, reason: 'overlap' };
+      }
+    }
   }
+  session.coins -= plotCost;
   session.plots.set(key, {
     row,
     col,
@@ -1168,6 +1255,100 @@ export function helpNeighbor(session, neighborId) {
   advanceQuests(session, 'help', 1);
   session.toast = `🤝 Đã giúp ${nb.name} tưới vườn! (+45 Xu, +12 XP)`;
   session.toastMs = 2400;
+  return { ok: true };
+}
+
+/**
+ * Port of a.java:1710-1728 (case 47: a.u(4 + N)):
+ * Actually travel to any of the 10 real neighbor farms stored in pack10[5..14]!
+ */
+export function visitNeighborFarm(session, neighborIndex, worldResources) {
+  const nb = session.catalog?.neighbors?.[neighborIndex];
+  if (!nb || !worldResources?.neighborFarmEntities) return { ok: false };
+  const entities = worldResources.neighborFarmEntities(neighborIndex);
+  if (!session.visitingNeighbor && session.farmer) {
+    session.homeFarmerPos = { x: session.farmer.x, y: session.farmer.y, cameraX: session.cameraX, cameraY: session.cameraY };
+  }
+  const hostChar = entities.find(e => e.category === 42) || entities.find(e => e.category === 49) || entities[0];
+  const startX = hostChar ? Math.max(120, Math.min(1900, hostChar.x - 36)) : 1044;
+  const startY = hostChar ? Math.max(340, Math.min(920, hostChar.y + 24)) : 460;
+  session.visitingNeighbor = {
+    index: neighborIndex,
+    id: nb.id,
+    name: nb.name,
+    pack10Block: 5 + neighborIndex,
+    entities,
+    helpedKeys: [],
+    helpsToday: session.helpedNeighbors[nb.id] ? 5 : 0,
+    maxHelps: 5,
+  };
+  if (session.farmer) {
+    session.farmer.x = startX;
+    session.farmer.y = startY;
+    session.farmer.targetX = startX;
+    session.farmer.targetY = startY;
+    session.farmer.state = 'idle';
+    session.farmer.anim = 2;
+    session.farmer.pendingAction = null;
+  }
+  const zoom = session.worldZoom || 1;
+  session.cameraX = startX - (SCREEN_W / zoom) / 2;
+  session.cameraY = startY - (SCREEN_H / zoom) / 2;
+  clampWorldCamera(session, worldResources.tileMap);
+  session.view = SOURCE_VIEW.WORLD_LAYER;
+  session.toast = `🏡 Đang thăm trang trại ${nb.name}! Chạm cây/thú để giúp (0/5)`;
+  session.toastMs = 3000;
+  return { ok: true, neighbor: nb, entityCount: entities.length };
+}
+
+export function helpNeighborEntity(session, opaqueKey, wx, wy) {
+  const vn = session.visitingNeighbor;
+  if (!vn) return { ok: false };
+  if (vn.helpsToday >= vn.maxHelps) {
+    session.toast = `Bạn đã giúp đủ 5 việc cho ${vn.name} hôm nay!`;
+    session.toastMs = 2000;
+    return { ok: false, reason: 'max_helps' };
+  }
+  if (vn.helpedKeys.includes(opaqueKey)) {
+    session.toast = 'Chỗ này bạn đã giúp rồi!';
+    session.toastMs = 1500;
+    return { ok: false, reason: 'already_done' };
+  }
+  if (session.energy < 1) {
+    session.toast = 'Cần 1 ⚡ Năng lượng để giúp hàng xóm!';
+    session.toastMs = 2000;
+    return { ok: false, reason: 'no_energy' };
+  }
+  session.energy -= 1;
+  vn.helpedKeys.push(opaqueKey);
+  vn.helpsToday += 1;
+  if (vn.helpsToday >= vn.maxHelps) session.helpedNeighbors[vn.id] = true;
+  session.coins += 20;
+  awardFarmXp(session, 8);
+  advanceQuests(session, 'help', 1);
+  session.toast = `❤️ Đã giúp ${vn.name} (${vn.helpsToday}/${vn.maxHelps}) +20 Xu, +8 XP!`;
+  session.toastMs = 2200;
+  return { ok: true, helpsToday: vn.helpsToday };
+}
+
+export function returnHomeFarm(session, tileMap = null) {
+  if (!session.visitingNeighbor) return { ok: false };
+  session.visitingNeighbor = null;
+  if (session.homeFarmerPos && session.farmer) {
+    session.farmer.x = session.homeFarmerPos.x;
+    session.farmer.y = session.homeFarmerPos.y;
+    session.farmer.targetX = session.homeFarmerPos.x;
+    session.farmer.targetY = session.homeFarmerPos.y;
+    session.farmer.state = 'idle';
+    session.farmer.anim = 2;
+    session.farmer.pendingAction = null;
+    session.cameraX = session.homeFarmerPos.cameraX;
+    session.cameraY = session.homeFarmerPos.cameraY;
+    clampWorldCamera(session, tileMap);
+  }
+  session.view = SOURCE_VIEW.WORLD_LAYER;
+  session.toast = '🏠 Đã quay về trang trại của bạn!';
+  session.toastMs = 2000;
   return { ok: true };
 }
 

@@ -1,23 +1,26 @@
 /**
- * Green Farm 3 1:1 web port powered by decoded /5 world BSprites, /7 UI BSprites,
- * /9 config tables (crops, trees, animals, 19 buildings, 83 recipes, 63 decor,
- * 10 neighbors, 15 collectibles, 20 quests), /10 58x58 world map, and EN text packs.
+ * Green Farm 3 1:1 web port powered by decoded /5 world BSprites, /6 UI layouts,
+ * /7 UI BSprites, /9 config tables, /10 58x58 world map + 10 neighbor farms, and EN text packs.
  */
 import { mountPhaserRuntime } from './phaser-engine.js';
 import { decodeBSpriteBlock, loadSplitPack, moduleToCanvasImage, readPackBlock } from './bsprite-loader.js';
-import { drawBSpriteBlockAnim, drawBSpriteBlockFrame, drawBSpriteFrame, drawBSpriteTileMap, drawOriginalUIScreen, withMIDPClip } from './render-original.js';
+import {
+  drawBSpriteBlockAnim, drawBSpriteBlockFrame, drawBSpriteBlockFrameScaled,
+  drawBSpriteFrame, drawBSpriteTileMap, drawOriginalUIScreen, withMIDPClip,
+} from './render-original.js';
 import { loadOriginalWorldResources } from './gf3-resource-loader.js';
 import {
   SCREEN_W, SCREEN_H, KEY, SOURCE_VIEW, LAND_ZONES, advanceEvidenceView, mapKeyCode,
-  createFarmSession, stepFarmSession, buyAnimal, sellGood,
+  createFarmSession, stepFarmSession, sellGood,
   sellAllGoods, claimQuestReward, serializeFarmSession, restoreFarmSession,
   xpForNextLevel, sourceFrame, sourceText, sourceTileAt,
-  setFarmerWalkTarget, moveFarmerByVector,
+  setFarmerWalkTarget, moveFarmerByVector, clampWorldCamera, snapPlotToIso4x4,
   buyLandZone, startKitchenRecipe, collectKitchenDish, repairManorRoom,
-  upgradeBarn, claimMail, helpNeighbor, sellCollectible, collectOrFeedAnimal,
+  upgradeBarn, claimMail, sellCollectible, collectOrFeedAnimal,
+  visitNeighborFarm, returnHomeFarm,
 } from './gf-core.js';
 
-const SAVE_KEY = 'gf3-farm-save-v4';
+const SAVE_KEY = 'gf3-farm-save-v5';
 const canvasEl = typeof document !== 'undefined' ? document.getElementById('game') : null;
 const IMG = {};
 const SPRITES = { icon: 'assets/icon.png' };
@@ -33,6 +36,7 @@ let audioElement = null;
 let previousFrameAt = 0;
 const spriteBlockCache = new Map();
 const uiSpriteCache = new Map();
+const uiScreenCache = new Map();
 
 function getSpriteBlock(blockId, paletteIndex = 0) {
   if (!sourcePack5 || !Number.isInteger(blockId) || blockId < 0 || blockId >= 160) return null;
@@ -43,16 +47,10 @@ function getSpriteBlock(blockId, paletteIndex = 0) {
   try {
     const raw = readPackBlock(sourcePack5, blockId);
     let sprite;
-    try {
-      sprite = decodeBSpriteBlock(raw, { paletteIndex: pal });
-    } catch {
-      sprite = decodeBSpriteBlock(raw, { paletteIndex: 0 });
-    }
-    const moduleImages = sprite.moduleImages.map(moduleToCanvasImage);
-    entry = { sprite, moduleImages };
-  } catch {
-    entry = null;
-  }
+    try { sprite = decodeBSpriteBlock(raw, { paletteIndex: pal }); }
+    catch { sprite = decodeBSpriteBlock(raw, { paletteIndex: 0 }); }
+    entry = { sprite, moduleImages: sprite.moduleImages.map(moduleToCanvasImage) };
+  } catch { entry = null; }
   spriteBlockCache.set(key, entry);
   return entry;
 }
@@ -66,16 +64,10 @@ function getUiSpriteBlock(blockId, paletteIndex = 0) {
   try {
     const raw = readPackBlock(sourcePack7, blockId);
     let sprite;
-    try {
-      sprite = decodeBSpriteBlock(raw, { paletteIndex: pal });
-    } catch {
-      sprite = decodeBSpriteBlock(raw, { paletteIndex: 0 });
-    }
-    const moduleImages = sprite.moduleImages.map(moduleToCanvasImage);
-    entry = { sprite, moduleImages };
-  } catch {
-    entry = null;
-  }
+    try { sprite = decodeBSpriteBlock(raw, { paletteIndex: pal }); }
+    catch { sprite = decodeBSpriteBlock(raw, { paletteIndex: 0 }); }
+    entry = { sprite, moduleImages: sprite.moduleImages.map(moduleToCanvasImage) };
+  } catch { entry = null; }
   uiSpriteCache.set(key, entry);
   return entry;
 }
@@ -86,7 +78,6 @@ function getAnySpriteBlock(spriteId, paletteIndex = 0) {
   return getSpriteBlock(spriteId - 1000, paletteIndex);
 }
 
-const uiScreenCache = new Map();
 function getUIScreen(screenId) {
   if (uiScreenCache.has(screenId)) return uiScreenCache.get(screenId);
   const widgets = sourceWorld?.uiScreen ? sourceWorld.uiScreen(screenId) : [];
@@ -107,11 +98,8 @@ function loadImage(name, source) {
 async function loadOriginalResources() {
   sourceWorld = await loadOriginalWorldResources({ textData });
   sourcePack5 = await loadSplitPack(new URL('assets/packs/5/5', import.meta.url).href);
-  try {
-    sourcePack7 = await loadSplitPack(new URL('assets/packs/7/7', import.meta.url).href);
-  } catch {
-    sourcePack7 = null;
-  }
+  try { sourcePack7 = await loadSplitPack(new URL('assets/packs/7/7', import.meta.url).href); }
+  catch { sourcePack7 = null; }
   sourceTileSprite = decodeBSpriteBlock(readPackBlock(sourcePack5, 0));
   sourceTileImages = sourceTileSprite.moduleImages.map(moduleToCanvasImage);
 
@@ -165,11 +153,23 @@ function drawText(ctx, value, x, y, { align = 'left', size = 8, color = '#ffffff
   else ctx.fillText(String(value ?? ''), x, y);
 }
 
+function wrapLines(text, maxChars) {
+  const words = String(text || '').split(' ');
+  const lines = [];
+  let line = '';
+  for (const w of words) {
+    const test = line ? `${line} ${w}` : w;
+    if (test.length > maxChars && line) { lines.push(line); line = w; }
+    else line = test;
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
 function saveSession() {
   if (!app?.session) return;
-  try {
-    localStorage.setItem(SAVE_KEY, serializeFarmSession(app.session));
-  } catch { /* ignore */ }
+  try { localStorage.setItem(SAVE_KEY, serializeFarmSession(app.session)); }
+  catch { /* ignore */ }
 }
 
 // Port of a.java:17555-17589 (opening story dialogue from /10 block 15)
@@ -179,48 +179,36 @@ function renderOpeningEvidence(ctx) {
   drawBSpriteFrame(ctx, sourceOpeningFrame, IMG.openingModules, 0, 0);
   const event = app.session.dialogue[app.session.dialogueIndex];
   const copy = event ? sourceText(textData, event.textId) : '';
-  ctx.fillStyle = 'rgba(15, 24, 14, 0.88)';
-  ctx.fillRect(4, 246, SCREEN_W - 8, 68);
-  ctx.strokeStyle = '#9cff7b';
-  ctx.strokeRect(4.5, 246.5, SCREEN_W - 9, 67);
-  const words = String(copy).split(' ');
-  const lines = [];
-  let line = '';
-  for (const w of words) {
-    const test = line ? `${line} ${w}` : w;
-    if (test.length > 36) { lines.push(line); line = w; }
-    else line = test;
-  }
-  if (line) lines.push(line);
-  lines.slice(0, 4).forEach((ln, i) => {
-    drawText(ctx, ln, 10, 260 + i * 13, { size: 9, color: '#f4f8ec' });
+  ctx.fillStyle = 'rgba(46, 26, 9, 0.9)';
+  ctx.fillRect(6, 246, SCREEN_W - 12, 68);
+  ctx.strokeStyle = '#e8c47a';
+  ctx.strokeRect(6.5, 246.5, SCREEN_W - 13, 67);
+  wrapLines(copy, 36).slice(0, 4).forEach((ln, i) => {
+    drawText(ctx, ln, 12, 260 + i * 13, { size: 9, color: '#fff7e0' });
   });
-  drawText(ctx, 'Chạm hoặc Enter để tiếp tục ▶', SCREEN_W - 8, 309, { align: 'right', size: 8, color: '#ffd84d', bold: true });
+  drawText(ctx, 'Chạm hoặc Enter để tiếp tục ▶', SCREEN_W - 12, 309, { align: 'right', size: 8, color: '#ffd84d', bold: true });
 }
 
-const KEY_BUILDING_LABELS = Object.freeze({
-  2: 'Nhà bếp',
-  10: 'Kho thóc',
-  11: 'Chuồng gà',
-  12: 'Chuồng thú',
-  13: 'Tháp chứa',
-  15: 'Hòm thư',
-  17: 'Ao',
-});
-
-// Port of a.java:1853-1865, a.java:1881-1991, a.java:9553-9621 (a.M(1)), e.java:1710-1744 & i.java:315-350
+// Port of a.java:1853-1865, a.java:1881-1991, a.java:9553-9621 (a.M(1)), e.java:468-595
 function renderFarmWorld(ctx) {
   ctx.fillStyle = '#2d4c1e';
   ctx.fillRect(0, 0, SCREEN_W, SCREEN_H);
   const s = app.session;
   const tm = sourceWorld?.tileMap;
-  const viewY = 0;
-  const viewH = SCREEN_H;
+  const zoom = s.worldZoom || 1;
+  const viewW = Math.ceil(SCREEN_W / zoom);
+  const viewH = Math.ceil(SCREEN_H / zoom);
+  const animTick = Math.floor((s.animTimeMs || 0) / 80); // Exact 12.5 FPS J2ME animation cadence!
+  const vn = s.visitingNeighbor;
+
+  ctx.save();
+  ctx.scale(zoom, zoom);
+
   if (tm && sourceTileSprite && sourceTileImages) {
     drawBSpriteTileMap(ctx, tm, sourceTileSprite, sourceTileImages, {
       x: 0,
-      y: viewY,
-      width: SCREEN_W,
+      y: 0,
+      width: viewW,
       height: viewH,
       cameraX: s.cameraX,
       cameraY: s.cameraY,
@@ -230,156 +218,194 @@ function renderFarmWorld(ctx) {
   const tw = tm?.tileWidth || 36;
   const th = tm?.tileHeight || 18;
   const ox = -s.cameraX;
-  const oy = viewY - s.cameraY;
-  const tick = s.frame || 0;
-  const clearedSet = new Set(s.clearedDebris || []);
+  const oy = -s.cameraY;
 
-  withMIDPClip(ctx, 0, viewY, SCREEN_W, viewH, () => {
-    // Pass 1: Original tilled soil plots (/5 block 6 — e.java:1744)
+  withMIDPClip(ctx, 0, 0, viewW, viewH, () => {
     const soilEntry = getSpriteBlock(6, 0);
-    for (const plot of s.plots.values()) {
-      const wx = plot.worldX ?? (plot.col * tw + (tw >> 1));
-      const wy = plot.worldY ?? (plot.row * th + (th >> 1));
-      const sx = wx + ox;
-      const sy = wy + oy;
-      if (sx < -64 || sy < viewY - 48 || sx > SCREEN_W + 64 || sy > viewY + viewH + 48) continue;
-      if (soilEntry) drawBSpriteBlockFrame(ctx, soilEntry.sprite, soilEntry.moduleImages, 0, sx, sy, 0);
-    }
-
-    // Pass 2: Y-sorted world entities, buildings, decor, fruit trees, Farmer, crops & animals
     const drawList = [];
 
-    for (const ent of sourceWorld?.farmEntities || []) {
-      if (ent.category === 49 || ent.category === 54 || ent.category === 52) continue;
-      if (ent.category === 42 && ent.entityId === -1) continue;
-      if (ent.category === 48 && clearedSet.has(ent.opaqueKey)) continue;
-      const sx = ent.x + ox;
-      const sy = ent.y + oy;
-      if (sx < -140 || sy < viewY - 140 || sx > SCREEN_W + 140 || sy > viewY + viewH + 140) continue;
-      drawList.push({
-        sortY: ent.y + (ent.layer >= 14 ? 40 : 0),
-        draw: () => {
-          const entry = getSpriteBlock(ent.block, ent.paletteIndex);
-          if (!entry) return;
-          if (ent.useAnim && entry.sprite.animations?.length > 0) {
-            drawBSpriteBlockAnim(ctx, entry.sprite, entry.moduleImages, 0, tick, sx, sy, 0);
-          } else {
-            drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, ent.frame, sx, sy, 0);
+    if (vn) {
+      // --- VISITING NEIGHBOR'S REAL FARM (pack10[5..14]) ---
+      const helpedSet = new Set(vn.helpedKeys || []);
+      for (const ent of vn.entities || []) {
+        // Hide interior cutaway rooms (0..8) overlapping exterior Manor roof (18/19)
+        if (ent.category === 50 && ent.entityId >= 0 && ent.entityId <= 8) continue;
+        const sx = ent.x + ox;
+        const sy = ent.y + oy;
+        if (sx < -140 || sy < -140 || sx > viewW + 140 || sy > viewH + 140) continue;
+
+        if (ent.category === 49) {
+          if (soilEntry) drawBSpriteBlockFrame(ctx, soilEntry.sprite, soilEntry.moduleImages, 0, sx, sy, 0);
+          if (ent.cropBlock >= 0) {
+            const helped = helpedSet.has(ent.opaqueKey);
+            drawList.push({
+              sortY: ent.y + 1,
+              draw: () => {
+                const ce = getSpriteBlock(ent.cropBlock, 0);
+                if (ce) drawBSpriteBlockFrame(ctx, ce.sprite, ce.moduleImages, helped ? 1 : 2, sx, sy, 0);
+                if (!helped && vn.helpsToday < vn.maxHelps) {
+                  drawText(ctx, '★', sx + 10, sy - 10, { size: 9, color: '#9cff7b', bold: true });
+                }
+              },
+            });
           }
-          // Subtle interactive badges on key buildings (Nhà bếp, Kho thóc, Hòm thư...)
-          if (ent.category === 50 && KEY_BUILDING_LABELS[ent.entityId]) {
-            const label = KEY_BUILDING_LABELS[ent.entityId];
-            let badge = label;
-            if (ent.entityId === 2 && (s.kitchenQueue || []).some(j => j.ready)) badge = '🍳 Xong!';
-            else if (ent.entityId === 15 && (s.neighborMail || []).some(m => !m.claimed)) badge = '✉️ Thư mới';
-            ctx.fillStyle = 'rgba(18, 30, 14, 0.72)';
-            ctx.fillRect(sx - 24, sy - 32, 48, 11);
-            drawText(ctx, badge, sx, sy - 24, { align: 'center', size: 7, color: '#fff7c2', bold: true });
-          }
-        },
-      });
+          continue;
+        }
+        drawList.push({
+          sortY: ent.y + (ent.layer >= 14 ? 40 : 0),
+          draw: () => {
+            const entry = getSpriteBlock(ent.block, ent.paletteIndex);
+            if (!entry) return;
+            if (ent.useAnim && entry.sprite.animations?.length > 0) {
+              drawBSpriteBlockAnim(ctx, entry.sprite, entry.moduleImages, 0, animTick, sx, sy, 0);
+            } else {
+              drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, ent.frame, sx, sy, 0);
+            }
+            if ((ent.category === 52 || ent.category === 54) && !helpedSet.has(ent.opaqueKey) && vn.helpsToday < vn.maxHelps) {
+              drawText(ctx, '★', sx + 10, sy - 16, { size: 9, color: '#9cff7b', bold: true });
+            }
+          },
+        });
+      }
+    } else {
+      // --- PLAYER'S OWN FARM (pack10[4]) ---
+      const clearedSet = new Set(s.clearedDebris || []);
+      // Pass 1: Original tilled soil plots (/5 block 6)
+      for (const plot of s.plots.values()) {
+        const wx = plot.worldX ?? (plot.col * tw + (tw >> 1));
+        const wy = plot.worldY ?? (plot.row * th + (th >> 1));
+        const sx = wx + ox;
+        const sy = wy + oy;
+        if (sx < -80 || sy < -60 || sx > viewW + 80 || sy > viewH + 60) continue;
+        if (soilEntry) drawBSpriteBlockFrame(ctx, soilEntry.sprite, soilEntry.moduleImages, 0, sx, sy, 0);
+      }
+
+      // Pass 2a: World structures, props, fences, bushes (skip interior Manor cutaways 0..8 overlapping exterior Manor!)
+      for (const ent of sourceWorld?.farmEntities || []) {
+        if (ent.category === 49 || ent.category === 54 || ent.category === 52) continue;
+        if (ent.category === 42 && ent.entityId === -1) continue;
+        if (ent.category === 48 && clearedSet.has(ent.opaqueKey)) continue;
+        if (ent.category === 50 && ent.entityId >= 0 && ent.entityId <= 8) continue;
+        const sx = ent.x + ox;
+        const sy = ent.y + oy;
+        if (sx < -140 || sy < -140 || sx > viewW + 140 || sy > viewH + 140) continue;
+        drawList.push({
+          sortY: ent.y + (ent.layer >= 14 ? 40 : 0),
+          draw: () => {
+            const entry = getSpriteBlock(ent.block, ent.paletteIndex);
+            if (!entry) return;
+            if (ent.useAnim && entry.sprite.animations?.length > 0) {
+              drawBSpriteBlockAnim(ctx, entry.sprite, entry.moduleImages, 0, animTick, sx, sy, 0);
+            } else {
+              drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, ent.frame, sx, sy, 0);
+            }
+            // Only show clean Gameloft alert bubbles when Kitchen dish is ready or Mailbox has unread mail
+            if (ent.category === 50 && ent.entityId === 18 && (s.kitchenQueue || []).some(j => j.ready)) {
+              const ui1 = getUiSpriteBlock(1);
+              if (ui1) drawBSpriteBlockFrame(ctx, ui1.sprite, ui1.moduleImages, 34, sx, sy - 42, 0);
+            } else if (ent.category === 50 && ent.entityId === 15 && (s.neighborMail || []).some(m => !m.claimed)) {
+              const ui1 = getUiSpriteBlock(1);
+              if (ui1) drawBSpriteBlockFrame(ctx, ui1.sprite, ui1.moduleImages, 8, sx, sy - 24, 0);
+            }
+          },
+        });
+      }
+
+      // Pass 2b: Player-placed Decorations (/9[4])
+      for (const dec of s.placedDecor || []) {
+        const sx = dec.worldX + ox;
+        const sy = dec.worldY + oy;
+        if (sx < -80 || sy < -80 || sx > viewW + 80 || sy > viewH + 80) continue;
+        drawList.push({
+          sortY: dec.worldY,
+          draw: () => {
+            const entry = getSpriteBlock(dec.worldBlock, dec.paletteIndex || 0);
+            if (entry) drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, dec.frame || 0, sx, sy, 0);
+          },
+        });
+      }
+
+      // Pass 2c: Live Fruit Trees (cat 52)
+      for (const tree of s.fruitTrees || []) {
+        const sx = tree.worldX + ox;
+        const sy = tree.worldY + oy;
+        if (sx < -100 || sy < -100 || sx > viewW + 100 || sy > viewH + 100) continue;
+        drawList.push({
+          sortY: tree.worldY,
+          draw: () => {
+            const entry = getSpriteBlock(tree.worldBlock, 0);
+            if (entry) drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, tree.ready ? 1 : 0, sx, sy, 0);
+            if (tree.ready) drawText(ctx, '★', sx + 10, sy - 22, { size: 9, color: '#ffd84d', bold: true });
+          },
+        });
+      }
+
+      // Pass 2d: Live Growing & Ready Crops (/5[crop.worldBlock])
+      for (const plot of s.plots.values()) {
+        if (!plot.cropId || plot.stage === 'tilled') continue;
+        const wx = plot.worldX ?? (plot.col * tw + (tw >> 1));
+        const wy = plot.worldY ?? (plot.row * th + (th >> 1));
+        const sx = wx + ox;
+        const sy = wy + oy;
+        if (sx < -80 || sy < -80 || sx > viewW + 80 || sy > viewH + 80) continue;
+        const crop = s.catalog?.crops?.find(c => c.id === plot.cropId);
+        const cropBlock = crop?.worldBlock ?? 76;
+        const ratio = plot.growMs > 0 ? (plot.progressMs / plot.growMs) : 1;
+        const frameIdx = plot.stage === 'ready' ? 2 : (ratio >= 0.5 ? 1 : 0);
+        drawList.push({
+          sortY: wy + 1,
+          draw: () => {
+            const entry = getSpriteBlock(cropBlock, 0);
+            if (entry) drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, frameIdx, sx, sy, 0);
+            if (plot.stage === 'ready') drawText(ctx, '★', sx + 14, sy - 12, { size: 9, color: '#ffd84d', bold: true });
+          },
+        });
+      }
+
+      // Pass 2e: Live Roaming Farm Animals (/5[animal.worldBlock] with exact paletteIndex & walking anim!)
+      for (const a of s.animals) {
+        const wx = a.worldX ?? (a.col * tw + (tw >> 1));
+        const wy = a.worldY ?? (a.row * th + (th >> 1));
+        const sx = wx + ox;
+        const sy = wy + oy;
+        if (sx < -80 || sy < -80 || sx > viewW + 80 || sy > viewH + 80) continue;
+        const spec = s.catalog?.animals?.find(item => item.id === a.animalId);
+        const animalBlock = a.worldBlock ?? spec?.worldBlock ?? 8;
+        const animalPal = a.paletteIndex ?? spec?.paletteIndex ?? 0;
+        const idleFrame = a.idleFrame ?? spec?.idleFrame ?? 0;
+        drawList.push({
+          sortY: wy + 2,
+          draw: () => {
+            const entry = getSpriteBlock(animalBlock, animalPal);
+            if (entry) {
+              const flip = a.hFlip ? 1 : 0;
+              if (entry.sprite.animations?.length > 0) {
+                const animId = a.walking && entry.sprite.animations.length > 3 ? 3 : 0;
+                drawBSpriteBlockAnim(ctx, entry.sprite, entry.moduleImages, animId, animTick + a.uid * 5, sx, sy, flip);
+              } else {
+                drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, idleFrame, sx, sy, flip);
+              }
+            }
+            if (a.ready) drawText(ctx, '★', sx + 12, sy - 18, { size: 9, color: '#ffd84d', bold: true });
+            else if (!a.fed) drawText(ctx, '!', sx + 12, sy - 18, { size: 9, color: '#ff6b6b', bold: true });
+          },
+        });
+      }
     }
 
-    // Player-placed Decorations (/9[4])
-    for (const dec of s.placedDecor || []) {
-      const sx = dec.worldX + ox;
-      const sy = dec.worldY + oy;
-      if (sx < -80 || sy < viewY - 80 || sx > SCREEN_W + 80 || sy > viewY + viewH + 80) continue;
-      drawList.push({
-        sortY: dec.worldY,
-        draw: () => {
-          const entry = getSpriteBlock(dec.worldBlock, dec.paletteIndex || 0);
-          if (entry) drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, dec.frame || 0, sx, sy, 0);
-        },
-      });
-    }
-
-    // Live Fruit Trees (cat 52)
-    for (const tree of s.fruitTrees || []) {
-      const sx = tree.worldX + ox;
-      const sy = tree.worldY + oy;
-      if (sx < -100 || sy < viewY - 100 || sx > SCREEN_W + 100 || sy > viewY + viewH + 100) continue;
-      drawList.push({
-        sortY: tree.worldY,
-        draw: () => {
-          const entry = getSpriteBlock(tree.worldBlock, 0);
-          if (entry) drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, tree.ready ? 1 : 0, sx, sy, 0);
-          if (tree.ready) drawText(ctx, '★', sx + 10, sy - 22, { size: 9, color: '#ffd84d', bold: true });
-        },
-      });
-    }
-
-    // Live Player Farmer (/5 block 2 — e.java:1107-1176)
+    // Live Player Farmer (/5 block 2 — 80ms/tick authentic animation cadence & centered hFlip!)
     if (s.farmer) {
       const fx = s.farmer.x + ox;
       const fy = s.farmer.y + oy;
-      if (s.farmer.state === 'walk' && !s.farmer.directControl) {
-        const tx = s.farmer.targetX + ox;
-        const ty = s.farmer.targetY + oy;
-        ctx.strokeStyle = 'rgba(255, 245, 90, 0.85)';
-        ctx.beginPath();
-        ctx.moveTo(tx, ty - 5); ctx.lineTo(tx + 10, ty); ctx.lineTo(tx, ty + 5); ctx.lineTo(tx - 10, ty);
-        ctx.closePath(); ctx.stroke();
-      }
       drawList.push({
         sortY: s.farmer.y + 3,
         draw: () => {
           const entry = getSpriteBlock(2, 0);
           if (!entry) return;
           const flipFlag = s.farmer.hFlip ? 1 : 0;
-          const animTick = s.farmer.state === 'idle' ? Math.floor(tick * 0.4) : tick;
-          drawBSpriteBlockAnim(ctx, entry.sprite, entry.moduleImages, s.farmer.anim, animTick, fx, fy, flipFlag);
-        },
-      });
-    }
-
-    // Live Growing & Ready Crops (/5[crop.worldBlock])
-    for (const plot of s.plots.values()) {
-      if (!plot.cropId || plot.stage === 'tilled') continue;
-      const wx = plot.worldX ?? (plot.col * tw + (tw >> 1));
-      const wy = plot.worldY ?? (plot.row * th + (th >> 1));
-      const sx = wx + ox;
-      const sy = wy + oy;
-      if (sx < -64 || sy < viewY - 64 || sx > SCREEN_W + 64 || sy > viewY + viewH + 64) continue;
-      const crop = s.catalog?.crops?.find(c => c.id === plot.cropId);
-      const cropBlock = crop?.worldBlock ?? 76;
-      const ratio = plot.growMs > 0 ? (plot.progressMs / plot.growMs) : 1;
-      const frameIdx = plot.stage === 'ready' ? 2 : (ratio >= 0.5 ? 1 : 0);
-      drawList.push({
-        sortY: wy + 1,
-        draw: () => {
-          const entry = getSpriteBlock(cropBlock, 0);
-          if (entry) drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, frameIdx, sx, sy, 0);
-          if (plot.stage === 'ready') drawText(ctx, '★', sx + 10, sy - 10, { size: 9, color: '#ffd84d', bold: true });
-          else if (plot.watered) drawText(ctx, '💧', sx + 9, sy - 8, { size: 7, color: '#7dd3fc' });
-        },
-      });
-    }
-
-    // Live Farm Animals (/5[animal.worldBlock] with exact paletteIndex)
-    for (const a of s.animals) {
-      const wx = a.worldX ?? (a.col * tw + (tw >> 1));
-      const wy = a.worldY ?? (a.row * th + (th >> 1));
-      const sx = wx + ox;
-      const sy = wy + oy;
-      if (sx < -80 || sy < viewY - 80 || sx > SCREEN_W + 80 || sy > viewY + viewH + 80) continue;
-      const spec = s.catalog?.animals?.find(item => item.id === a.animalId);
-      const animalBlock = a.worldBlock ?? spec?.worldBlock ?? 8;
-      const animalPal = a.paletteIndex ?? spec?.paletteIndex ?? 0;
-      const idleFrame = a.idleFrame ?? spec?.idleFrame ?? 0;
-      drawList.push({
-        sortY: wy + 2,
-        draw: () => {
-          const entry = getSpriteBlock(animalBlock, animalPal);
-          if (entry) {
-            if (entry.sprite.animations?.length > 0) {
-              drawBSpriteBlockAnim(ctx, entry.sprite, entry.moduleImages, 0, tick + a.uid * 7, sx, sy, 0);
-            } else {
-              drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, idleFrame, sx, sy, 0);
-            }
-          }
-          if (a.ready) drawText(ctx, '★', sx + 10, sy - 14, { size: 9, color: '#ffd84d', bold: true });
-          else if (!a.fed) drawText(ctx, '!', sx + 10, sy - 14, { size: 9, color: '#ff6b6b', bold: true });
+          const pivotAdjust = flipFlag ? 5 : 0; // Compensate asymmetric bounds.x=-11,w=27 so flip stays centered
+          const fTick = s.farmer.state === 'idle' ? Math.floor(animTick * 0.45) : animTick;
+          drawBSpriteBlockAnim(ctx, entry.sprite, entry.moduleImages, s.farmer.anim, fTick, fx + pivotAdjust, fy, flipFlag);
         },
       });
     }
@@ -392,130 +418,105 @@ function renderFarmWorld(ctx) {
       drawText(ctx, p.text, p.x + ox, p.y + oy, { align: 'center', size: 9, color: p.color || '#ffd84d', bold: true });
     }
 
-    // Isometric diamond cursor
-    const cx = s.cursorCol * tw + ox + (tw >> 1);
-    const cy = s.cursorRow * th + oy + (th >> 1);
-    ctx.strokeStyle = s.activeTool === 'place' ? '#58ff8a' : s.activeTool === 'plow' ? '#ffa94d' : '#fff55a';
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.moveTo(cx, cy - (th >> 1)); ctx.lineTo(cx + (tw >> 1), cy);
-    ctx.lineTo(cx, cy + (th >> 1)); ctx.lineTo(cx - (tw >> 1), cy);
-    ctx.closePath(); ctx.stroke();
-    ctx.lineWidth = 1;
+    // Authentic /5[14] frame 16 (72x36 4x4 plot cursor — e.java:573) when plowing or placing
+    if (!vn && (s.activeTool === 'plow' || s.activeTool === 'place')) {
+      const curSnapped = snapPlotToIso4x4(s.cursorCol * tw + (tw >> 1), s.cursorRow * th + (th >> 1));
+      const cursorSpr = getSpriteBlock(14, 0);
+      if (cursorSpr) {
+        drawBSpriteBlockFrame(ctx, cursorSpr.sprite, cursorSpr.moduleImages, 16, curSnapped.wx + ox, curSnapped.wy + oy, 0);
+      }
+    }
   });
 
-  // 1:1 Original Green Farm 3 In-Game HUD from pack /6[1] + pack /7 (a.java:13154 a.M(1))
+  ctx.restore();
+
+  // --- 1:1 ORIGINAL GAMELOFT /6[1] HUD (ALWAYS 100% CRISP SCREEN SPACE) ---
   const hudWidgets = getUIScreen(1);
   drawOriginalUIScreen(ctx, hudWidgets, getAnySpriteBlock, {
     filterWidget: (w) => {
       if (w.type !== 205) return false;
-      // Top HUD bars (Level star, XP bar, Coins pill, Cash pill, Quest icon) + bottom-left/right softkey buttons
-      // Exclude conditional seed-carousel slots (spr 9), vertical progress bar (spr 31), and timer spinner (spr 1)
       if (w.y < 60 && w.spriteId !== 31) return true;
       return w.index === 52 || w.index === 63 || w.index === 67;
     },
   });
 
-  // Live dynamic values aligned to exact /6[1] text widget coordinates (widgets [27],[26],[17],[22],[40])
   const xpNeed = xpForNextLevel(s);
-  drawText(ctx, `${s.level}`, 25, 19, { align: 'center', size: 9, color: '#fff8c8', bold: true });
-  drawText(ctx, `${s.xp}/${xpNeed} XP`, 103, 17, { align: 'center', size: 8, color: '#ffffff', bold: true });
-  drawText(ctx, `${s.coins}`, 57, 44, { align: 'center', size: 8, color: '#fff6b8', bold: true });
-  drawText(ctx, `${s.cash}`, 157, 44, { align: 'center', size: 8, color: '#c6ffd0', bold: true });
+  const drawHudNum = (val, x, y, color) => {
+    drawText(ctx, val, x + 1, y + 1, { align: 'center', size: 8, color: '#2b1505', bold: true });
+    drawText(ctx, val, x, y, { align: 'center', size: 8, color, bold: true });
+  };
+  drawHudNum(`${s.level}`, 25, 19, '#fff8c8');
+  drawHudNum(`${s.xp}/${xpNeed} XP`, 103, 17, '#ffffff');
+  drawHudNum(`${s.coins}`, 57, 44, '#fff4b8');
+  drawHudNum(`${s.cash}`, 157, 44, '#d2ffd8');
+  drawText(ctx, `⚡${s.energy}/${s.maxEnergy}`, 15, 61, { size: 8, color: '#2b1505', bold: true });
   drawText(ctx, `⚡${s.energy}/${s.maxEnergy}`, 14, 60, { size: 8, color: '#ffe97d', bold: true });
 
-  // Active tool / placement hint pill
-  if (s.activeTool !== 'auto') {
-    const toolNames = {
-      plow: '⛏️ Cuốc: Chạm cỏ cày đất',
-      clear: '🪓 Rìu: Chạm cỏ/đá để dọn',
-      place: `📍 Chạm cỏ đặt ${s.placementItem?.spec?.name || ''} (Esc hủy)`,
-    };
-    ctx.fillStyle = 'rgba(59, 34, 13, 0.86)';
-    ctx.fillRect(10, 64, SCREEN_W - 20, 15);
+  // Compact zoom badge at top-right below Pause icon
+  ctx.fillStyle = 'rgba(46, 26, 9, 0.72)';
+  ctx.fillRect(202, 42, 34, 14);
+  ctx.strokeStyle = '#d4a259';
+  ctx.strokeRect(202.5, 42.5, 33, 13);
+  drawText(ctx, `${Math.round(zoom * 100)}%`, 219, 52, { align: 'center', size: 7, color: '#fff4cc', bold: true });
+
+  // Visiting Neighbor top banner + Return Home button
+  if (vn) {
+    ctx.fillStyle = 'rgba(46, 26, 9, 0.9)';
+    ctx.fillRect(24, 64, SCREEN_W - 48, 18);
     ctx.strokeStyle = '#e8c47a';
-    ctx.strokeRect(10.5, 64.5, SCREEN_W - 21, 14);
-    drawText(ctx, toolNames[s.activeTool] || '', SCREEN_W / 2, 74, { align: 'center', size: 8, color: '#fff4c2', bold: true });
+    ctx.strokeRect(24.5, 64.5, SCREEN_W - 49, 17);
+    drawText(ctx, `Trang trại ${vn.name} · Giúp ${vn.helpsToday}/${vn.maxHelps}`, SCREEN_W / 2, 76, { align: 'center', size: 8, color: '#fff7c2', bold: true });
+
+    ctx.fillStyle = 'rgba(139, 68, 22, 0.94)';
+    ctx.fillRect(156, SCREEN_H - 36, 78, 22);
+    ctx.strokeStyle = '#ffd84d';
+    ctx.strokeRect(156.5, SCREEN_H - 35.5, 77, 21);
+    drawText(ctx, 'VỀ NHÀ', 195, SCREEN_H - 22, { align: 'center', size: 9, color: '#fff7d1', bold: true });
+  } else if (s.activeTool !== 'auto') {
+    const toolNames = {
+      plow: 'Cuốc đất: Chạm bãi cỏ để cày (Esc hủy)',
+      clear: 'Dọn cỏ/đá: Chạm bụi cây/đá (Esc hủy)',
+      place: `Đặt ${s.placementItem?.spec?.name || ''}: Chạm bãi cỏ (Esc hủy)`,
+    };
+    ctx.fillStyle = 'rgba(59, 34, 13, 0.88)';
+    ctx.fillRect(12, 64, SCREEN_W - 24, 16);
+    ctx.strokeStyle = '#e8c47a';
+    ctx.strokeRect(12.5, 64.5, SCREEN_W - 25, 15);
+    drawText(ctx, toolNames[s.activeTool] || '', SCREEN_W / 2, 75, { align: 'center', size: 8, color: '#fff4c2', bold: true });
   }
 
-  // Toast banner above bottom softkeys
   if (s.toast) {
     ctx.fillStyle = 'rgba(59, 34, 13, 0.9)';
-    ctx.fillRect(6, SCREEN_H - 52, SCREEN_W - 12, 17);
+    ctx.fillRect(8, SCREEN_H - 56, SCREEN_W - 16, 16);
     ctx.strokeStyle = '#e8c47a';
-    ctx.strokeRect(6.5, SCREEN_H - 51.5, SCREEN_W - 13, 16);
-    drawText(ctx, s.toast, SCREEN_W / 2, SCREEN_H - 41, { align: 'center', size: 8, color: '#fff7c2', maxWidth: SCREEN_W - 18 });
+    ctx.strokeRect(8.5, SCREEN_H - 55.5, SCREEN_W - 17, 15);
+    drawText(ctx, s.toast, SCREEN_W / 2, SCREEN_H - 45, { align: 'center', size: 8, color: '#fff7c2', maxWidth: SCREEN_W - 22 });
   }
 }
 
-// Port of a.java:9553-9621: draw real original Gameloft /6[screenId] wooden/parchment UI frame & header
-function renderPanelList(ctx, title, subtitle, rows, cursorIdx, footer, tabBar = null, screenId = 2) {
+// --- SHARED ORIGINAL /6 + /7 WOOD & PARCHMENT WINDOW SHELL ---
+function drawOriginalWindowShell(ctx, screenId, title, subtitle, { showConfirm = true } = {}) {
   ctx.fillStyle = '#3c2512';
   ctx.fillRect(0, 0, SCREEN_W, SCREEN_H);
-
-  // Draw the authentic original Gameloft /6[screenId] parchment frame (/7[22]), header ribbon (/7[33]),
-  // and bottom wooden softkey buttons (/7[12])
+  // Draw /7[22] parchment window frame & /7[33] header ribbon
   const screenWidgets = getUIScreen(screenId);
   drawOriginalUIScreen(ctx, screenWidgets, getAnySpriteBlock, {
-    filterWidget: (w) => {
-      if (w.type !== 205) return false;
-      return w.spriteId === 22 || w.spriteId === 33 || w.spriteId === 12;
-    },
+    filterWidget: (w) => w.type === 205 && (w.spriteId === 22 || w.spriteId === 33),
   });
-
-  // Crisp wooden header plate over top banner for guaranteed contrast on all /6 screens
-  ctx.fillStyle = 'rgba(74, 42, 16, 0.9)';
-  ctx.fillRect(10, 4, SCREEN_W - 20, 30);
+  // Top wooden title bar strictly inside x=16..224
+  ctx.fillStyle = '#5c3314';
+  ctx.fillRect(16, 6, 208, 28);
   ctx.strokeStyle = '#d4a259';
-  ctx.strokeRect(10.5, 4.5, SCREEN_W - 21, 29);
-  drawText(ctx, title, SCREEN_W / 2, 16, { align: 'center', size: 9, color: '#fff7d1', bold: true });
-  drawText(ctx, subtitle, SCREEN_W / 2, 29, { align: 'center', size: 7, color: '#ffe8a3', bold: true, maxWidth: SCREEN_W - 26 });
+  ctx.strokeRect(16.5, 6.5, 207, 27);
+  drawText(ctx, title, SCREEN_W / 2, 18, { align: 'center', size: 9, color: '#fff7d1', bold: true });
+  drawText(ctx, subtitle, SCREEN_W / 2, 30, { align: 'center', size: 7, color: '#ffe49e', maxWidth: 200 });
 
-  let listTop = 44;
-  if (tabBar && tabBar.length > 0) {
-    const tw = Math.floor((SCREEN_W - 20) / tabBar.length);
-    tabBar.forEach((t, i) => {
-      const tx = 10 + i * tw;
-      ctx.fillStyle = t.active ? 'rgba(139, 78, 28, 0.92)' : 'rgba(232, 206, 152, 0.85)';
-      ctx.fillRect(tx + 1, 36, tw - 2, 16);
-      ctx.strokeStyle = t.active ? '#ffd84d' : '#7a4b1f';
-      ctx.strokeRect(tx + 1.5, 36.5, tw - 3, 15);
-      drawText(ctx, t.label, tx + tw / 2, 47, { align: 'center', size: 8, color: t.active ? '#fff8d4' : '#4a290c', bold: true });
-    });
-    listTop = 58;
+  // Authentic /7[12] softkey buttons: Confirm (✔) at bottom-left, Back (⬅) at bottom-right
+  const softkeys = getUiSpriteBlock(12);
+  if (softkeys) {
+    if (showConfirm) drawBSpriteBlockFrame(ctx, softkeys.sprite, softkeys.moduleImages, 2, 4, 289, 0);
+    drawBSpriteBlockFrame(ctx, softkeys.sprite, softkeys.moduleImages, 0, 208, 289, 0);
   }
-
-  const maxVisible = tabBar ? 8 : 9;
-  const rowH = 26;
-  const start = Math.max(0, Math.min(Math.max(0, rows.length - maxVisible), cursorIdx - Math.floor(maxVisible / 2)));
-  for (let i = 0; i < maxVisible && start + i < rows.length; i += 1) {
-    const idx = start + i;
-    const item = rows[idx];
-    const y = listTop + i * rowH;
-    // Warm Gameloft parchment row card over the original /7[22] parchment background
-    ctx.fillStyle = idx === cursorIdx ? 'rgba(255, 240, 178, 0.92)' : 'rgba(247, 232, 194, 0.78)';
-    ctx.fillRect(10, y, SCREEN_W - 20, rowH - 3);
-    ctx.strokeStyle = idx === cursorIdx ? '#c46c17' : '#9c6e3b';
-    ctx.strokeRect(10.5, y + 0.5, SCREEN_W - 21, rowH - 4);
-    let textX = 15;
-    if (item.spriteBlock != null) {
-      const entry = getSpriteBlock(item.spriteBlock, item.paletteIndex || 0);
-      if (entry) {
-        withMIDPClip(ctx, 12, y + 2, 22, 19, () => {
-          drawBSpriteBlockFrame(ctx, entry.sprite, entry.moduleImages, item.spriteFrame ?? 0, 23, y + 17, 0);
-        });
-        textX = 37;
-      }
-    }
-    drawText(ctx, item.left, textX, y + 14, { size: 8, color: item.locked ? '#8a7356' : '#3a1f08', bold: idx === cursorIdx, maxWidth: 162 - textX });
-    const priceCol = item.rightColor === '#ff7b70' ? '#b3281d' : item.rightColor === '#9cff7b' ? '#1c6b1c' : '#7a3f06';
-    drawText(ctx, item.right, SCREEN_W - 14, y + 14, { align: 'right', size: 8, color: priceCol, bold: true });
-  }
-
-  // Footer text over the original /7[12] wooden softkey strip
-  ctx.fillStyle = 'rgba(59, 34, 13, 0.85)';
-  ctx.fillRect(28, SCREEN_H - 22, SCREEN_W - 56, 17);
-  drawText(ctx, footer, SCREEN_W / 2, SCREEN_H - 10, { align: 'center', size: 7, color: '#fff7d1', bold: true });
 }
 
 function getShopItems(s) {
@@ -526,39 +527,269 @@ function getShopItems(s) {
   return s.catalog.decorations || [];
 }
 
+// --- SCREEN A: AUTHENTIC 2x3 CARD-GRID SHOP (/6[2]) WITH /7[9] ICONS ---
 function renderShop(ctx) {
   const s = app.session;
+  drawOriginalWindowShell(ctx, 2, 'CỬA HÀNG NÔNG TRẠI', `Xu: ${s.coins}  ·  Cấp: ${s.level}`);
+
   const tabDefs = [
     { id: 'crops', label: 'HẠT' },
     { id: 'trees', label: 'CÂY' },
     { id: 'animals', label: 'THÚ' },
     { id: 'land', label: 'ĐẤT' },
     { id: 'decor', label: 'ĐỒ' },
-  ].map(t => ({ ...t, active: s.shopTab === t.id }));
+  ];
+  const tw = Math.floor(208 / 5);
+  tabDefs.forEach((t, i) => {
+    const tx = 16 + i * tw;
+    const active = s.shopTab === t.id;
+    ctx.fillStyle = active ? '#8c4b18' : '#e6ca94';
+    ctx.fillRect(tx + 1, 38, tw - 2, 16);
+    ctx.strokeStyle = active ? '#ffd84d' : '#8b5a2b';
+    ctx.strokeRect(tx + 1.5, 38.5, tw - 3, 15);
+    drawText(ctx, t.label, tx + tw / 2, 49, { align: 'center', size: 8, color: active ? '#fff8d4' : '#4a290c', bold: true });
+  });
 
   const list = getShopItems(s);
-  const rows = list.map((it) => {
-    if (s.shopTab === 'land') {
-      const owned = (s.unlockedZones || []).includes(it.id);
-      return {
-        left: `${it.name} (Lv.${it.unlockLevel})`,
-        right: owned ? 'ĐÃ MUA' : `${it.cost} Xu`,
-        locked: !owned && s.level < it.unlockLevel,
-        rightColor: owned ? '#9cff7b' : (s.coins >= it.cost ? '#ffd84d' : '#ff7b70'),
-      };
+  const perPage = 6;
+  const page = Math.floor(s.shopCursor / perPage);
+  const totalPages = Math.max(1, Math.ceil(list.length / perPage));
+  const start = page * perPage;
+
+  for (let i = 0; i < perPage && start + i < list.length; i += 1) {
+    const idx = start + i;
+    const item = list[idx];
+    const col = i % 2;
+    const row = Math.floor(i / 2);
+    const cx = 18 + col * 104;
+    const cy = 58 + row * 71;
+    const selected = idx === s.shopCursor;
+    const owned = s.shopTab === 'land' && (s.unlockedZones || []).includes(item.id);
+    const locked = !owned && ((item.unlockLevel || 1) > s.level);
+    const price = s.shopTab === 'land' ? item.cost : item.buyPrice;
+
+    // Warm parchment card strictly inside 2x3 grid
+    ctx.fillStyle = selected ? '#fff1b8' : '#f7e6c0';
+    ctx.fillRect(cx, cy, 100, 67);
+    ctx.strokeStyle = selected ? '#c46210' : '#9c6e3b';
+    ctx.lineWidth = selected ? 2 : 1;
+    ctx.strokeRect(cx + 0.5, cy + 0.5, 99, 66);
+    ctx.lineWidth = 1;
+
+    // Draw crisp scaled original icon (/7[9] for crops/trees, /5 for animals/decor)
+    if (s.shopTab === 'crops' || s.shopTab === 'trees') {
+      const ui9 = getUiSpriteBlock(item.iconBlock ?? 9);
+      if (ui9 && item.iconFrame >= 0 && item.iconFrame < ui9.sprite.frames.length) {
+        drawBSpriteBlockFrameScaled(ctx, ui9.sprite, ui9.moduleImages, item.iconFrame, cx + 50, cy + 25, 38, 34);
+      } else {
+        const sp = getSpriteBlock(item.worldBlock, 0);
+        if (sp) drawBSpriteBlockFrameScaled(ctx, sp.sprite, sp.moduleImages, s.shopTab === 'trees' ? 1 : 2, cx + 50, cy + 25, 38, 34);
+      }
+    } else if (s.shopTab === 'animals' || s.shopTab === 'decor') {
+      const sp = getSpriteBlock(item.worldBlock, item.paletteIndex || 0);
+      if (sp) drawBSpriteBlockFrameScaled(ctx, sp.sprite, sp.moduleImages, item.idleFrame ?? item.frame ?? 0, cx + 50, cy + 25, 42, 34);
+    } else {
+      const sp6 = getSpriteBlock(6, 0);
+      if (sp6) drawBSpriteBlockFrameScaled(ctx, sp6.sprite, sp6.moduleImages, 0, cx + 50, cy + 25, 48, 32);
     }
-    const locked = (it.unlockLevel || 1) > s.level;
-    return {
-      left: `${it.name}${it.unlockLevel > 1 ? ` (Lv.${it.unlockLevel})` : ''}`,
-      right: `${it.buyPrice} Xu`,
-      locked,
-      rightColor: s.coins >= it.buyPrice ? '#ffd84d' : '#ff7b70',
-      spriteBlock: it.worldBlock,
-      spriteFrame: s.shopTab === 'crops' ? 2 : s.shopTab === 'trees' ? 1 : (it.idleFrame ?? it.frame ?? 0),
-      paletteIndex: it.paletteIndex ?? 0,
-    };
+
+    drawText(ctx, item.name, cx + 50, cy + 50, { align: 'center', size: 8, color: locked ? '#8a7356' : '#3a1f08', bold: true, maxWidth: 94 });
+    const rightTxt = owned ? 'ĐÃ MUA' : locked ? `Cấp ${item.unlockLevel}` : `${price} Xu`;
+    const rightCol = owned ? '#1c6b1c' : locked ? '#8a7356' : (s.coins >= price ? '#8c4b18' : '#b3281d');
+    drawText(ctx, rightTxt, cx + 50, cy + 62, { align: 'center', size: 8, color: rightCol, bold: true });
+  }
+
+  // Page indicator centered between ✔ and ⬅ buttons (never overlapping them!)
+  drawText(ctx, `Trang ${page + 1}/${totalPages} (◀ ▶)`, SCREEN_W / 2, 306, { align: 'center', size: 8, color: '#fff7d1', bold: true });
+}
+
+// --- SCREEN B: AUTHENTIC KITCHEN WORKBENCH (/6[3]) ---
+function renderKitchen(ctx) {
+  const s = app.session;
+  drawOriginalWindowShell(ctx, 3, 'NHÀ BẾP — CHẾ BIẾN', `Bếp đang nấu: ${s.kitchenQueue?.length || 0}/4  ·  Cấp ${s.level}`);
+  const recipes = s.catalog.recipes || [];
+  const selIdx = Math.max(0, Math.min(recipes.length - 1, s.panelCursor));
+  const sel = recipes[selIdx];
+
+  // Top Workbench Card (y = 40..124)
+  ctx.fillStyle = '#faebc8';
+  ctx.fillRect(18, 40, 204, 84);
+  ctx.strokeStyle = '#9c6e3b';
+  ctx.strokeRect(18.5, 40.5, 203, 83);
+  if (sel) {
+    const canCook = s.level >= sel.unlockLevel && sel.ingredients.every(ing => (s.inventory.get(ing.goodId)?.qty || 0) >= ing.qty);
+    drawText(ctx, `${sel.name} (${sel.cookSec}s · +${sel.xp} XP)`, 24, 54, { size: 9, color: '#3a1f08', bold: true, maxWidth: 192 });
+    sel.ingredients.slice(0, 2).forEach((ing, i) => {
+      const have = s.inventory.get(ing.goodId)?.qty || 0;
+      const ok = have >= ing.qty;
+      const bx = 24 + i * 96;
+      ctx.fillStyle = ok ? '#dff5d8' : '#f5ddd8';
+      ctx.fillRect(bx, 62, 92, 26);
+      ctx.strokeStyle = ok ? '#3d8b3d' : '#b35440';
+      ctx.strokeRect(bx + 0.5, 62.5, 91, 25);
+      drawText(ctx, ing.name, bx + 46, 73, { align: 'center', size: 7, color: '#3a1f08', bold: true, maxWidth: 86 });
+      drawText(ctx, `Có ${have}/${ing.qty}`, bx + 46, 84, { align: 'center', size: 8, color: ok ? '#1c6b1c' : '#b3281d', bold: true });
+    });
+    // Prominent NẤU NGAY button inside workbench
+    ctx.fillStyle = canCook ? '#2e7d32' : '#9e8b70';
+    ctx.fillRect(58, 94, 124, 24);
+    ctx.strokeStyle = canCook ? '#ffd84d' : '#6e5c45';
+    ctx.strokeRect(58.5, 94.5, 123, 23);
+    const btnTxt = s.level < sel.unlockLevel ? `Mở khóa Cấp ${sel.unlockLevel}` : canCook ? 'NẤU MÓN NÀY' : 'THIẾU NGUYÊN LIỆU';
+    drawText(ctx, btnTxt, 120, 109, { align: 'center', size: 8, color: '#ffffff', bold: true });
+  }
+
+  // Middle 4 Stove Slots (y = 130..168)
+  for (let i = 0; i < 4; i += 1) {
+    const sx = 18 + i * 52;
+    const job = s.kitchenQueue?.[i];
+    ctx.fillStyle = job?.ready ? '#d7f7c8' : '#edd5a4';
+    ctx.fillRect(sx, 130, 48, 36);
+    ctx.strokeStyle = job?.ready ? '#2e7d32' : '#9c6e3b';
+    ctx.strokeRect(sx + 0.5, 130.5, 47, 35);
+    if (job) {
+      drawText(ctx, job.name, sx + 24, 144, { align: 'center', size: 7, color: '#3a1f08', bold: true, maxWidth: 44 });
+      drawText(ctx, job.ready ? 'NHẬN!' : `${Math.ceil((job.cookMs - job.progressMs) / 1000)}s`, sx + 24, 158, {
+        align: 'center', size: 8, color: job.ready ? '#1c6b1c' : '#8c4b18', bold: true,
+      });
+    } else {
+      drawText(ctx, `Lò ${i + 1}`, sx + 24, 151, { align: 'center', size: 7, color: '#8a7356' });
+    }
+  }
+
+  // Bottom Recipe Picker List (4 visible rows cleanly inside y = 172..276)
+  const visible = 4;
+  const start = Math.max(0, Math.min(Math.max(0, recipes.length - visible), selIdx - 1));
+  for (let i = 0; i < visible && start + i < recipes.length; i += 1) {
+    const idx = start + i;
+    const r = recipes[idx];
+    const y = 172 + i * 25;
+    const isSel = idx === selIdx;
+    const canCook = s.level >= r.unlockLevel && r.ingredients.every(ing => (s.inventory.get(ing.goodId)?.qty || 0) >= ing.qty);
+    ctx.fillStyle = isSel ? '#fff1b8' : '#f7e6c0';
+    ctx.fillRect(18, y, 204, 22);
+    ctx.strokeStyle = isSel ? '#c46210' : '#9c6e3b';
+    ctx.strokeRect(18.5, y + 0.5, 203, 21);
+    drawText(ctx, r.name, 24, y + 14, { size: 8, color: '#3a1f08', bold: isSel, maxWidth: 132 });
+    drawText(ctx, canCook ? 'Đủ NL' : `Lv.${r.unlockLevel}`, 216, y + 14, { align: 'right', size: 8, color: canCook ? '#1c6b1c' : '#8a7356', bold: true });
+  }
+  drawText(ctx, 'Chạm lò chín để nhận', SCREEN_W / 2, 306, { align: 'center', size: 8, color: '#fff7d1', bold: true });
+}
+
+// --- SCREEN C: AUTHENTIC QUESTS WITH CINDY LOU PORTRAIT (/6[9] + /7[7]) & 10 NEIGHBORS ---
+function renderQuestsOrNeighbors(ctx) {
+  const s = app.session;
+  const isNb = s.view === SOURCE_VIEW.NEIGHBORS;
+  drawOriginalWindowShell(ctx, isNb ? 15 : 9, isNb ? 'THĂM 10 HÀNG XÓM' : 'NHIỆM VỤ TRANG TRẠI', isNb ? 'Chạm hàng xóm để sang thăm trang trại!' : `Xu: ${s.coins}  ·  Cấp: ${s.level}`);
+
+  // Top 2 Tabs inside x=18..222
+  const tabs = [{ id: 'quests', label: 'NHIỆM VỤ', active: !isNb }, { id: 'neighbors', label: '10 HÀNG XÓM', active: isNb }];
+  tabs.forEach((t, i) => {
+    const tx = 18 + i * 102;
+    ctx.fillStyle = t.active ? '#8c4b18' : '#e6ca94';
+    ctx.fillRect(tx, 38, 100, 16);
+    ctx.strokeStyle = t.active ? '#ffd84d' : '#8b5a2b';
+    ctx.strokeRect(tx + 0.5, 38.5, 99, 15);
+    drawText(ctx, t.label, tx + 50, 49, { align: 'center', size: 8, color: t.active ? '#fff8d4' : '#4a290c', bold: true });
   });
-  renderPanelList(ctx, 'CỬA HÀNG NÔNG TRẠI', `Xu: ${s.coins} · Cấp: ${s.level}`, rows, s.shopCursor, 'Chạm mua · Q: Đổi tab · Esc: Đóng', tabDefs, 2);
+
+  if (isNb) {
+    const list = s.catalog.neighbors || [];
+    const maxV = 8;
+    const start = Math.max(0, Math.min(Math.max(0, list.length - maxV), s.panelCursor - 3));
+    for (let i = 0; i < maxV && start + i < list.length; i += 1) {
+      const idx = start + i;
+      const nb = list[idx];
+      const y = 58 + i * 27;
+      const sel = idx === s.panelCursor;
+      const done = !!s.helpedNeighbors?.[nb.id];
+      ctx.fillStyle = sel ? '#fff1b8' : '#f7e6c0';
+      ctx.fillRect(18, y, 204, 24);
+      ctx.strokeStyle = sel ? '#c46210' : '#9c6e3b';
+      ctx.strokeRect(18.5, y + 0.5, 203, 23);
+      const sp = getSpriteBlock(nb.worldBlock, 0);
+      if (sp) drawBSpriteBlockFrameScaled(ctx, sp.sprite, sp.moduleImages, 0, 32, y + 12, 22, 20);
+      drawText(ctx, `Trang trại ${nb.name}`, 48, y + 15, { size: 8, color: '#3a1f08', bold: sel, maxWidth: 112 });
+      drawText(ctx, done ? 'ĐÃ GIÚP' : 'SANG THĂM ▶', 216, y + 15, { align: 'right', size: 8, color: done ? '#8a7356' : '#1c6b1c', bold: true });
+    }
+    drawText(ctx, 'Chạm để qua trại bạn', SCREEN_W / 2, 306, { align: 'center', size: 8, color: '#fff7d1', bold: true });
+    return;
+  }
+
+  // Quest Detail Card with REAL Cindy Lou / Character Portrait from /7[7]!
+  const quests = s.quests || [];
+  const qSel = quests[Math.max(0, Math.min(quests.length - 1, s.questCursor))];
+  ctx.fillStyle = '#faebc8';
+  ctx.fillRect(18, 58, 204, 78);
+  ctx.strokeStyle = '#9c6e3b';
+  ctx.strokeRect(18.5, 58.5, 203, 77);
+
+  const portrait = getUiSpriteBlock(7);
+  if (portrait) {
+    drawBSpriteBlockFrameScaled(ctx, portrait.sprite, portrait.moduleImages, 0, 46, 97, 50, 70);
+  }
+  if (qSel) {
+    drawText(ctx, qSel.title, 76, 72, { size: 8, color: '#5c3314', bold: true, maxWidth: 140 });
+    wrapLines(qSel.description || 'Hoàn thành công việc trang trại để nhận thưởng!', 24).slice(0, 2).forEach((ln, i) => {
+      drawText(ctx, ln, 76, 85 + i * 11, { size: 7, color: '#3a1f08', maxWidth: 140 });
+    });
+    drawText(ctx, `Tiến độ: ${qSel.progress}/${qSel.targetCount}`, 76, 112, { size: 8, color: '#8c4b18', bold: true });
+    drawText(ctx, `Thưởng: +${qSel.rewardCoins} Xu, +${qSel.rewardXp} XP`, 76, 125, { size: 8, color: '#1c6b1c', bold: true });
+  }
+
+  // Scrollable Quest List (5 rows cleanly inside y = 142..276)
+  const visible = 5;
+  const start = Math.max(0, Math.min(Math.max(0, quests.length - visible), s.questCursor - 2));
+  for (let i = 0; i < visible && start + i < quests.length; i += 1) {
+    const idx = start + i;
+    const q = quests[idx];
+    const y = 142 + i * 26;
+    const sel = idx === s.questCursor;
+    ctx.fillStyle = sel ? '#fff1b8' : '#f7e6c0';
+    ctx.fillRect(18, y, 204, 23);
+    ctx.strokeStyle = sel ? '#c46210' : '#9c6e3b';
+    ctx.strokeRect(18.5, y + 0.5, 203, 22);
+    drawText(ctx, q.title, 24, y + 14, { size: 8, color: '#3a1f08', bold: sel, maxWidth: 132 });
+    const statusTxt = q.claimed ? 'XONG' : q.completed ? `NHẬN +${q.rewardCoins}G` : `${q.progress}/${q.targetCount}`;
+    drawText(ctx, statusTxt, 216, y + 14, { align: 'right', size: 8, color: q.completed && !q.claimed ? '#1c6b1c' : '#8c4b18', bold: true });
+  }
+  drawText(ctx, 'Chạm NV xong để nhận', SCREEN_W / 2, 306, { align: 'center', size: 8, color: '#fff7d1', bold: true });
+}
+
+// --- SCREEN D: CLEAN PARCHMENT LIST INSIDE /7[22] SAFE BOUNDS (x=18..222, y=42..276) ---
+function renderCleanParchmentList(ctx, screenId, title, subtitle, rows, cursorIdx, footer) {
+  drawOriginalWindowShell(ctx, screenId, title, subtitle);
+  const maxVisible = 9;
+  const rowH = 26;
+  const start = Math.max(0, Math.min(Math.max(0, rows.length - maxVisible), cursorIdx - 4));
+  for (let i = 0; i < maxVisible && start + i < rows.length; i += 1) {
+    const idx = start + i;
+    const item = rows[idx];
+    const y = 40 + i * rowH;
+    const sel = idx === cursorIdx;
+    ctx.fillStyle = sel ? '#fff1b8' : '#f7e6c0';
+    ctx.fillRect(18, y, 204, rowH - 3);
+    ctx.strokeStyle = sel ? '#c46210' : '#9c6e3b';
+    ctx.strokeRect(18.5, y + 0.5, 203, rowH - 4);
+    let textX = 24;
+    if (item.uiBlock != null) {
+      const ui = getUiSpriteBlock(item.uiBlock);
+      if (ui) {
+        drawBSpriteBlockFrameScaled(ctx, ui.sprite, ui.moduleImages, item.uiFrame ?? 0, 31, y + 11, 20, 19);
+        textX = 45;
+      }
+    } else if (item.spriteBlock != null) {
+      const sp = getSpriteBlock(item.spriteBlock, item.paletteIndex || 0);
+      if (sp) {
+        drawBSpriteBlockFrameScaled(ctx, sp.sprite, sp.moduleImages, item.spriteFrame ?? 0, 31, y + 11, 20, 19);
+        textX = 45;
+      }
+    }
+    drawText(ctx, item.left, textX, y + 14, { size: 8, color: item.locked ? '#8a7356' : '#3a1f08', bold: sel, maxWidth: 160 - textX });
+    const col = item.rightColor === 'red' ? '#b3281d' : item.rightColor === 'green' ? '#1c6b1c' : '#8c4b18';
+    drawText(ctx, item.right, 216, y + 14, { align: 'right', size: 8, color: col, bold: true });
+  }
+  drawText(ctx, footer, SCREEN_W / 2, 306, { align: 'center', size: 8, color: '#fff7d1', bold: true });
 }
 
 function renderSeedPicker(ctx) {
@@ -568,11 +799,11 @@ function renderSeedPicker(ctx) {
     left: `${c.name} (${c.growSec}s · Lv.${c.unlockLevel})`,
     right: `${c.buyPrice} Xu`,
     locked: s.level < c.unlockLevel,
-    rightColor: s.coins >= c.buyPrice ? '#9cff7b' : '#ff7b70',
-    spriteBlock: c.worldBlock,
-    spriteFrame: 2,
+    rightColor: s.coins >= c.buyPrice ? 'green' : 'red',
+    uiBlock: c.iconBlock ?? 9,
+    uiFrame: c.iconFrame ?? 12,
   }));
-  renderPanelList(ctx, 'CHỌN HẠT GIỐNG', `Xu: ${s.coins} · Cấp: ${s.level}`, rows, s.panelCursor, 'Chạm hạt giống để trồng · Esc: Đóng', null, 22);
+  renderCleanParchmentList(ctx, 22, 'CHỌN HẠT GIỐNG', `Xu: ${s.coins}  ·  Cấp: ${s.level}`, rows, s.panelCursor, 'Chạm hạt giống để gieo');
 }
 
 function renderBarn(ctx) {
@@ -581,58 +812,39 @@ function renderBarn(ctx) {
   const totalQty = items.reduce((a, b) => a + b.qty, 0);
   const upCost = 150 + Math.floor((s.barnCapacity - 40) * 10);
   const rows = [
-    { left: `⬆ Nâng cấp Kho thóc (+20 chỗ)`, right: `${upCost} Xu`, rightColor: s.coins >= upCost ? '#9cff7b' : '#ff7b70' },
+    { left: 'Nâng cấp Kho thóc (+20 chỗ)', right: `${upCost} Xu`, rightColor: s.coins >= upCost ? 'green' : 'red', spriteBlock: 82, spriteFrame: 0 },
     ...(items.length > 0
-      ? items.map(it => ({ left: `${it.name} ×${it.qty}`, right: `Bán +${it.sellPrice * it.qty}G` }))
-      : [{ left: 'Kho đang trống — hãy thu hoạch cây/thú!', right: '0G' }]),
+      ? items.map(it => ({ left: `${it.name} x${it.qty}`, right: `+${it.sellPrice * it.qty}G`, uiBlock: 2, uiFrame: 0 }))
+      : [{ left: 'Kho trống — thu hoạch cây/thú nhé!', right: '0G' }]),
   ];
-  renderPanelList(ctx, `KHO THÓC (${totalQty}/${s.barnCapacity})`, `Xu: ${s.coins} · Nông sản & thành phẩm`, rows, s.barnCursor, 'Chạm bán · Q: Bán hết · Esc: Đóng', null, 8);
-}
-
-function renderKitchen(ctx) {
-  const s = app.session;
-  const queueRows = (s.kitchenQueue || []).map(j => ({
-    left: j.ready ? `✅ ${j.name} (XONG!)` : `⏳ ${j.name} (${Math.ceil((j.cookMs - j.progressMs) / 1000)}s)`,
-    right: j.ready ? 'NHẬN' : 'ĐANG NẤU',
-    rightColor: j.ready ? '#9cff7b' : '#ffd84d',
-  }));
-  const recipeRows = (s.catalog.recipes || []).slice(0, 40).map((r) => {
-    const canCook = s.level >= r.unlockLevel && r.ingredients.every(ing => (s.inventory.get(ing.goodId)?.qty || 0) >= ing.qty);
-    const ingStr = r.ingredients.map(i => `${i.name}×${i.qty}`).join('+');
-    return {
-      left: `${r.name} (${ingStr || 'Miễn phí'})`,
-      right: s.level < r.unlockLevel ? `Lv.${r.unlockLevel}` : canCook ? 'NẤU' : 'Thiếu NL',
-      locked: !canCook,
-      rightColor: canCook ? '#9cff7b' : '#ff9f70',
-    };
-  });
-  renderPanelList(ctx, 'NHÀ BẾP — CHẾ BIẾN', `Đang nấu: ${s.kitchenQueue?.length || 0}/4 · Cấp: ${s.level}`, [...queueRows, ...recipeRows], s.panelCursor, 'Chạm món để nấu · Esc: Đóng', null, 3);
+  renderCleanParchmentList(ctx, 8, `KHO THÓC (${totalQty}/${s.barnCapacity})`, `Xu: ${s.coins}  ·  Nông sản & thành phẩm`, rows, s.barnCursor, 'Q: Bán hết · Chạm bán lẻ');
 }
 
 function renderManor(ctx) {
   const s = app.session;
   const rooms = (s.catalog.buildings || []).filter(b => b.isManorRoom);
   const quickLinks = [
-    { left: '⛏️ Cuốc cày ô đất mới (10G)', right: s.activeTool === 'plow' ? 'ĐANG BẬT' : 'CHỌN', rightColor: '#9cff7b' },
-    { left: '🪓 Rìu dọn cỏ & đá (2⚡)', right: s.activeTool === 'clear' ? 'ĐANG BẬT' : 'CHỌN', rightColor: '#9cff7b' },
-    { left: '🏚️ Kho thóc (Bán & Nâng cấp)', right: 'MỞ', rightColor: '#9cff7b' },
-    { left: '🍳 Nhà bếp (83 công thức)', right: 'MỞ', rightColor: '#9cff7b' },
-    { left: '🏺 Phòng sưu tập (15 cổ vật)', right: 'MỞ', rightColor: '#9cff7b' },
-    { left: '✉️ Hòm thư & Đơn hàng', right: 'MỞ', rightColor: '#9cff7b' },
-    { left: '🗺️ Mua đất mở rộng trang trại', right: `${s.unlockedZones?.length || 1}/6`, rightColor: '#ffd84d' },
+    { left: 'Cuốc cày ô đất mới (10 Xu)', right: s.activeTool === 'plow' ? 'ĐANG BẬT' : 'CHỌN', rightColor: 'green', spriteBlock: 6, spriteFrame: 0 },
+    { left: 'Dọn cỏ & đá (2 Năng lượng)', right: s.activeTool === 'clear' ? 'ĐANG BẬT' : 'CHỌN', rightColor: 'green', spriteBlock: 14, spriteFrame: 16 },
+    { left: 'Kho thóc (Bán & Nâng cấp)', right: 'MỞ', rightColor: 'green', spriteBlock: 82, spriteFrame: 0 },
+    { left: 'Nhà bếp (83 công thức nấu)', right: 'MỞ', rightColor: 'green', spriteBlock: 132, spriteFrame: 0 },
+    { left: 'Phòng sưu tập (15 cổ vật)', right: 'MỞ', rightColor: 'green', spriteBlock: 129, spriteFrame: 0 },
+    { left: 'Hòm thư & Đơn hàng', right: 'MỞ', rightColor: 'green', spriteBlock: 83, spriteFrame: 0 },
+    { left: 'Thăm 10 trang trại Hàng xóm', right: 'ĐI THĂM', rightColor: 'green', spriteBlock: 86, spriteFrame: 0 },
+    { left: 'Mua đất mở rộng trang trại', right: `${s.unlockedZones?.length || 1}/6`, spriteBlock: 6, spriteFrame: 0 },
   ];
   const roomRows = rooms.map((r) => {
     const done = !!s.unlockedRooms?.[r.entityId];
     const cost = Math.max(150, Math.min(5000, r.repairCost || 300));
     return {
-      left: `🏛️ ${r.name}`,
+      left: `Phòng: ${r.name}`,
       right: done ? 'ĐÃ SỬA' : `Sửa ${cost}G`,
-      rightColor: done ? '#9cff7b' : (s.coins >= cost ? '#ffd84d' : '#ff7b70'),
+      rightColor: done ? 'green' : (s.coins >= cost ? 'gold' : 'red'),
       spriteBlock: r.worldBlock,
       spriteFrame: r.frame || 0,
     };
   });
-  renderPanelList(ctx, 'MENU TRANG TRẠI & DINH THỰ', `Xu: ${s.coins} · Công cụ, Nhà & 9 Phòng`, [...quickLinks, ...roomRows], s.panelCursor, 'Chạm chọn · Esc: Đóng', null, 14);
+  renderCleanParchmentList(ctx, 14, 'MENU TRANG TRẠI & DINH THỰ', `Xu: ${s.coins}  ·  Công cụ, Nhà & 9 Phòng`, [...quickLinks, ...roomRows], s.panelCursor, 'Chạm mục để mở hoặc sửa');
 }
 
 function renderCoop(ctx) {
@@ -643,27 +855,29 @@ function renderCoop(ctx) {
     return isChicken ? (spec?.kind === 'chicken' || a.worldBlock === 8) : (spec?.kind !== 'chicken' && a.worldBlock !== 8);
   });
   const rows = [
-    { left: `➕ Mua thêm ${isChicken ? 'Gà' : 'Vật nuôi'} tại Chợ`, right: 'MỞ CHỢ', rightColor: '#9cff7b' },
+    { left: `Mua thêm ${isChicken ? 'Gà' : 'Vật nuôi'} tại Chợ`, right: 'MỞ CHỢ', rightColor: 'green', spriteBlock: isChicken ? 8 : 17, spriteFrame: 0 },
     ...animals.map(a => ({
       left: a.name,
       right: a.ready ? 'THU HOẠCH' : a.fed ? 'ĐANG LỚN' : 'CHO ĂN',
-      rightColor: a.ready ? '#9cff7b' : !a.fed ? '#ff7b70' : '#ffd84d',
+      rightColor: a.ready ? 'green' : !a.fed ? 'red' : 'gold',
       spriteBlock: a.worldBlock,
       paletteIndex: a.paletteIndex,
       spriteFrame: a.idleFrame || 0,
     })),
   ];
-  renderPanelList(ctx, isChicken ? 'CHUỒNG GÀ' : 'CHUỒNG THÚ', `Số lượng: ${animals.length}/${isChicken ? s.coopCapacity : s.shedCapacity}`, rows, s.panelCursor, 'Chạm thú để thu/cho ăn · Esc: Đóng', null, 22);
+  renderCleanParchmentList(ctx, 22, isChicken ? 'CHUỒNG GÀ' : 'CHUỒNG THÚ', `Số lượng: ${animals.length}/${isChicken ? s.coopCapacity : s.shedCapacity}`, rows, s.panelCursor, 'Chạm thú để thu / cho ăn');
 }
 
 function renderMailbox(ctx) {
   const s = app.session;
   const rows = (s.neighborMail || []).map(m => ({
     left: `${m.from}: ${m.subject}`,
-    right: m.claimed ? 'ĐÃ NHẬN' : m.kind === 'gift' ? `NHẬN +${m.giftCoins}G` : `GIAO +${m.giftCoins}G`,
-    rightColor: m.claimed ? '#889483' : '#9cff7b',
+    right: m.claimed ? 'ĐÃ NHẬN' : m.kind === 'gift' ? `+${m.giftCoins}G` : `GIAO +${m.giftCoins}G`,
+    rightColor: m.claimed ? 'gold' : 'green',
+    spriteBlock: 83,
+    spriteFrame: 0,
   }));
-  renderPanelList(ctx, 'HÒM THƯ & ĐƠN HÀNG', `Xu: ${s.coins} · Quà & đơn hàng`, rows, s.panelCursor, 'Chạm thư để nhận/giao · Esc: Đóng', null, 15);
+  renderCleanParchmentList(ctx, 15, 'HÒM THƯ & ĐƠN HÀNG', `Xu: ${s.coins}  ·  Quà & đơn đặt hàng`, rows, s.panelCursor, 'Chạm thư để nhận / giao');
 }
 
 function renderCollections(ctx) {
@@ -671,42 +885,13 @@ function renderCollections(ctx) {
   const rows = (s.catalog.collectibles || []).map(c => {
     const qty = s.collections?.[c.id] || 0;
     return {
-      left: `🏺 ${c.name} (Có: ${qty})`,
+      left: `${c.name} (Có: ${qty})`,
       right: qty > 0 ? `Bán +${c.sellPrice}G` : `Lv.${c.minLevel}`,
       locked: qty === 0,
-      rightColor: qty > 0 ? '#9cff7b' : '#889483',
+      rightColor: qty > 0 ? 'green' : 'gold',
     };
   });
-  renderPanelList(ctx, 'PHÒNG SƯU TẬP CỔ VẬT', 'Tìm 15 cổ vật khi thu hoạch & dọn đất!', rows, s.panelCursor, 'Chạm cổ vật để bán · Esc: Đóng', null, 9);
-}
-
-function renderQuestsOrNeighbors(ctx) {
-  const s = app.session;
-  const isNb = s.view === SOURCE_VIEW.NEIGHBORS;
-  const tabDefs = [
-    { id: 'quests', label: 'NHIỆM VỤ', active: !isNb },
-    { id: 'neighbors', label: '10 HÀNG XÓM', active: isNb },
-  ];
-  if (isNb) {
-    const rows = (s.catalog.neighbors || []).map(nb => {
-      const done = !!s.helpedNeighbors?.[nb.id];
-      return {
-        left: `🏡 Trang trại ${nb.name}`,
-        right: done ? 'ĐÃ GIÚP' : 'GIÚP (+45G)',
-        rightColor: done ? '#889483' : '#9cff7b',
-        spriteBlock: nb.worldBlock,
-        spriteFrame: 0,
-      };
-    });
-    renderPanelList(ctx, '10 HÀNG XÓM', `Năng lượng: ⚡${s.energy}/${s.maxEnergy}`, rows, s.panelCursor, 'Chạm để ghé giúp · Esc: Đóng', tabDefs, 15);
-  } else {
-    const rows = (s.quests || []).map(q => ({
-      left: q.title,
-      right: q.claimed ? 'ĐÃ NHẬN' : q.completed ? `NHẬN +${q.rewardCoins}G` : `${q.progress}/${q.targetCount}`,
-      rightColor: q.completed && !q.claimed ? '#9cff7b' : '#ffd84d',
-    }));
-    renderPanelList(ctx, 'NHIỆM VỤ', `Xu: ${s.coins} · Cấp: ${s.level}`, rows, s.questCursor, 'Chạm NV xong để nhận · Esc: Đóng', tabDefs, 9);
-  }
+  renderCleanParchmentList(ctx, 9, 'PHÒNG SƯU TẬP CỔ VẬT', 'Tìm 15 cổ vật khi thu hoạch & dọn đất', rows, s.panelCursor, 'Chạm cổ vật để bán');
 }
 
 function renderFrame(ctx, now) {
@@ -730,15 +915,9 @@ function renderFrame(ctx, now) {
 
 let dragState = null;
 
-function clampCamera(s) {
-  const tm = sourceWorld?.tileMap;
-  const tw = tm?.tileWidth || 36;
-  const th = tm?.tileHeight || 18;
-  const mapW = (tm?.width || 58) * tw;
-  const mapH = (tm?.height || 58) * th;
-  const viewH = SCREEN_H - 56;
-  s.cameraX = Math.max(0, Math.min(mapW - SCREEN_W, Math.round(s.cameraX)));
-  s.cameraY = Math.max(288, Math.min(mapH - viewH, Math.round(s.cameraY)));
+function screenToWorld(s, sx, sy) {
+  const zoom = s.worldZoom || 1;
+  return { wx: sx / zoom + s.cameraX, wy: sy / zoom + s.cameraY };
 }
 
 function onPointerDown(event) {
@@ -748,10 +927,10 @@ function onPointerDown(event) {
   const y = (event.clientY - rect.top) * (SCREEN_H / rect.height);
   const s = app.session;
   if (s.view === SOURCE_VIEW.WORLD_LAYER) {
-    const onTopQuestBtn = x >= 198 && y <= 40;
-    const onBottomLeftBtn = x <= 68 && y >= 274;
-    const onBottomRightBtn = x >= 192 && y >= 274;
-    if (!onTopQuestBtn && !onBottomLeftBtn && !onBottomRightBtn && y >= 48) {
+    const onHudTop = (x >= 198 && y <= 58);
+    const onBottomLeft = (x <= 68 && y >= 274);
+    const onBottomRight = (x >= 152 && y >= 274);
+    if (!onHudTop && !onBottomLeft && !onBottomRight && y >= 48) {
       dragState = { pointerId: event.pointerId, startX: x, startY: y, camX: s.cameraX, camY: s.cameraY, dragged: false };
       try { canvasEl.setPointerCapture(event.pointerId); } catch { /* ignore */ }
       event.preventDefault();
@@ -770,9 +949,10 @@ function onPointerMove(event) {
   const dy = y - dragState.startY;
   if (Math.abs(dx) > 5 || Math.abs(dy) > 5) dragState.dragged = true;
   if (dragState.dragged) {
-    app.session.cameraX = dragState.camX - dx;
-    app.session.cameraY = dragState.camY - dy;
-    clampCamera(app.session);
+    const zoom = app.session.worldZoom || 1;
+    app.session.cameraX = dragState.camX - dx / zoom;
+    app.session.cameraY = dragState.camY - dy / zoom;
+    clampWorldCamera(app.session, sourceWorld?.tileMap);
   }
 }
 
@@ -805,7 +985,6 @@ function handlePanelAction(s, idx) {
         s.toastMs = 2000;
       }
     } else {
-      // Enter Placement Mode right on the farm map for Trees, Animals & Decor!
       if ((item.unlockLevel || 1) > s.level) {
         s.toast = `${item.name} mở khóa ở Cấp ${item.unlockLevel}!`;
         s.toastMs = 2000;
@@ -837,44 +1016,32 @@ function handlePanelAction(s, idx) {
       saveSession();
     }
   } else if (v === SOURCE_VIEW.BARN) {
-    if (idx === 0) {
-      upgradeBarn(s);
-      saveSession();
-    } else {
-      const items = [...s.inventory.values()];
-      const item = items[idx - 1];
+    if (idx === 0) { upgradeBarn(s); saveSession(); }
+    else {
+      const item = [...s.inventory.values()][idx - 1];
       if (item) { sellGood(s, item.id, item.qty); saveSession(); }
     }
   } else if (v === SOURCE_VIEW.KITCHEN) {
-    const qLen = s.kitchenQueue?.length || 0;
-    if (idx < qLen) {
-      const job = s.kitchenQueue[idx];
-      if (job?.ready) { collectKitchenDish(s, job.uid); saveSession(); }
-    } else {
-      const recipe = (s.catalog.recipes || [])[idx - qLen];
-      if (recipe) { startKitchenRecipe(s, recipe.id); saveSession(); }
-    }
+    const recipe = (s.catalog.recipes || [])[idx];
+    if (recipe) { startKitchenRecipe(s, recipe.id); saveSession(); }
   } else if (v === SOURCE_VIEW.MANOR) {
     if (idx === 0) {
       s.activeTool = s.activeTool === 'plow' ? 'auto' : 'plow';
       s.placementItem = null;
       s.view = SOURCE_VIEW.WORLD_LAYER;
-      s.toast = s.activeTool === 'plow' ? '⛏️ Đã bật Cuốc: chạm bãi cỏ để cày ô đất!' : '✋ Đã chuyển về chế độ Tay';
-      s.toastMs = 2000;
     } else if (idx === 1) {
       s.activeTool = s.activeTool === 'clear' ? 'auto' : 'clear';
       s.placementItem = null;
       s.view = SOURCE_VIEW.WORLD_LAYER;
-      s.toast = s.activeTool === 'clear' ? '🪓 Đã bật Rìu: chạm bụi cây/đá để dọn!' : '✋ Đã chuyển về chế độ Tay';
-      s.toastMs = 2000;
     } else if (idx === 2) { s.barnCursor = 0; s.view = SOURCE_VIEW.BARN; }
     else if (idx === 3) { s.panelCursor = 0; s.view = SOURCE_VIEW.KITCHEN; }
     else if (idx === 4) { s.panelCursor = 0; s.view = SOURCE_VIEW.COLLECTIONS; }
     else if (idx === 5) { s.panelCursor = 0; s.view = SOURCE_VIEW.MAILBOX; }
-    else if (idx === 6) { s.shopTab = 'land'; s.shopCursor = 0; s.view = SOURCE_VIEW.SHOP; }
+    else if (idx === 6) { s.panelCursor = 0; s.view = SOURCE_VIEW.NEIGHBORS; }
+    else if (idx === 7) { s.shopTab = 'land'; s.shopCursor = 0; s.view = SOURCE_VIEW.SHOP; }
     else {
       const rooms = (s.catalog.buildings || []).filter(b => b.isManorRoom);
-      const room = rooms[idx - 7];
+      const room = rooms[idx - 8];
       if (room) { repairManorRoom(s, room.entityId); saveSession(); }
     }
   } else if (v === SOURCE_VIEW.COOP) {
@@ -898,8 +1065,9 @@ function handlePanelAction(s, idx) {
     const q = s.quests?.[idx];
     if (q) { claimQuestReward(s, q.id); saveSession(); }
   } else if (v === SOURCE_VIEW.NEIGHBORS) {
-    const nb = s.catalog.neighbors?.[idx];
-    if (nb) { helpNeighbor(s, nb.id); saveSession(); }
+    // ACTUALLY TRAVEL TO THE NEIGHBOR'S REAL FARM (pack10[5..14])!
+    visitNeighborFarm(s, idx, sourceWorld);
+    saveSession();
   }
 }
 
@@ -911,82 +1079,182 @@ function handleTap(x, y, event) {
     return;
   }
 
-  // Any modal panel screen
+  // --- MODAL UI SCREENS ---
   if (s.view !== SOURCE_VIEW.WORLD_LAYER) {
-    // Tab bar click for SHOP or QUESTS/NEIGHBORS
-    if (y >= 34 && y <= 52) {
-      if (s.view === SOURCE_VIEW.SHOP) {
+    // Bottom-right original ⬅ Back button (x >= 196, y >= 282)
+    if (x >= 196 && y >= 282) {
+      s.view = SOURCE_VIEW.WORLD_LAYER;
+      event.preventDefault();
+      return;
+    }
+    // Bottom-left original ✔ Confirm button (x <= 44, y >= 282)
+    if (x <= 44 && y >= 282) {
+      const idx = s.view === SOURCE_VIEW.SHOP ? s.shopCursor
+        : s.view === SOURCE_VIEW.BARN ? s.barnCursor
+        : s.view === SOURCE_VIEW.QUESTS ? s.questCursor
+        : s.panelCursor;
+      handlePanelAction(s, idx);
+      event.preventDefault();
+      return;
+    }
+
+    if (s.view === SOURCE_VIEW.SHOP) {
+      if (y >= 36 && y <= 55) {
         const tabIds = ['crops', 'trees', 'animals', 'land', 'decor'];
-        const tIdx = Math.max(0, Math.min(4, Math.floor((x - 4) / ((SCREEN_W - 8) / 5))));
+        const tIdx = Math.max(0, Math.min(4, Math.floor((x - 16) / (208 / 5))));
         s.shopTab = tabIds[tIdx];
         s.shopCursor = 0;
         event.preventDefault();
         return;
       }
-      if (s.view === SOURCE_VIEW.QUESTS || s.view === SOURCE_VIEW.NEIGHBORS) {
+      // Page arrows in footer center
+      if (y >= 284 && x > 44 && x < 196) {
+        const list = getShopItems(s);
+        const pages = Math.max(1, Math.ceil(list.length / 6));
+        const curPage = Math.floor(s.shopCursor / 6);
+        const nextPage = x < SCREEN_W / 2 ? (curPage - 1 + pages) % pages : (curPage + 1) % pages;
+        s.shopCursor = nextPage * 6;
+        event.preventDefault();
+        return;
+      }
+      // 2x3 Card Grid click
+      if (y >= 58 && y <= 270 && x >= 18 && x <= 222) {
+        const col = x < 120 ? 0 : 1;
+        const row = Math.floor((y - 58) / 71);
+        const page = Math.floor(s.shopCursor / 6);
+        const targetIdx = page * 6 + row * 2 + col;
+        if (targetIdx < getShopItems(s).length) {
+          if (s.shopCursor === targetIdx) handlePanelAction(s, targetIdx);
+          else { s.shopCursor = targetIdx; handlePanelAction(s, targetIdx); }
+        }
+      }
+      event.preventDefault();
+      return;
+    }
+
+    if (s.view === SOURCE_VIEW.KITCHEN) {
+      // NẤU NGAY button inside top workbench
+      if (y >= 92 && y <= 120 && x >= 56 && x <= 184) {
+        handlePanelAction(s, s.panelCursor);
+        event.preventDefault();
+        return;
+      }
+      // 4 Stove slots (y = 130..168) -> collect ready dish!
+      if (y >= 130 && y <= 168 && x >= 18 && x <= 224) {
+        const slot = Math.floor((x - 18) / 52);
+        const job = s.kitchenQueue?.[slot];
+        if (job?.ready) { collectKitchenDish(s, job.uid); saveSession(); }
+        event.preventDefault();
+        return;
+      }
+      // Bottom 4 recipe rows (y = 172..276)
+      if (y >= 172 && y <= 276) {
+        const recipes = s.catalog.recipes || [];
+        const start = Math.max(0, Math.min(Math.max(0, recipes.length - 4), s.panelCursor - 1));
+        const rIdx = start + Math.floor((y - 172) / 25);
+        if (rIdx >= 0 && rIdx < recipes.length) s.panelCursor = rIdx;
+      }
+      event.preventDefault();
+      return;
+    }
+
+    if (s.view === SOURCE_VIEW.QUESTS || s.view === SOURCE_VIEW.NEIGHBORS) {
+      if (y >= 36 && y <= 55) {
         s.view = x < SCREEN_W / 2 ? SOURCE_VIEW.QUESTS : SOURCE_VIEW.NEIGHBORS;
         s.panelCursor = 0;
         event.preventDefault();
         return;
       }
-    }
-    // Footer close / quick action
-    if (y >= SCREEN_H - 26) {
-      if (s.view === SOURCE_VIEW.BARN && x < SCREEN_W / 2) {
-        sellAllGoods(s);
-        saveSession();
-      } else {
-        s.view = SOURCE_VIEW.WORLD_LAYER;
+      if (s.view === SOURCE_VIEW.NEIGHBORS && y >= 58 && y <= 276) {
+        const list = s.catalog.neighbors || [];
+        const start = Math.max(0, Math.min(Math.max(0, list.length - 8), s.panelCursor - 3));
+        const idx = start + Math.floor((y - 58) / 27);
+        if (idx >= 0 && idx < list.length) { s.panelCursor = idx; handlePanelAction(s, idx); }
+      } else if (s.view === SOURCE_VIEW.QUESTS && y >= 142 && y <= 276) {
+        const list = s.quests || [];
+        const start = Math.max(0, Math.min(Math.max(0, list.length - 5), s.questCursor - 2));
+        const idx = start + Math.floor((y - 142) / 26);
+        if (idx >= 0 && idx < list.length) {
+          s.questCursor = idx;
+          if (list[idx].completed && !list[idx].claimed) handlePanelAction(s, idx);
+        }
       }
       event.preventDefault();
       return;
     }
-    const hasTabs = s.view === SOURCE_VIEW.SHOP || s.view === SOURCE_VIEW.QUESTS || s.view === SOURCE_VIEW.NEIGHBORS;
-    const listTop = hasTabs ? 58 : 42;
-    const maxVisible = hasTabs ? 8 : 9;
-    const rowIdx = Math.floor((y - listTop) / 26);
-    if (rowIdx >= 0 && rowIdx < maxVisible) {
-      const cur = s.view === SOURCE_VIEW.SHOP ? s.shopCursor
-        : s.view === SOURCE_VIEW.BARN ? s.barnCursor
-        : s.view === SOURCE_VIEW.QUESTS ? s.questCursor
-        : s.panelCursor;
-      const totalLen = s.view === SOURCE_VIEW.SHOP ? getShopItems(s).length
-        : s.view === SOURCE_VIEW.KITCHEN ? ((s.kitchenQueue?.length || 0) + (s.catalog.recipes?.length || 0))
-        : 30;
-      const start = Math.max(0, Math.min(Math.max(0, totalLen - maxVisible), cur - Math.floor(maxVisible / 2)));
-      handlePanelAction(s, start + rowIdx);
+
+    // Standard Parchment Lists (Barn, Manor, Coop, Mailbox, Collections, Seed Picker)
+    if (y >= 40 && y <= 276) {
+      const cur = s.view === SOURCE_VIEW.BARN ? s.barnCursor : s.panelCursor;
+      const start = Math.max(0, cur - 4);
+      const idx = start + Math.floor((y - 40) / 26);
+      if (s.view === SOURCE_VIEW.BARN) s.barnCursor = idx;
+      else s.panelCursor = idx;
+      handlePanelAction(s, idx);
     }
     event.preventDefault();
     return;
   }
 
-  // 1:1 Original /6[1] HUD button hit-zones matching exact Gameloft icon art (a.java:24523-24556):
-  // Top-right Pause/Menu icon [41] (x=207, y=8) -> Menu Trang trại, Công cụ & Dinh thự
+  // --- WORLD HUD BUTTONS ---
+  // Zoom toggle badge (202..236, 42..56)
+  if (x >= 200 && y >= 40 && y <= 58) {
+    const levels = [0.75, 0.85, 1.0];
+    const nextIdx = (levels.findIndex(z => Math.abs(z - (s.worldZoom || 1)) < 0.05) + 1) % levels.length;
+    s.worldZoom = levels[nextIdx];
+    clampWorldCamera(s, sourceWorld?.tileMap);
+    event.preventDefault();
+    return;
+  }
+  // Top-right Pause/Menu icon [41]
   if (x >= 198 && y <= 40) {
     s.panelCursor = 0;
     s.view = SOURCE_VIEW.MANOR;
     event.preventDefault();
     return;
   }
-  // Bottom-left Clipboard/Quest icon [52]+[63] (x=5..68, y>=274) -> Nhiệm vụ & 10 Hàng xóm
+  // Return Home button when visiting a neighbor
+  if (s.visitingNeighbor && x >= 152 && y >= SCREEN_H - 40) {
+    returnHomeFarm(s, sourceWorld?.tileMap);
+    event.preventDefault();
+    return;
+  }
+  // Bottom-left Clipboard/Quest icon [52]+[63]
   if (x <= 68 && y >= 274) {
     s.view = SOURCE_VIEW.QUESTS;
     event.preventDefault();
     return;
   }
-  // Bottom-right Market Stand icon [67] (x>=192, y>=274) -> Cửa hàng 5 danh mục
-  if (x >= 192 && y >= 274) {
+  // Bottom-right Market Stand icon [67]
+  if (!s.visitingNeighbor && x >= 192 && y >= 274) {
     s.view = SOURCE_VIEW.SHOP;
     event.preventDefault();
     return;
   }
 
-  // World interaction tap (full-bleed 240x320 viewport!)
-  const wx = x + s.cameraX;
-  const wy = y + s.cameraY;
-  const hit = sourceTileAt(sourceWorld.tileMap, x, y, s.cameraX, s.cameraY);
+  // --- WORLD INTERACTION ---
+  const { wx, wy } = screenToWorld(s, x, y);
 
-  // Mode 1: Placement Mode (Fruit Tree / Animal / Decor)
+  // Visiting Neighbor Farm interaction: tap any crop / tree / animal to walk & help!
+  if (s.visitingNeighbor) {
+    const vn = s.visitingNeighbor;
+    const targetEnt = (vn.entities || []).find(
+      e => (e.category === 49 || e.category === 52 || e.category === 54) && Math.hypot(e.x - wx, e.y - wy) <= 30,
+    );
+    if (targetEnt) {
+      setFarmerWalkTarget(s, targetEnt.x, targetEnt.y + 10, {
+        type: 'neighbor_help', opaqueKey: targetEnt.opaqueKey, worldX: targetEnt.x, worldY: targetEnt.y,
+      });
+      saveSession();
+    } else {
+      setFarmerWalkTarget(s, wx, wy, null);
+    }
+    event.preventDefault();
+    return;
+  }
+
+  const hit = sourceTileAt(sourceWorld.tileMap, wx - s.cameraX, wy - s.cameraY, s.cameraX, s.cameraY);
+
   if (s.activeTool === 'place' && s.placementItem && hit) {
     setFarmerWalkTarget(s, wx, wy, { type: 'place', item: s.placementItem, row: hit.row, col: hit.column, worldX: wx, worldY: wy });
     saveSession();
@@ -994,7 +1262,6 @@ function handleTap(x, y, event) {
     return;
   }
 
-  // Mode 2: Plow Mode -> walk & plow new soil plot immediately
   if (s.activeTool === 'plow' && hit) {
     s.cursorRow = hit.row;
     s.cursorCol = hit.column;
@@ -1004,7 +1271,6 @@ function handleTap(x, y, event) {
     return;
   }
 
-  // Mode 3: Clear Debris Mode (cat 48)
   const clearedSet = new Set(s.clearedDebris || []);
   const hitDebris = (sourceWorld?.farmEntities || []).find(
     e => e.category === 48 && !clearedSet.has(e.opaqueKey) && Math.hypot(e.x - wx, e.y - wy) <= 22,
@@ -1018,27 +1284,26 @@ function handleTap(x, y, event) {
     return;
   }
 
-  // Mode 4: Auto Interaction (Buildings -> Fruit Trees -> Animals -> Plots -> Debris -> Walk)
-  // 4a. Check 19 Buildings (cat 50)
+  // Buildings (cat 50)
   const hitBuilding = (sourceWorld?.farmEntities || []).find(
-    e => e.category === 50 && Math.hypot(e.x - wx, (e.y - 14) - wy) <= 32,
+    e => e.category === 50 && !(e.entityId >= 0 && e.entityId <= 8) && Math.hypot(e.x - wx, (e.y - 14) - wy) <= 34,
   );
   if (hitBuilding) {
-    setFarmerWalkTarget(s, hitBuilding.x, hitBuilding.y + 18, { type: 'building', entityId: hitBuilding.entityId });
+    setFarmerWalkTarget(s, hitBuilding.x, hitBuilding.y + 22, { type: 'building', entityId: hitBuilding.entityId });
     event.preventDefault();
     return;
   }
 
-  // 4b. Check Fruit Trees (cat 52)
-  const hitTree = (s.fruitTrees || []).find(t => Math.hypot(t.worldX - wx, (t.worldY - 12) - wy) <= 22);
+  // Fruit Trees (cat 52)
+  const hitTree = (s.fruitTrees || []).find(t => Math.hypot(t.worldX - wx, (t.worldY - 12) - wy) <= 24);
   if (hitTree && hitTree.ready) {
     setFarmerWalkTarget(s, hitTree.worldX, hitTree.worldY + 10, { type: 'tree', uid: hitTree.uid });
     event.preventDefault();
     return;
   }
 
-  // 4c. Check Animals (cat 54)
-  const hitAnimal = (s.animals || []).find(a => Math.hypot((a.worldX ?? a.col * 36 + 18) - wx, (a.worldY ?? a.row * 18 + 9) - wy) <= 22);
+  // Farm Animals (cat 54)
+  const hitAnimal = (s.animals || []).find(a => Math.hypot((a.worldX ?? a.col * 36 + 18) - wx, (a.worldY ?? a.row * 18 + 9) - wy) <= 24);
   if (hitAnimal) {
     const ax = hitAnimal.worldX ?? (hitAnimal.col * 36 + 18);
     const ay = hitAnimal.worldY ?? (hitAnimal.row * 18 + 9);
@@ -1047,9 +1312,9 @@ function handleTap(x, y, event) {
     return;
   }
 
-  // 4d. Check Plots (cat 49) — empty tilled plots open Seed Picker!
+  // Plots (cat 49)
   let hitPlot = null;
-  let bestDist = 22;
+  let bestDist = 28;
   for (const plot of s.plots.values()) {
     const px = plot.worldX ?? (plot.col * 36 + 18);
     const py = plot.worldY ?? (plot.row * 18 + 9);
@@ -1061,12 +1326,8 @@ function handleTap(x, y, event) {
     s.cursorCol = hitPlot.col;
     const px = hitPlot.worldX ?? (hitPlot.col * 36 + 18);
     const py = hitPlot.worldY ?? (hitPlot.row * 18 + 9);
-    setFarmerWalkTarget(s, px, py + 6, {
-      type: 'tile',
-      row: hitPlot.row,
-      col: hitPlot.col,
-      worldX: px,
-      worldY: py,
+    setFarmerWalkTarget(s, px, py + 8, {
+      type: 'tile', row: hitPlot.row, col: hitPlot.col, worldX: px, worldY: py,
       openSeedPicker: hitPlot.stage === 'tilled',
     });
     saveSession();
@@ -1074,7 +1335,6 @@ function handleTap(x, y, event) {
     return;
   }
 
-  // 4e. Debris tap
   if (hitDebris) {
     setFarmerWalkTarget(s, hitDebris.x, hitDebris.y + 8, {
       type: 'debris', opaqueKey: hitDebris.opaqueKey, worldX: hitDebris.x, worldY: hitDebris.y,
@@ -1084,16 +1344,10 @@ function handleTap(x, y, event) {
     return;
   }
 
-  // 4f. Open grass tap -> walk Farmer there (double-tap plows new plot)
   if (hit) {
-    const sameTile = (s.cursorRow === hit.row && s.cursorCol === hit.column);
     s.cursorRow = hit.row;
     s.cursorCol = hit.column;
-    if (sameTile) {
-      setFarmerWalkTarget(s, wx, wy, { type: 'tile', row: hit.row, col: hit.column, worldX: wx, worldY: wy });
-    } else {
-      setFarmerWalkTarget(s, wx, wy, null);
-    }
+    setFarmerWalkTarget(s, wx, wy, null);
   }
   event.preventDefault();
 }
@@ -1140,11 +1394,12 @@ function onKeyDown(event) {
         s.view = SOURCE_VIEW.QUESTS;
       }
       event.preventDefault();
-    } else if (code === KEY.UP || code === KEY.DOWN) {
-      const delta = code === KEY.UP ? -1 : 1;
+    } else if (code === KEY.UP || code === KEY.DOWN || code === KEY.LEFT || code === KEY.RIGHT) {
+      const delta = (code === KEY.UP || code === KEY.LEFT) ? -1 : 1;
       if (s.view === SOURCE_VIEW.SHOP) {
         const len = Math.max(1, getShopItems(s).length);
-        s.shopCursor = (s.shopCursor + delta + len) % len;
+        const step = (code === KEY.UP || code === KEY.DOWN) ? delta * 2 : delta;
+        s.shopCursor = (s.shopCursor + step + len) % len;
       } else if (s.view === SOURCE_VIEW.BARN) {
         const len = Math.max(1, s.inventory.size + 1);
         s.barnCursor = (s.barnCursor + delta + len) % len;
@@ -1152,7 +1407,8 @@ function onKeyDown(event) {
         const len = Math.max(1, s.quests?.length || 1);
         s.questCursor = (s.questCursor + delta + len) % len;
       } else {
-        const len = s.view === SOURCE_VIEW.KITCHEN ? Math.max(1, (s.kitchenQueue?.length || 0) + 40) : 14;
+        const len = s.view === SOURCE_VIEW.KITCHEN ? (s.catalog.recipes?.length || 1)
+          : s.view === SOURCE_VIEW.NEIGHBORS ? (s.catalog.neighbors?.length || 1) : 16;
         s.panelCursor = (s.panelCursor + delta + len) % len;
       }
       event.preventDefault();
@@ -1174,7 +1430,7 @@ function onKeyDown(event) {
     event.preventDefault();
     return;
   }
-  if (code === KEY.SK_RIGHT && s.activeTool === 'place') {
+  if (code === KEY.SK_RIGHT && s.activeTool !== 'auto') {
     s.activeTool = 'auto';
     s.placementItem = null;
     event.preventDefault();
@@ -1183,16 +1439,31 @@ function onKeyDown(event) {
   if (code === KEY.FIRE || code === 5) {
     const fx = s.farmer ? s.farmer.x : (s.cursorCol * 36 + 18);
     const fy = s.farmer ? s.farmer.y : (s.cursorRow * 18 + 9);
-    const nearBuilding = (sourceWorld?.farmEntities || []).find(e => e.category === 50 && Math.hypot(e.x - fx, e.y - fy) <= 44);
+    if (s.visitingNeighbor) {
+      const targetEnt = (s.visitingNeighbor.entities || []).find(
+        e => (e.category === 49 || e.category === 52 || e.category === 54) && Math.hypot(e.x - fx, e.y - fy) <= 44,
+      );
+      if (targetEnt) {
+        setFarmerWalkTarget(s, targetEnt.x, targetEnt.y + 8, {
+          type: 'neighbor_help', opaqueKey: targetEnt.opaqueKey, worldX: targetEnt.x, worldY: targetEnt.y,
+        });
+        saveSession();
+      }
+      event.preventDefault();
+      return;
+    }
+    const nearBuilding = (sourceWorld?.farmEntities || []).find(
+      e => e.category === 50 && !(e.entityId >= 0 && e.entityId <= 8) && Math.hypot(e.x - fx, e.y - fy) <= 44,
+    );
     const nearTree = (s.fruitTrees || []).find(t => t.ready && Math.hypot(t.worldX - fx, t.worldY - fy) <= 34);
     const nearAnimal = (s.animals || []).find(a => Math.hypot((a.worldX ?? a.col * 36 + 18) - fx, (a.worldY ?? a.row * 18 + 9) - fy) <= 32);
-    let nearPlot = null; let bestD = 32;
+    let nearPlot = null; let bestD = 36;
     for (const p of s.plots.values()) {
       const d = Math.hypot((p.worldX ?? p.col * 36 + 18) - fx, (p.worldY ?? p.row * 18 + 9) - fy);
       if (d < bestD) { bestD = d; nearPlot = p; }
     }
     if (nearPlot) {
-      setFarmerWalkTarget(s, nearPlot.worldX ?? fx, (nearPlot.worldY ?? fy) + 4, {
+      setFarmerWalkTarget(s, nearPlot.worldX ?? fx, (nearPlot.worldY ?? fy) + 6, {
         type: 'tile', row: nearPlot.row, col: nearPlot.col, worldX: nearPlot.worldX, worldY: nearPlot.worldY,
         openSeedPicker: nearPlot.stage === 'tilled',
       });
@@ -1201,16 +1472,15 @@ function onKeyDown(event) {
     } else if (nearAnimal) {
       setFarmerWalkTarget(s, nearAnimal.worldX ?? fx, (nearAnimal.worldY ?? fy) + 6, { type: 'animal', uid: nearAnimal.uid });
     } else if (nearBuilding) {
-      setFarmerWalkTarget(s, nearBuilding.x, nearBuilding.y + 18, { type: 'building', entityId: nearBuilding.entityId });
+      setFarmerWalkTarget(s, nearBuilding.x, nearBuilding.y + 20, { type: 'building', entityId: nearBuilding.entityId });
     } else {
       setFarmerWalkTarget(s, fx, fy, { type: 'tile', row: s.cursorRow, col: s.cursorCol, worldX: fx, worldY: fy });
     }
     saveSession();
   } else if (code === KEY.SK_LEFT) {
-    s.view = SOURCE_VIEW.SHOP;
+    s.view = SOURCE_VIEW.QUESTS;
   } else if (code === KEY.SK_RIGHT) {
-    s.barnCursor = 0;
-    s.view = SOURCE_VIEW.BARN;
+    s.view = SOURCE_VIEW.SHOP;
   } else return;
   event.preventDefault();
 }
@@ -1240,6 +1510,12 @@ if (typeof window !== 'undefined') {
     canvasEl.addEventListener('pointermove', onPointerMove);
     canvasEl.addEventListener('pointerup', onPointerUp);
     canvasEl.addEventListener('pointercancel', onPointerUp);
+    canvasEl.addEventListener('wheel', (e) => {
+      if (app.session?.view !== SOURCE_VIEW.WORLD_LAYER) return;
+      app.session.worldZoom = e.deltaY > 0 ? Math.max(0.75, (app.session.worldZoom || 0.85) - 0.1) : Math.min(1.0, (app.session.worldZoom || 0.85) + 0.1);
+      clampWorldCamera(app.session, sourceWorld?.tileMap);
+      e.preventDefault();
+    }, { passive: false });
     window.addEventListener('keydown', (event) => {
       if (event.code === 'KeyM') {
         app.audioEnabled = !app.audioEnabled;
