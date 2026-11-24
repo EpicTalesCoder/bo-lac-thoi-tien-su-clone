@@ -30,12 +30,11 @@
     "coverImage": "./games/total-tournament/web-port/assets/li1.png",
     "status": "playable",
     "features": [
-      "Phaser 3 WebGL pipeline · canvas 240×320 · sim tick 120ms như MIDP",
-      "5 chế độ: Tử chiến (DM), Đồng đội 4v4, Sinh tồn theo đợt, Cướp cờ (CTF), Anh hùng cuối",
-      "6 loại vũ khí: cưa điện, súng máy, shotgun, bazooka (nổ lan), plasma, beam",
-      "AI bot tấn công/trinh sát với LOS raycast · radar minimap · âm thanh WebAudio tổng hợp",
-      "Song ngữ VI/EN lưu localStorage · kỷ lục theo chế độ",
-      "Sprite giải mã từ JAR gốc (XOR 3 tầng) — analysis/ có source decompiled"
+      "1:1 J2ME Engine gốc: Bitmap font VI có dấu (`fnt.png`+`cf`), HUD sprite `s0.png`, 77ms tick + 60fps lerp",
+      "Chơi nhiều người 2–4 người + AI bots (Tạo/Vào phòng, Đổi phe, Mở Tab 2, Online/LAN/Discord)",
+      "5 chế độ: Tử chiến (DM), Đấu đội (TDM), Sinh tồn, Cướp cờ (CTF), Anh hùng cuối",
+      "6 vũ khí: Cưa điện, Súng máy, Shotgun, Tên lửa nổ lan, Plasma, Laser + nhảy/tụt sàn 1 chiều",
+      "11 đấu trường gốc & bảng AI `wpn`/`wlg` giải mã 100% từ JAR (`analysis/` có source decompiled)"
     ]
   },
   {
@@ -75,6 +74,63 @@
       "First campaign map and unit placements decoded from original resources",
       "Playable reconstruction slice: unit selection, movement highlights, movement and basic combat",
       "Offline only · original score upload and level-download network calls disabled"
+    ]
+  },
+  {
+    "slug": "uno-friends",
+    "title": "UNO & Friends",
+    "originalTitle": "UNO & Friends",
+    "vendor": "Gameloft",
+    "resolution": "640×360",
+    "genre": "Card & Strategy · J2ME Port",
+    "jarFile": "games/uno-friends/original/UNO_Friends_360x640.jar",
+    "playUrl": "./games/uno-friends/web-port/index.html",
+    "directGameUrl": "./games/uno-friends/web-port/index.html",
+    "coverImage": "./games/uno-friends/web-port/assets/cover.png",
+    "status": "playable",
+    "features": [
+      "1:1 J2ME 640×360 BSprite v5 + bitmap font (VI/EN) port from GloftUNO3",
+      "Quick Play, Career World Tour (6 venues × 5 stages), 2v2 Partners, Elimination & Custom 7-0/Stacking rules",
+      "Genuine /4 WAV SFX & MIDI BGM + Avatar & Table Shop + Special Powers",
+      "Online 2–4P Multiplayer qua 4G/5G/WiFi (MQTT-WSS, ntfy HTTPS, /api/mp, BroadcastChannel) + Live Chat & Quick Emote"
+    ]
+  },
+  {
+    "slug": "worms-reloaded",
+    "title": "Worms Reloaded",
+    "originalTitle": "Worms Reloaded",
+    "vendor": "EA Mobile / Team17",
+    "resolution": "320×240",
+    "genre": "Pháo binh Chiến thuật · J2ME Port",
+    "jarFile": "games/worms-reloaded/original/WormsReloaded_s40v6-C3-00_320x240.jar",
+    "playUrl": "./games/worms-reloaded/web-port/index.html",
+    "directGameUrl": "./games/worms-reloaded/web-port/index.html",
+    "coverImage": "./games/worms-reloaded/web-port/assets/cover.png",
+    "status": "playable",
+    "features": [
+      "1:1 J2ME 320×240 Engine: giải mã trực tiếp /index + df0_0..df10_0, RLE 50/51, 31 pack sprite ac, PLTE swap & bitmap font VI/EN/TH gốc",
+      "Địa hình phá hủy 832×448 thời gian thực (B-spline + mặt nạ bit + hố bom Bresenham + minimap 170×64 + 5 chủ đề & pháo đài)",
+      "Đầy đủ 36 vũ khí & tiện ích (Bazooka, Holy Hand Grenade, Banana Bomb, Super Sheep, Air Strike, Concrete Donkey, Jetpack...), Chiến dịch 28 màn, Shop & Body Count",
+      "Đấu trường Online 2–4 đội (?mp=WRxxxx, Host-authoritative Blob Worker + đồng bộ hố bom / vật phẩm / lượt bắn thời gian thực)"
+    ]
+  },
+  {
+    "slug": "pipyaki-pro",
+    "title": "Pipyaki Pro",
+    "originalTitle": "Pipyaki Pro",
+    "vendor": "DaSuppaStudios",
+    "resolution": "240×320",
+    "genre": "Hành động đặt bom / Bắn dưa · J2ME Port",
+    "jarFile": "games/pipyaki-pro/original/pipyaki-pro.jar",
+    "playUrl": "./games/pipyaki-pro/web-port/index.html",
+    "directGameUrl": "./games/pipyaki-pro/web-port/index.html",
+    "coverImage": "./games/pipyaki-pro/web-port/assets/icon.png",
+    "status": "playable",
+    "features": [
+      "1:1 J2ME 240×320 Engine: Intro parallax `wb`, Menu xoay phóng to/nhỏ `qb`/`gb`, Bitmap font VI có dấu (`font.png`+`font.cfg`) & MIDI gốc",
+      "25 màn Chiến dịch cốt truyện đầy đủ + Cửa hàng 14 vũ khí (Dưa hấu, Gạch ngói, Dứa rừng, Tất thối, Bừa cào, Bom bẫy...), 6 trang bị & 11 kỹ năng nâng cấp",
+      "Chế độ Đấu trường (Deathmatch, Team Match, Capture the Flag) trên 9 bản đồ gốc cùng AI Bots",
+      "Chơi nhiều người 2–4 người Online / LAN / Đa Tab (?mp=PKxxxx, Host-authoritative 25Hz + BroadcastChannel / API / WSS)"
     ]
   }
 ]
