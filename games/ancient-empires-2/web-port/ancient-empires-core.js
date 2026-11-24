@@ -30,10 +30,12 @@ export function movementCost({ x, y, unitType, terrainProperty, occupiedUnit, un
     return IMPASSABLE_COST;
   }
   if (uType === 11) {
-    return terrainProperty === 4 ? IMPASSABLE_COST : MOVEMENT_COST_BY_PROPERTY[0];
+    // Port of c.java:502-516: Crystal is blocked by mountains (prop 4), otherwise uses i.g[terrainProperty].
+    if (terrainProperty === 4) return IMPASSABLE_COST;
+  } else {
+    if ((uMask & 1) !== 0) return 1; // c.java:477 flying ignores terrain
+    if ((uMask & 2) !== 0 && terrainProperty === 5) return 1; // c.java:480 aquatic in water
   }
-  if ((uMask & 1) !== 0) return 1; // c.java:477 flying ignores terrain
-  if ((uMask & 2) !== 0 && terrainProperty === 5) return 1; // c.java:480 aquatic in water
   if (terrainProperty == null || terrainProperty < 0 || terrainProperty >= MOVEMENT_COST_BY_PROPERTY.length) {
     return OUT_OF_BOUNDS_COST;
   }
@@ -327,6 +329,7 @@ export function applyLevelUp(unit) {
 export function getAttackableTargets(unit, units, teamForPlayer) {
   const minR = unit.minRange ?? 1;
   const maxR = unit.maxRange ?? 1;
+  if (minR <= 0 || maxR <= 0) return [];
   // Catapult (minRange > 1) cannot fire after moving in AE2 unless still at start position
   if (minR > 1 && unit.movedThisTurn) return [];
   return units.filter(other => {
@@ -335,6 +338,58 @@ export function getAttackableTargets(unit, units, teamForPlayer) {
     const dist = Math.abs(other.x - unit.x) + Math.abs(other.y - unit.y);
     return dist >= minR && dist <= maxR;
   });
+}
+
+// Port of c.java:251-298: exact move + attack reachability overlay (`range[x][y] === 127` for attack perimeter).
+export function calculateAttackRangeCells({
+  unit,
+  width,
+  height,
+  terrainAt,
+  unitAt,
+  teamForPlayer,
+  reachability = null,
+  fromCurrentOnly = false,
+}) {
+  if (!unit) return { moveCells: [], attackCells: [], attackOnlyCells: [] };
+  const minR = unit.minRange ?? 1;
+  const maxR = unit.maxRange ?? 1;
+  const stationaryOnly = fromCurrentOnly || ((unit.movementMask ?? 0) & 512) !== 0;
+  const reach = reachability ?? (fromCurrentOnly ? { costs: new Map(), cells: [] } : calculateReachability({
+    unit,
+    width,
+    height,
+    terrainAt,
+    unitAt,
+    teamForPlayer,
+  }));
+  const moveCells = reach.cells || [];
+  const moveSet = new Set([`${unit.x},${unit.y}`, ...moveCells.map(([cx, cy]) => `${cx},${cy}`)]);
+  const origins = stationaryOnly ? [[unit.x, unit.y]] : [[unit.x, unit.y], ...moveCells];
+
+  const attackCells = [];
+  const attackOnlyCells = [];
+  if (minR > 0 && maxR >= minR) {
+    const attackSet = new Set();
+    for (const [ox, oy] of origins) {
+      const x0 = Math.max(0, ox - maxR);
+      const y0 = Math.max(0, oy - maxR);
+      const x1 = Math.min(width - 1, ox + maxR);
+      const y1 = Math.min(height - 1, oy + maxR);
+      for (let x = x0; x <= x1; x++) {
+        for (let y = y0; y <= y1; y++) {
+          const dist = Math.abs(x - ox) + Math.abs(y - oy);
+          if (dist < minR || dist > maxR) continue;
+          const k = `${x},${y}`;
+          if (attackSet.has(k)) continue;
+          attackSet.add(k);
+          attackCells.push([x, y]);
+          if (!moveSet.has(k)) attackOnlyCells.push([x, y]);
+        }
+      }
+    }
+  }
+  return { moveCells, attackCells, attackOnlyCells };
 }
 
 // Port of c.java:336-340: unmoved Catapult (type 7) can bombard unoccupied non-allied Towns (prop 8, tile >= 37)

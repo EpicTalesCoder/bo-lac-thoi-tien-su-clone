@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  calculateAttackRangeCells,
   calculateReachability,
+  canCounterattack,
   traceRoute,
   movementCost,
   resolveOriginalDamage,
@@ -9,6 +11,7 @@ import {
   buildStraightPath,
   computeUnitStats,
   executeCombat,
+  getAttackableTargets,
   getTileActionForUnit,
   chooseAiUnitAction,
 } from '../ancient-empires-core.js';
@@ -136,4 +139,43 @@ test('capture/repair predicates and AI scoring prioritize objective capture and 
 
 test('source movement path is straight x-first then y with signed-short narrowing', () => {
   assert.deepEqual(buildStraightPath(2, 3, 4, 1), [[2, 3], [3, 3], [4, 3], [4, 2], [4, 1]]);
+});
+
+test('crystal terrain cost, attack range perimeters, counterattack gates, and all 12 unit range rules match c.java', () => {
+  const teamForPlayer = p => p;
+  const crystal = { id: 1, type: 11, playerSelector: 1, movementRange: 4, movementMask: 0, minRange: 0, maxRange: 0 };
+  assert.equal(movementCost({ x: 0, y: 0, unitType: 11, terrainProperty: 2, occupiedUnit: null, unit: crystal, teamForPlayer }), 2);
+  assert.equal(movementCost({ x: 0, y: 0, unitType: 11, terrainProperty: 5, occupiedUnit: null, unit: crystal, teamForPlayer }), 3);
+  assert.equal(movementCost({ x: 0, y: 0, unitType: 11, terrainProperty: 4, occupiedUnit: null, unit: crystal, teamForPlayer }), 1000);
+
+  const archer = { id: 2, type: 1, x: 3, y: 3, playerSelector: 1, hp: 100, movementRange: 5, movementMask: 64, minRange: 1, maxRange: 2, action: 0 };
+  const archerTargetFar = { id: 3, type: 0, x: 5, y: 3, playerSelector: 2, hp: 100, minRange: 1, maxRange: 1, action: 0 };
+  const catapult = { id: 4, type: 7, x: 2, y: 2, playerSelector: 2, hp: 100, movementRange: 4, movementMask: 512, minRange: 2, maxRange: 4, action: 0 };
+  assert.equal(getAttackableTargets(archer, [archer, archerTargetFar], teamForPlayer).length, 1);
+  assert.equal(canCounterattack(archer, archerTargetFar.x, archerTargetFar.y), false, 'archer only counterattacks at dist === 1');
+  assert.equal(canCounterattack(catapult, 2, 3), false, 'catapult minRange === 2 cannot counterattack at dist === 1');
+  assert.equal(canCounterattack({ ...crystal, x: 2, y: 3, action: 0, hp: 100 }, 2, 2), false, 'crystal minRange === 0 cannot counterattack');
+
+  const archerGrid = calculateAttackRangeCells({
+    unit: archer,
+    width: 9,
+    height: 9,
+    terrainAt: () => 0,
+    unitAt: () => null,
+    teamForPlayer,
+    fromCurrentOnly: true,
+  });
+  assert.equal(archerGrid.attackCells.some(([x, y]) => x === 5 && y === 3), true);
+  assert.equal(archerGrid.attackCells.some(([x, y]) => x === 6 && y === 3), false);
+
+  const catGrid = calculateAttackRangeCells({
+    unit: catapult,
+    width: 9,
+    height: 9,
+    terrainAt: () => 0,
+    unitAt: () => null,
+    teamForPlayer,
+  });
+  assert.equal(catGrid.attackOnlyCells.some(([x, y]) => x === 6 && y === 2), true, 'catapult reaches dist 4 from stationary tile');
+  assert.equal(catGrid.attackOnlyCells.some(([x, y]) => x === 7 && y === 2), false, 'catapult cannot move+attack (mask 512)');
 });

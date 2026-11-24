@@ -67,7 +67,7 @@ function drawMapTile(ctx, assets, rawTile, x, y) {
 export function renderOriginalBoard(ctx, {
   map, assets, cameraX = 0, cameraY = 0, viewportWidth = 240, viewportHeight = 288,
   units = map.units, cursor = null, selectedCursor = null, overlays = [],
-  rangeCells = null, targetCells = null, path = null,
+  rangeCells = null, attackRangeCells = null, targetCells = null, path = null,
   waterAnimFrame = 0, floatTexts = null, mapEffects = null,
 }) {
   if (!ctx || !map || !assets) throw new TypeError('renderOriginalBoard requires context, map and decoded assets');
@@ -107,16 +107,29 @@ export function renderOriginalBoard(ctx, {
       }
     }
 
-    // Port of i.java:3060-3069 & lang[199]: red alpha movement range squares under units.
+    // Port of i.java:592, 3060-3069 & lang[199]: alpha[0] pink move tiles & alpha[1] gold/red attack range tiles.
+    const alphaImg = assets.images?.alpha;
     if (rangeCells && rangeCells.length > 0) {
-      const alphaImg = assets.images?.alpha;
       for (const [rx, ry] of rangeCells) {
-        const dx = rx * 24 - cameraX;
-        const dy = ry * 24 - cameraY;
+        const dx = rx * 24 - drawCamX;
+        const dy = ry * 24 - drawCamY;
         if (alphaImg) {
           drawRegionMIDP(ctx, alphaImg, 0, 0, 24, 24, 0, dx, dy, MIDP.LEFT | MIDP.TOP);
         } else {
           ctx.fillStyle = 'rgba(225, 48, 86, 0.36)';
+          ctx.fillRect(dx, dy, 24, 24);
+        }
+      }
+    }
+
+    if (attackRangeCells && attackRangeCells.length > 0) {
+      for (const [ax, ay] of attackRangeCells) {
+        const dx = ax * 24 - drawCamX;
+        const dy = ay * 24 - drawCamY;
+        if (alphaImg && (alphaImg.naturalWidth || 0) >= 48) {
+          drawRegionMIDP(ctx, alphaImg, 24, 0, 24, 24, 0, dx, dy, MIDP.LEFT | MIDP.TOP);
+        } else {
+          ctx.fillStyle = 'rgba(244, 198, 64, 0.32)';
           ctx.fillRect(dx, dy, 24, 24);
         }
       }

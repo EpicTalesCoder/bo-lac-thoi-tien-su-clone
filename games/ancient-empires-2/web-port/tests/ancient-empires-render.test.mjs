@@ -532,3 +532,176 @@ test('renderOriginalBoard draws full 26x26 4-corner red cursor centered at (+12,
   // b_smoke pixel centered at (42, 40) with 13x10 -> (36, 35)
   assert.deepEqual([smokeCall[6], smokeCall[7]], [36, 35]);
 });
+
+test('renderOriginalBoard draws attackRangeCells from alpha frame 1 and BattleScene runs unit-specific animations', async () => {
+  const [mapBytes, tilesBytes, propertyBytes, unitsBytes, archerBytes, arrowBytes, skelBytes, slashBytes, golemBytes, craterBytes, smokeBytes, bSmokeBytes, kingBytes, waveBytes, kingSlashBytes, wyvernBytes] = await Promise.all([
+    readFile(asset('m0')), readFile(asset('tiles0.sprite')), readFile(asset('tiles0.prop')), readFile(asset('units.bin')),
+    readFile(asset('archer.sprite')), readFile(asset('archer_arrow.sprite')), readFile(asset('skeleton.sprite')), readFile(asset('slash.sprite')),
+    readFile(asset('golem.sprite')), readFile(asset('crater.sprite')), readFile(asset('smoke.sprite')), readFile(asset('b_smoke.sprite')),
+    readFile(asset('king.sprite')), readFile(asset('kingwave.sprite')), readFile(asset('kingslash.sprite')), readFile(asset('wyvern.sprite')),
+  ]);
+  const map = decodeMap(new Uint8Array(mapBytes));
+  const tilesSprite = decodeSprite(new Uint8Array(tilesBytes));
+  const terrain = decodeTerrainProperties(new Uint8Array(propertyBytes));
+  const unitRecords = decodeUnits(new Uint8Array(unitsBytes));
+  const img = (name, w, h) => ({ name, naturalWidth: w, naturalHeight: h });
+
+  // 1. Verify attackRangeCells uses second 24x24 cell in alpha.png (sx = 24)
+  {
+    const { ctx, calls } = makeContext();
+    renderOriginalBoard(ctx, {
+      map,
+      assets: {
+        terrain,
+        sprites: { tiles0: tilesSprite },
+        images: { alpha: img('alpha', 48, 24) },
+        frameImages: { tiles0: Array.from({ length: 37 }, (_, i) => img(`t${i}`, 24, 24)) },
+      },
+      viewportWidth: 48,
+      viewportHeight: 48,
+      units: [],
+      rangeCells: [[0, 0]],
+      attackRangeCells: [[1, 0]],
+    });
+    const alphaDraws = calls.filter(c => c[0] === 'drawImage' && c[1].name === 'alpha');
+    assert.equal(alphaDraws.length, 2);
+    assert.equal(alphaDraws[0][2], 0);
+    assert.equal(alphaDraws[1][2], 24);
+  }
+
+  // 2. Verify Archer fires flying & stuck arrows while staying horizontally planted at launch
+  const unitFamilies = ['soldier', 'archer', 'lizard', 'wizard', 'wisp', 'spider', 'golem', 'catapult', 'wyvern', 'king', 'skeleton', 'crystal'];
+  const commonSprites = {
+    archer: decodeSprite(new Uint8Array(archerBytes)),
+    archer_arrow: decodeSprite(new Uint8Array(arrowBytes)),
+    skeleton: decodeSprite(new Uint8Array(skelBytes)),
+    slash: decodeSprite(new Uint8Array(slashBytes)),
+    golem: decodeSprite(new Uint8Array(golemBytes)),
+    crater: decodeSprite(new Uint8Array(craterBytes)),
+    smoke: decodeSprite(new Uint8Array(smokeBytes)),
+    b_smoke: decodeSprite(new Uint8Array(bSmokeBytes)),
+    king: decodeSprite(new Uint8Array(kingBytes)),
+    kingwave: decodeSprite(new Uint8Array(waveBytes)),
+    kingslash: decodeSprite(new Uint8Array(kingSlashBytes)),
+    wyvern: decodeSprite(new Uint8Array(wyvernBytes)),
+  };
+  const makeBattleCtx = () => {
+    const { ctx, calls } = makeContext();
+    ctx.fillStyle = ''; ctx.strokeStyle = ''; ctx.lineWidth = 1; ctx.globalAlpha = 1;
+    ctx.fillRect = () => {}; ctx.ellipse = () => {}; ctx.arc = () => {};
+    ctx.moveTo = (...a) => calls.push(['moveTo', ...a]);
+    ctx.lineTo = (...a) => calls.push(['lineTo', ...a]);
+    ctx.closePath = () => {}; ctx.fill = () => calls.push(['fill']); ctx.stroke = () => calls.push(['stroke']);
+    ctx.strokeText = () => {}; ctx.fillText = () => {};
+    return { ctx, calls };
+  };
+
+  const archerScene = new BattleScene({
+    attacker: { type: 1, palette: 1, hp: 100 },
+    attackerName: 'ARCHER',
+    attackerTerrain: 1,
+    defender: { type: 10, palette: 2, hp: 100 },
+    defenderName: 'SKELETON',
+    defenderTerrain: 1,
+    combatResult: { attackerHpBefore: 100, defenderHpBefore: 100, attackerHpAfter: 100, defenderHpAfter: 60, damage: 40, counterDamage: 0 },
+    assets: {
+      unitRecords,
+      unitFamilies,
+      sprites: commonSprites,
+      images: {
+        archer: img('archer', 124, 37),
+        skeleton: img('skeleton', 40, 44),
+        b_smoke: img('b_smoke', 52, 10),
+        slash: img('slash', 21, 27),
+      },
+      frameImages: {
+        archer_arrow: [img('archer_arrow_00', 24, 13), img('archer_arrow_01', 24, 13)],
+      },
+      coloredPalettes: { 1: {}, 2: {} },
+    },
+  });
+  const idleCtx = makeBattleCtx();
+  archerScene.elapsed = 0;
+  archerScene.render(idleCtx.ctx);
+  const archerIdleX = idleCtx.calls.find(c => c[0] === 'drawImage' && c[1].name === 'archer')[6];
+
+  const flightCtx = makeBattleCtx();
+  archerScene.elapsed = 400;
+  archerScene.render(flightCtx.ctx);
+  const archerShotDraws = flightCtx.calls.filter(c => c[0] === 'drawImage');
+  assert.equal(archerShotDraws.some(c => c[1].name === 'archer_arrow_00'), true, 'archer launches flying arrow');
+  assert.equal(archerShotDraws.find(c => c[1].name === 'archer')[6], archerIdleX, 'archer does not slide forward on shoot');
+
+  const stuckCtx = makeBattleCtx();
+  archerScene.elapsed = 600;
+  archerScene.render(stuckCtx.ctx);
+  assert.equal(stuckCtx.calls.some(c => c[0] === 'drawImage' && c[1].name === 'archer_arrow_01'), true, 'archer arrow sticks on target impact');
+
+  // 3. Verify Skeleton runs through frame sequence [2..5] + slashes; Golem summons crater + smoke; King summons kingslash + kingwave
+  const skelScene = new BattleScene({
+    attacker: { type: 10, palette: 1, hp: 100 },
+    attackerName: 'SKELETON',
+    attackerTerrain: 1,
+    defender: { type: 6, palette: 2, hp: 100 },
+    defenderName: 'GOLEM',
+    defenderTerrain: 4,
+    combatResult: { attackerHpBefore: 100, defenderHpBefore: 100, attackerHpAfter: 60, defenderHpAfter: 70, damage: 30, counterDamage: 40 },
+    assets: {
+      unitRecords,
+      unitFamilies,
+      sprites: commonSprites,
+      images: {
+        golem: img('golem', 188, 47),
+        slash: img('slash', 21, 27),
+        crater: img('crater', 53, 19),
+        smoke: img('smoke', 96, 20),
+        b_smoke: img('b_smoke', 52, 10),
+      },
+      frameImages: {
+        skeleton: Array.from({ length: 7 }, (_, i) => img(`skeleton_0${i}`, 40, 44)),
+      },
+      coloredPalettes: { 1: {}, 2: {} },
+    },
+  });
+  const skelRunCtx = makeBattleCtx();
+  skelScene.elapsed = 300;
+  skelScene.render(skelRunCtx.ctx);
+  assert.equal(skelRunCtx.calls.some(c => c[0] === 'drawImage' && /^skeleton_0[2-5]$/.test(c[1].name)), true, 'skeleton uses sprint frames');
+  const golemCounterCtx = makeBattleCtx();
+  skelScene.elapsed = skelScene.counterStart + 500;
+  skelScene.render(golemCounterCtx.ctx);
+  assert.equal(golemCounterCtx.calls.some(c => c[0] === 'drawImage' && c[1].name === 'crater'), true, 'golem impact spawns crater');
+  assert.equal(golemCounterCtx.calls.some(c => c[0] === 'drawImage' && c[1].name === 'smoke'), true, 'golem impact spawns smoke');
+
+  const kingScene = new BattleScene({
+    attacker: { type: 9, palette: 1, kingHead: 0, hp: 100 },
+    attackerName: 'COMMANDER',
+    attackerTerrain: 1,
+    defender: { type: 8, palette: 2, hp: 100 },
+    defenderName: 'DRAGON',
+    defenderTerrain: 4,
+    combatResult: { attackerHpBefore: 100, defenderHpBefore: 100, attackerHpAfter: 80, defenderHpAfter: 60, damage: 40, counterDamage: 20 },
+    assets: {
+      unitRecords,
+      unitFamilies,
+      sprites: commonSprites,
+      images: { kingslash: img('kingslash', 41, 72), kingwave: img('kingwave', 96, 34), b_smoke: img('b_smoke', 52, 10) },
+      frameImages: {
+        king: [img('king_00', 61, 38), img('king_01', 61, 38), img('king_02', 48, 75)],
+        wyvern: [img('wyvern_00', 85, 56), img('wyvern_01', 85, 56), img('wyvern_02', 85, 56)],
+      },
+      coloredPalettes: { 1: {}, 2: {} },
+    },
+  });
+  const kingWaveCtx = makeBattleCtx();
+  kingScene.elapsed = 420;
+  kingScene.render(kingWaveCtx.ctx);
+  const waveDraws = kingWaveCtx.calls.filter(c => c[0] === 'drawImage' && c[1].name === 'kingwave');
+  assert.equal(kingWaveCtx.calls.some(c => c[0] === 'drawImage' && c[1].name === 'kingslash'), true, 'king draws kingslash aura');
+  assert.equal(waveDraws.length, 2, 'king launches dual kingwaves');
+  const dragonBreathCtx = makeBattleCtx();
+  kingScene.elapsed = kingScene.counterStart + 420;
+  kingScene.render(dragonBreathCtx.ctx);
+  assert.equal(dragonBreathCtx.calls.some(c => c[0] === 'drawImage' && c[1].name === 'wyvern_02'), true, 'dragon uses roaring frame 2');
+  assert.equal(dragonBreathCtx.calls.filter(c => c[0] === 'fill').length >= 2, true, 'dragon breathes fire beam polygon');
+});

@@ -3,7 +3,9 @@ import {
   advancePlayerTurn,
   attackModifierFor,
   buildingPaletteFromTile,
+  calculateAttackRangeCells,
   calculateReachability,
+  canCounterattack,
   chooseAiUnitAction,
   computeUnitStats,
   defenseModifierFor,
@@ -222,6 +224,8 @@ class AncientEmpiresWeb {
     this.reachable = null;
     this.previewPath = null;
     this.attackTargets = [];
+    this.attackRangeCells = null;
+    this.inspectedRange = null;
     this.targetCandidates = [];
     this.targetCursor = 0;
     this.targetKind = 'attack';
@@ -353,6 +357,8 @@ class AncientEmpiresWeb {
     this.reachable = null;
     this.previewPath = null;
     this.attackTargets = [];
+    this.attackRangeCells = null;
+    this.inspectedRange = null;
     this.targetCandidates = [];
     this.recruitCastle = null;
     this.actionRing = null;
@@ -542,6 +548,8 @@ class AncientEmpiresWeb {
     this.reachable = null;
     this.previewPath = null;
     this.attackTargets = [];
+    this.attackRangeCells = null;
+    this.inspectedRange = null;
     this.targetCandidates = [];
     this.moveAnim = null;
     this.battleScene = null;
@@ -1677,13 +1685,55 @@ class AncientEmpiresWeb {
     };
     if (movement[code]) { this.moveCursor(...movement[code]); return; }
     if (code === 'Enter' || code === 'Space' || code === 'Digit5') { this.selectTile(this.cursor.x, this.cursor.y); return; }
+    if (code === 'Digit0' || code === 'Numpad0') { this.toggleInspectRange(this.cursor.x, this.cursor.y); return; }
     if (code === 'KeyK' || code === 'Digit9') { this.focusCommander(); return; }
     if (code === 'Escape' || code === 'KeyQ' || code === 'Tab') {
-      if (this.selected || this.reachable || this.attackTargets.length > 0) this.cancelSelection();
+      if (this.selected || this.reachable || this.attackTargets.length > 0 || this.inspectedRange) this.cancelSelection();
       else { this.persistState(); this.pauseCursor = 0; this.state = 'pauseMenu'; this.paint(); }
       return;
     }
     if (code === 'KeyE' || code === 'Backspace') this.endTurn();
+  }
+
+  computeFullRangeOverlay(unit, fromCurrentOnly = false) {
+    return calculateAttackRangeCells({
+      unit,
+      width: this.assets.map.width,
+      height: this.assets.map.height,
+      terrainAt: (x, y) => this.tileProperty(x, y) ?? 0,
+      unitAt: (x, y) => this.unitAt(x, y),
+      teamForPlayer: p => this.teamFor(p),
+      fromCurrentOnly,
+    });
+  }
+
+  // Port of i.java:2709-2725: pressing '0' on any unit toggles full move + outer attack range preview
+  toggleInspectRange(x, y) {
+    if (this.selected) {
+      if (this.attackRangeCells?.length) {
+        this.attackRangeCells = null;
+      } else {
+        this.attackRangeCells = calculateAttackRangeCells({
+          unit: this.selected,
+          width: this.assets.map.width,
+          height: this.assets.map.height,
+          terrainAt: (tx, ty) => this.tileProperty(tx, ty) ?? 0,
+          unitAt: (tx, ty) => this.unitAt(tx, ty),
+          teamForPlayer: p => this.teamFor(p),
+          reachability: this.reachable,
+        }).attackOnlyCells;
+      }
+      this.paint();
+      return;
+    }
+    const unit = this.unitAt(x, y);
+    if (!unit || (this.inspectedRange && this.inspectedRange.unitId === unit.id)) {
+      this.inspectedRange = null;
+    } else {
+      const grid = this.computeFullRangeOverlay(unit, false);
+      this.inspectedRange = { unitId: unit.id, ...grid };
+    }
+    this.paint();
   }
 
   focusCommander() {
@@ -1800,6 +1850,8 @@ class AncientEmpiresWeb {
     this.reachable = null;
     this.previewPath = null;
     this.attackTargets = [];
+    this.attackRangeCells = null;
+    this.inspectedRange = null;
     this.targetCandidates = [];
     this.actionOptions = [];
     this.moveAnim = null;
@@ -1854,10 +1906,20 @@ class AncientEmpiresWeb {
 
     // Select own idle unit
     if (target && target.playerSelector === mySelector && target.action === 0) {
+      this.inspectedRange = null;
       this.selected = target;
       this.moveOrigin = { x: target.x, y: target.y };
       this.reachable = this.showRange(target);
       this.previewPath = null;
+      this.attackRangeCells = calculateAttackRangeCells({
+        unit: target,
+        width: this.assets.map.width,
+        height: this.assets.map.height,
+        terrainAt: (tx, ty) => this.tileProperty(tx, ty) ?? 0,
+        unitAt: (tx, ty) => this.unitAt(tx, ty),
+        teamForPlayer: p => this.teamFor(p),
+        reachability: this.reachable,
+      }).attackOnlyCells;
       this.attackTargets = [
         ...getAttackableTargets(target, this.units, p => this.teamFor(p)),
         ...this.targetableTownsFor(target),
@@ -1868,9 +1930,19 @@ class AncientEmpiresWeb {
 
     // Click own Castle (property 9) when empty -> open Recruit Menu!
     if (!target && this.tileProperty(x, y) === 9 && this.isPropertyOwnedBy(x, y, this.playerIndex)) {
+      this.inspectedRange = null;
       this.recruitCastle = { x, y };
       this.recruitCursor = 0;
       this.state = 'recruitMenu';
+      this.paint();
+      return;
+    }
+
+    // Clicking an enemy or already-acted unit toggles its move+attack threat range; empty ground clears it
+    if (target) {
+      this.toggleInspectRange(x, y);
+    } else if (this.inspectedRange) {
+      this.inspectedRange = null;
       this.paint();
     }
   }
@@ -1942,6 +2014,11 @@ class AncientEmpiresWeb {
     this.targetKind = kind;
     this.targetCandidates = candidates;
     this.targetCursor = Math.max(0, Math.min(candidates.length - 1, startIdx));
+    if (this.selected && (kind === 'attack' || kind === 'destroyTown')) {
+      this.attackRangeCells = this.computeFullRangeOverlay(this.selected, true).attackCells;
+    } else {
+      this.attackRangeCells = null;
+    }
     const focused = candidates[this.targetCursor];
     if (focused) {
       this.cursor = { x: focused.x, y: focused.y };
@@ -1986,6 +2063,8 @@ class AncientEmpiresWeb {
     this.reachable = null;
     this.previewPath = null;
     this.attackTargets = [];
+    this.attackRangeCells = null;
+    this.inspectedRange = null;
     this.targetCandidates = [];
     this.state = 'play';
     this.persistState();
@@ -2014,6 +2093,8 @@ class AncientEmpiresWeb {
     this.reachable = null;
     this.previewPath = null;
     this.attackTargets = [];
+    this.attackRangeCells = null;
+    this.inspectedRange = null;
     this.targetCandidates = [];
     this.showToast('RAISED SKELETON!', 900);
     this.persistState();
@@ -2060,6 +2141,8 @@ class AncientEmpiresWeb {
     this.reachable = null;
     this.previewPath = null;
     this.attackTargets = [];
+    this.attackRangeCells = null;
+    this.inspectedRange = null;
     this.targetCandidates = [];
     this.state = this.state === 'dialog' ? 'dialog' : 'play';
     this.persistState();
@@ -2083,6 +2166,8 @@ class AncientEmpiresWeb {
     this.reachable = null;
     this.previewPath = null;
     this.attackTargets = [];
+    this.attackRangeCells = null;
+    this.inspectedRange = null;
     this.targetCandidates = [];
 
     const finalize = () => {
@@ -2187,8 +2272,22 @@ class AncientEmpiresWeb {
     if (this.selected && this.reachable) {
       if (this.reachable.costs.has(`${this.cursor.x},${this.cursor.y}`)) {
         this.previewPath = traceRoute(this.reachable, this.selected.x, this.selected.y, this.cursor.x, this.cursor.y);
+        const virtualUnit = {
+          ...this.selected,
+          x: this.cursor.x,
+          y: this.cursor.y,
+          movedThisTurn: this.cursor.x !== this.selected.x || this.cursor.y !== this.selected.y,
+        };
+        this.attackTargets = [
+          ...getAttackableTargets(virtualUnit, this.units, p => this.teamFor(p)),
+          ...this.targetableTownsFor(virtualUnit),
+        ];
       } else {
         this.previewPath = null;
+        this.attackTargets = [
+          ...getAttackableTargets(this.selected, this.units, p => this.teamFor(p)),
+          ...this.targetableTownsFor(this.selected),
+        ];
       }
     }
     this.paint();
@@ -2208,6 +2307,8 @@ class AncientEmpiresWeb {
     this.reachable = null;
     this.previewPath = null;
     this.attackTargets = [];
+    this.attackRangeCells = null;
+    this.inspectedRange = null;
     this.targetCandidates = [];
     const res = advancePlayerTurn({
       playerIndex: this.playerIndex,
@@ -2738,8 +2839,7 @@ class AncientEmpiresWeb {
     const aMod = attackModifierFor(attacker, target, attacker.x, attacker.y, aProp, this.rawTile(attacker.x, attacker.y));
     const aDef = defenseModifierFor(attacker, attacker.x, attacker.y, aProp, this.rawTile(attacker.x, attacker.y));
     const dDef = defenseModifierFor(target, target.x, target.y, dProp, this.rawTile(target.x, target.y));
-    const dist = Math.abs(attacker.x - target.x) + Math.abs(attacker.y - target.y);
-    const canCounter = dist >= (target.attackRangeMin ?? 1) && dist <= (target.attackRangeMax ?? 1);
+    const canCounter = canCounterattack(target, attacker.x, attacker.y);
     const cMod = canCounter
       ? attackModifierFor(target, attacker, target.x, target.y, dProp, this.rawTile(target.x, target.y))
       : 0;
@@ -2995,7 +3095,12 @@ class AncientEmpiresWeb {
         ? null
         : { ...this.cursor, frameIndex: cursorFrame },
       selectedCursor: selBracket,
-      rangeCells: (this.state === 'play' || this.state === 'moveAnim') ? this.reachable?.cells : null,
+      rangeCells: (this.state === 'play' || this.state === 'moveAnim')
+        ? (this.reachable?.cells ?? this.inspectedRange?.moveCells ?? null)
+        : null,
+      attackRangeCells: (this.state === 'targetSelect')
+        ? this.attackRangeCells
+        : (this.state === 'play' ? (this.selected ? this.attackRangeCells : (this.inspectedRange?.attackOnlyCells ?? null)) : null),
       targetCells: (this.state === 'play' || this.state === 'targetSelect')
         ? (this.state === 'targetSelect' ? this.targetCandidates.map(t => [t.x, t.y]) : this.attackTargets.map(t => [t.x, t.y]))
         : null,
