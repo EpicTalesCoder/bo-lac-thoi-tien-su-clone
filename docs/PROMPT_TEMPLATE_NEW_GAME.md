@@ -22,8 +22,8 @@ BẮT BUỘC làm đúng theo thứ tự sau (không bỏ bước, không tự b
 3. TỰ LẬP KẾ HOẠCH 4 CHẶNG RÕ RÀNG VÀ LÀM TỪNG CHẶNG:
    - Chặng 1 (Phân tích — chưa sửa web-port): Viết/cập nhật `games/<slug>/analysis/CLASS-RESPONSIBILITIES.md` (vai trò từng class, state machine, cấu trúc binary map/sprite/BSprite/text, công thức gốc kèm `Class.java:line`).
    - Chặng 2 (Giải mã & Vẽ 1:1): Viết decoder đọc trực tiếp map/sprite/palette/text gốc từ `assets/` + port hàm `paint()` vào `render-original.js` (đúng Anchor, 8 phép `drawRegionMIDP`, `setClip`, `imageSmoothingEnabled = false`, KHÔNG dùng `fillRect` thay sprite/map gốc).
-   - Chặng 3 (Gameplay chuẩn mã gốc): Port vòng lặp `run()/tick()`, điều khiển (chuột + phím), chiến đấu/kinh tế/AI/màn chơi/lưu game vào `game.js` với comment dẫn chiếu `// Port of Class.java:line`.
-   - Chặng 4 (Cổng kiểm duyệt cứng & Build): Viết unit test kiểm tra decoder + chạy `python3 tools/verify-port-parity.py <slug>` (BẮT BUỘC ra `RESULT: PASS`, exit 0), chạy `python3 tools/build-portal.py`, kiểm tra trực quan trên localhost (không lỗi Console) rồi mới báo hoàn thành.
+   - Chặng 3 (Gameplay + Multiplayer chuẩn mã gốc): Port vòng lặp `run()/tick()`, điều khiển (chuột + phím), chiến đấu/kinh tế/AI/màn chơi/lưu game vào `game.js` với comment dẫn chiếu `// Port of Class.java:line`, **kèm chế độ Chơi nhiều người 2–4 người mở được cả từ Menu chính trong game lẫn thanh công cụ** (`CHƠI ONLINE` / `MULTIPLAYER` + `#mp-lobby`, `multiplayer.js`, Host Web Worker, Quad Transport `/api/mp` / `BroadcastChannel` / `ntfy` / MQTT-WSS, mã phòng có tiền tố riêng từng game, `?mp=<code>`).
+   - Chặng 4 (Cổng kiểm duyệt cứng & Build): Viết unit test (decoder + gameplay + `multiplayer.test.mjs`) + chạy `python3 tools/verify-port-parity.py <slug>` (BẮT BUỘC ra `RESULT: PASS`, exit 0), chạy `python3 tools/build-portal.py`, kiểm tra trực quan 1 tab + đồng bộ 2 tab `?mp=` trên localhost (0 lỗi Console) rồi mới báo hoàn thành.
 
 QUY TẮC CHỐNG TỰ BỊA (TUYỆT ĐỐI TUÂN THỦ):
 - Mọi bảng map, chỉ số lính, sprite/BSprite/palette, text phải giải mã trực tiếp từ file gốc trong `.jar` — CẤM gõ tay hay tự bịa thông số.
@@ -108,9 +108,9 @@ Dán lần lượt từng lệnh nhỏ (mỗi lượt chỉ làm 1 nhóm cơ ch�
 
 ```text
 Hoàn thiện games/<slug>/web-port/:
-1. Đảm bảo chạy tốt cả trên máy tính (chuột + phím), mobile, và Discord Activity (fallback Canvas 2D nếu CDN bị chặn).
-2. Viết bộ unit test games/<slug>/web-port/tests/*.test.mjs kiểm tra: giữ nguyên original/*.jar, giải mã map/sprite/text thành công, không lỗi cú pháp.
-3. Chạy node --check, node --test, và python3 tools/build-portal.py rồi xác nhận pass 100%.
+1. Đảm bảo chạy tốt cả trên máy tính (chuột + phím), mobile, và Discord Activity (fallback Canvas 2D nếu CDN bị chặn), đồng thời có đầy đủ chế độ Chơi nhiều người (`multiplayer.js` + `#mp-lobby`, `?mp=<code>`, Host Web Worker, Quad Transport `/api/mp` / `BroadcastChannel` / `ntfy` / MQTT-WSS).
+2. Viết bộ unit test games/<slug>/web-port/tests/*.test.mjs kiểm tra: giữ nguyên original/*.jar, giải mã map/sprite/text thành công, đồng bộ multiplayer, không lỗi cú pháp.
+3. Chạy node --check, node --test, python3 tools/verify-port-parity.py <slug>, python3 tools/build-portal.py và QA đồng bộ 2 tab rồi xác nhận pass 100%.
 ```
 
 ---

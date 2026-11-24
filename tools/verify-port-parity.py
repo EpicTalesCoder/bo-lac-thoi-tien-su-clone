@@ -125,6 +125,53 @@ def main():
         else:
             passed.append(f"Real sprite rendering detected: {total_draw_img} drawImage() calls (fillRect={total_fill_rect})")
 
+        # Gate 4B: Crisp 1px MIDP UI primitives, bitmap font usage & shell hygiene (advisory)
+        stroke_rect_re = re.compile(r"\bstrokeRect\s*\(")
+        total_stroke_rect = sum(
+            len(stroke_rect_re.findall(jf.read_text(encoding="utf-8", errors="replace")))
+            for jf in js_files
+        )
+        if total_stroke_rect > 0:
+            warnings.append(
+                f"Found {total_stroke_rect} blurry Canvas strokeRect() call(s) — prefer crisp 1px drawRectMIDP() fillRect borders"
+            )
+        else:
+            passed.append("Crisp integer borders verified (0 strokeRect() calls)")
+
+        if assets_dir.exists() and (assets_dir / "fnt.png").exists():
+            font_refs = sum(
+                1 for jf in js_files
+                if "createOriginalFont" in jf.read_text(encoding="utf-8", errors="replace")
+            )
+            if font_refs == 0:
+                warnings.append("assets/fnt.png present but createOriginalFont() not wired in web-port/*.js")
+            else:
+                passed.append("Original bitmap font sheet (fnt.png) wired via createOriginalFont()")
+
+        css_path = web_dir / "style.css"
+        if css_path.exists():
+            css_txt = css_path.read_text(encoding="utf-8", errors="replace")
+            tb_match = re.search(r"\.floating-toolbar\s*\{([^}]*)\}", css_txt, re.S)
+            if tb_match and re.search(r"position\s*:\s*fixed\b", tb_match.group(1)):
+                warnings.append("style.css .floating-toolbar uses position:fixed (may overlap bottom canvas HUD/softkeys; prefer flex column below #game)")
+            elif tb_match:
+                passed.append("Viewport shell toolbar docked cleanly outside #game canvas")
+
+        # Gate 4C: Mandatory Multiplayer requirement for every web port
+        mp_js = web_dir / "multiplayer.js"
+        html_path = web_dir / "index.html"
+        game_js_path = web_dir / "game.js"
+        html_txt = html_path.read_text(encoding="utf-8", errors="replace") if html_path.exists() else ""
+        game_js_txt = game_js_path.read_text(encoding="utf-8", errors="replace") if game_js_path.exists() else ""
+        if not mp_js.exists():
+            failures.append(f"Missing mandatory multiplayer module: games/{slug}/web-port/multiplayer.js")
+        elif "mp-lobby" not in html_txt or "btn-mp-lobby" not in html_txt:
+            failures.append(f"games/{slug}/web-port/index.html missing mandatory multiplayer UI (#mp-lobby / #btn-mp-lobby)")
+        elif "MultiplayerClient" not in game_js_txt:
+            failures.append(f"games/{slug}/web-port/game.js does not wire MultiplayerClient")
+        else:
+            passed.append("Mandatory Multiplayer wired (multiplayer.js + #mp-lobby + MultiplayerClient)")
+
     # Gate 5: JS syntax check + unit tests + manifest registration
     all_js = sorted(web_dir.glob("*.js")) if web_dir.exists() else []
     syntax_ok = True

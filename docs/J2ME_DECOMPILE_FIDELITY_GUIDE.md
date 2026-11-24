@@ -98,11 +98,12 @@ Mỗi game nên tách rõ tối thiểu 4 file để dễ kiểm tra và sửa l
 1. `<slug>-loader.js` (hoặc `scenario-loader.js`): giải mã 100% file map/table/unit specs từ `assets/` gốc.
 2. `render-original.js`: port 1:1 hàm `paint()` của game gốc (lớp nền → đối tượng/công trình → nhân vật/hiệu ứng → HUD/menu gốc).
 3. `game.js`: port vòng lặp `run()` / `tick()` / state machine / AI / điều khiển chuột + bàn phím (ánh xạ phím số `2/4/6/8/5`, softkey trái/phải, và click chuột trực tiếp).
-4. `tests/*.test.mjs`: unit test kiểm tra decoder, độ toàn vẹn file gốc, và logic lõi.
+4. `multiplayer.js` + giao diện phòng chờ `#mp-lobby`: chế độ chơi nhiều người **bắt buộc** (2–4+ người chơi / Host-authoritative + background Web Worker + Quad Transport `/api/mp`, `BroadcastChannel`, `ntfy`, MQTT-WSS + mã phòng có tiền tố riêng từng game + tự vào phòng qua `?mp=<code>`).
+5. `tests/*.test.mjs`: unit test kiểm tra decoder, độ toàn vẹn file gốc, logic lõi và `multiplayer.test.mjs`.
 
-### Bước 6: Đối chiếu thị giác (Visual Oracle) & Cổng kiểm duyệt 10 điểm
+### Bước 6: Đối chiếu thị giác (Visual Oracle) & Cổng kiểm duyệt 11 điểm
 
-Trước khi coi một game port là hoàn thành, kiểm tra đủ **10 tiêu chí**:
+Trước khi coi một game port là hoàn thành, kiểm tra đủ **11 tiêu chí**:
 1. Mở được ngay trên trình duyệt & Portal (`python3 tools/build-portal.py`), không có lỗi `404` / `TypeError` trong Console.
 2. Màn hình Title / Menu sử dụng **đúng ảnh nền, logo, font/nút gốc** từ `.jar` (không vẽ khung CSS/HTML thay thế sơ sài).
 3. Bản đồ màn 1 khớp **100% bố cục địa hình, vị trí nhà và quân** với file map gốc trong `.jar`.
@@ -112,7 +113,8 @@ Trước khi coi một game port là hoàn thành, kiểm tra đủ **10 tiêu c
 7. Hoạt động tốt bằng cả **chuột** (click/kéo) lẫn **bàn phím** (mũi tên/WASD/Enter/Escape).
 8. Chạy mượt khi chuyển tab / phóng to cửa sổ, có fallback Canvas 2D khi CDN bị chặn (chạy được trong Discord Activity).
 9. Giữ nguyên `original/*.jar` và có bộ test `node --test` pass 100%.
-10. Đối chiếu trực quan ít nhất 3 màn hình (Menu, Gameplay, HUD/Popup) với ảnh chụp từ giả lập FreeJ2ME hoặc video gameplay gốc.
+10. Chạy QA trình duyệt thật (`Chrome headless CDP` / localhost): chụp & soi từng PNG across Startup → Menus (VI & EN) → Loading → Gameplay → Pause → Scoreboard, bảo đảm `Console errors: 0`, không mất dấu/ký tự bitmap, `strokeRect` nhòe hay thanh công cụ HTML đè lên HUD/softkey; đối chiếu ảnh FreeJ2ME gốc nếu có.
+11. **Multiplayer bắt buộc (Chơi nhiều người)**: Mọi game đều phải có mục **Chơi Online / Multiplayer ngay trong Menu chính trong game** kèm nút `#btn-mp-lobby`, mở phòng chờ 2–4+ người (`#mp-lobby`, Tạo/Vào phòng với mã phòng riêng theo game, Mở Tab 2 `?mp=<code>`, chọn phe/nhân vật, Sẵn sàng & đếm ngược, Host Web Worker chống nghẽn tab nền, đồng bộ hành động 2 tab không lỗi Console).
 
 ---
 

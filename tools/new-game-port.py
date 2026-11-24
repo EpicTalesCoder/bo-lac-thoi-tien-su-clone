@@ -78,10 +78,16 @@ def main():
   <title>{title} — Phaser 3 Web Port</title>
 </head>
 <body style="background:#111;color:#eee;font-family:monospace;text-align:center;padding:32px">
-  <h1>{title}</h1>
-  <canvas id="game" width="240" height="320" style="border:1px solid #444;image-rendering:pixelated"></canvas>
-  <p><a href="../../../index.html" style="color:#9cff7b">← Quay lại Cổng Game</a></p>
-  <script src="https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.min.js"></script>
+  <main class="app-shell">
+    <section class="viewport-stage" id="viewport-stage">
+      <canvas id="game" width="240" height="320" style="border:1px solid #444;image-rendering:pixelated"></canvas>
+      <div class="floating-toolbar">
+        <button type="button" id="btn-mp-lobby">⚔️ Phòng MP</button>
+        <a href="../../../index.html" style="color:#9cff7b">← Quay lại Cổng Game</a>
+      </div>
+    </section>
+  </main>
+  <div id="mp-lobby" class="mp-lobby-overlay" hidden></div>
   <script type="module">
     import {{ mountPhaserRuntime }} from './phaser-engine.js';
     mountPhaserRuntime({{
@@ -127,7 +133,7 @@ def main():
                 "directGameUrl": f"./games/{slug}/web-port/index.html",
                 "coverImage": "./games/bo-lac-thoi-tien-su/web-port/assets/campaign-captures/frame-03.png",
                 "status": "in-progress",
-                "features": ["Original JAR extracted", "Web port scaffolded"],
+                "features": ["Original JAR extracted", "Web port scaffolded", "Multiplayer 2-4 players required"],
             }
         )
         MANIFEST_PATH.write_text(json.dumps(games, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
