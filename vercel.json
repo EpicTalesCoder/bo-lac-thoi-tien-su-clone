@@ -5,6 +5,19 @@
   "installCommand": "true",
   "buildCommand": "python3 tools/build-dist.py",
   "outputDirectory": "dist",
+  "redirects": [
+    { "source": "/games/bo-lac-thoi-tien-su/web-port/index.html", "destination": "/", "permanent": false },
+    { "source": "/games/bo-lac-thoi-tien-su/web-port", "destination": "/", "permanent": false },
+    { "source": "/games/bo-lac-thoi-tien-su/web-port/", "destination": "/", "permanent": false },
+    { "source": "/games/bo-lac-thoi-tien-su/web-port/:path*", "destination": "/:path*", "permanent": false },
+    { "source": "/games/bo-lac-thoi-tien-su/index.html", "destination": "/", "permanent": false },
+    { "source": "/games/bo-lac-thoi-tien-su", "destination": "/", "permanent": false },
+    { "source": "/games/bo-lac-thoi-tien-su/", "destination": "/", "permanent": false },
+    { "source": "/web-port/index.html", "destination": "/", "permanent": false },
+    { "source": "/web-port", "destination": "/", "permanent": false },
+    { "source": "/web-port/", "destination": "/", "permanent": false },
+    { "source": "/web-port/:path*", "destination": "/:path*", "permanent": false }
+  ],
   "headers": [
     {
       "source": "/",

@@ -10038,13 +10038,19 @@ Promise.all([
       const myReady = Boolean(mpClient.getMyPlayer()?.ready);
       mpClient.setReady(!myReady);
     });
+    const getMainInviteBase = () => {
+      const path = window.location.pathname.endsWith('/index.html')
+        ? window.location.pathname.slice(0, -'index.html'.length)
+        : window.location.pathname;
+      return `${window.location.origin}${path || '/'}`;
+    };
     mpCopyBtn?.addEventListener('click', () => {
-      const url = `${window.location.origin}${window.location.pathname}?room=${mpClient.roomCode}`;
+      const url = `${getMainInviteBase()}?room=${mpClient.roomCode}`;
       navigator.clipboard?.writeText(url).catch(() => {});
       if (mpRoomMsgEl) mpRoomMsgEl.textContent = `📋 Đã copy link mời: ${url}`;
     });
     mpOpenTab2Btn?.addEventListener('click', () => {
-      const url = `${window.location.origin}${window.location.pathname}?room=${mpClient.roomCode}&autojoin=1`;
+      const url = `${getMainInviteBase()}?room=${mpClient.roomCode}&autojoin=1`;
       window.open(url, '_blank');
     });
     mpCodeInput?.addEventListener('keydown', (ev) => {

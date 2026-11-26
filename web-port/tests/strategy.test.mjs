@@ -167,3 +167,27 @@ test('/sa embeds 5 valid MIDI tracks including Track 3 chase/tension percussion 
     assert.ok(gameJs.includes(token), `missing game.js symbol: ${token}`);
   }
 });
+
+test('main-link mapping serves web-port at / on Vercel and legal pages link back to /', async () => {
+  const vercelCfg = JSON.parse(await readFile(new URL('../../vercel.json', import.meta.url), 'utf8'));
+  assert.equal(vercelCfg.buildCommand, 'python3 tools/build-dist.py');
+  assert.equal(vercelCfg.outputDirectory, 'dist');
+  assert.ok(Array.isArray(vercelCfg.redirects), 'vercel.json should define redirects');
+  const redirectPairs = new Set(vercelCfg.redirects.map((r) => `${r.source}->${r.destination}`));
+  for (const oldPath of [
+    '/web-port',
+    '/web-port/',
+    '/web-port/index.html',
+    '/games/bo-lac-thoi-tien-su/web-port',
+    '/games/bo-lac-thoi-tien-su/web-port/',
+    '/games/bo-lac-thoi-tien-su/web-port/index.html',
+  ]) {
+    assert.ok(redirectPairs.has(`${oldPath}->/`), `missing redirect from ${oldPath} to /`);
+  }
+
+  for (const page of ['terms.html', 'privacy.html']) {
+    const html = await readFile(new URL(`../${page}`, import.meta.url), 'utf8');
+    assert.ok(!html.includes('/games/bo-lac-thoi-tien-su/web-port'), `${page} still contains legacy monorepo subpath`);
+    assert.match(html, /<a href="\/">.*Quay lại Game<\/a>/);
+  }
+});

@@ -16,7 +16,8 @@ This browser-native prototype runs directly in HTML, CSS, Canvas 2D, and ES modu
 From the repository root:
 
 ```sh
-python3 -m http.server 4179 --bind 127.0.0.1 --directory rea/game/web-port
+npm run build
+npm start
 ```
 
 Then open:
