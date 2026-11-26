@@ -168,26 +168,29 @@ test('/sa embeds 5 valid MIDI tracks including Track 3 chase/tension percussion 
   }
 });
 
-test('main-link mapping serves web-port at / on Vercel and legal pages link back to /', async () => {
+test('portal serves game selector at / on Vercel and builds all manifest games under /games/<slug>/web-port/', async () => {
   const vercelCfg = JSON.parse(await readFile(new URL('../../vercel.json', import.meta.url), 'utf8'));
   assert.equal(vercelCfg.buildCommand, 'python3 tools/build-dist.py');
   assert.equal(vercelCfg.outputDirectory, 'dist');
-  assert.ok(Array.isArray(vercelCfg.redirects), 'vercel.json should define redirects');
-  const redirectPairs = new Set(vercelCfg.redirects.map((r) => `${r.source}->${r.destination}`));
-  for (const oldPath of [
-    '/web-port',
-    '/web-port/',
-    '/web-port/index.html',
-    '/games/bo-lac-thoi-tien-su/web-port',
-    '/games/bo-lac-thoi-tien-su/web-port/',
-    '/games/bo-lac-thoi-tien-su/web-port/index.html',
-  ]) {
-    assert.ok(redirectPairs.has(`${oldPath}->/`), `missing redirect from ${oldPath} to /`);
-  }
+
+  const portalHtml = await readFile(new URL('../../portal/index.html', import.meta.url), 'utf8');
+  assert.match(portalHtml, /Cổng Game J2ME Cổ Điển/);
+  assert.match(portalHtml, /games-manifest\.json/);
+
+  const manifest = JSON.parse(await readFile(new URL('../../games/games-manifest.json', import.meta.url), 'utf8'));
+  assert.ok(Array.isArray(manifest) && manifest.length >= 7);
+  assert.ok(manifest.some((g) => g.slug === 'bo-lac-thoi-tien-su'));
+
+  const redirectSources = new Set((vercelCfg.redirects || []).map((r) => r.source));
+  assert.ok(!redirectSources.has('/games/bo-lac-thoi-tien-su/web-port/index.html'));
+  assert.ok(redirectSources.has('/portal'));
 
   for (const page of ['terms.html', 'privacy.html']) {
-    const html = await readFile(new URL(`../${page}`, import.meta.url), 'utf8');
-    assert.ok(!html.includes('/games/bo-lac-thoi-tien-su/web-port'), `${page} still contains legacy monorepo subpath`);
-    assert.match(html, /<a href="\/">.*Quay lại Game<\/a>/);
+    const webLegal = await readFile(new URL(`../${page}`, import.meta.url), 'utf8');
+    const portalLegal = await readFile(new URL(`../../portal/${page}`, import.meta.url), 'utf8');
+    assert.match(webLegal, /href="\/games\/bo-lac-thoi-tien-su\/web-port\/index\.html"/);
+    assert.match(webLegal, /href="\/"/);
+    assert.match(portalLegal, /href="\/games\/bo-lac-thoi-tien-su\/web-port\/index\.html"/);
+    assert.match(portalLegal, /href="\/"/);
   }
 });

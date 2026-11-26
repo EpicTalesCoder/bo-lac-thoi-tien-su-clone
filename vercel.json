@@ -6,21 +6,34 @@
   "buildCommand": "python3 tools/build-dist.py",
   "outputDirectory": "dist",
   "redirects": [
-    { "source": "/games/bo-lac-thoi-tien-su/web-port/index.html", "destination": "/", "permanent": false },
-    { "source": "/games/bo-lac-thoi-tien-su/web-port", "destination": "/", "permanent": false },
-    { "source": "/games/bo-lac-thoi-tien-su/web-port/", "destination": "/", "permanent": false },
-    { "source": "/games/bo-lac-thoi-tien-su/web-port/:path*", "destination": "/:path*", "permanent": false },
-    { "source": "/games/bo-lac-thoi-tien-su/index.html", "destination": "/", "permanent": false },
-    { "source": "/games/bo-lac-thoi-tien-su", "destination": "/", "permanent": false },
-    { "source": "/games/bo-lac-thoi-tien-su/", "destination": "/", "permanent": false },
-    { "source": "/web-port/index.html", "destination": "/", "permanent": false },
-    { "source": "/web-port", "destination": "/", "permanent": false },
-    { "source": "/web-port/", "destination": "/", "permanent": false },
-    { "source": "/web-port/:path*", "destination": "/:path*", "permanent": false }
+    { "source": "/portal", "destination": "/", "permanent": false },
+    { "source": "/portal/", "destination": "/", "permanent": false },
+    { "source": "/portal/index.html", "destination": "/", "permanent": false },
+    { "source": "/web-port", "destination": "/games/bo-lac-thoi-tien-su/web-port/index.html", "permanent": false },
+    { "source": "/web-port/", "destination": "/games/bo-lac-thoi-tien-su/web-port/index.html", "permanent": false },
+    { "source": "/web-port/:path*", "destination": "/games/bo-lac-thoi-tien-su/web-port/:path*", "permanent": false },
+    { "source": "/games/bo-lac-thoi-tien-su", "destination": "/games/bo-lac-thoi-tien-su/web-port/index.html", "permanent": false },
+    { "source": "/games/bo-lac-thoi-tien-su/", "destination": "/games/bo-lac-thoi-tien-su/web-port/index.html", "permanent": false },
+    { "source": "/games/total-tournament", "destination": "/games/total-tournament/web-port/index.html", "permanent": false },
+    { "source": "/games/green-farm-3", "destination": "/games/green-farm-3/web-port/index.html", "permanent": false },
+    { "source": "/games/ancient-empires-2", "destination": "/games/ancient-empires-2/web-port/index.html", "permanent": false },
+    { "source": "/games/uno-friends", "destination": "/games/uno-friends/web-port/index.html", "permanent": false },
+    { "source": "/games/worms-reloaded", "destination": "/games/worms-reloaded/web-port/index.html", "permanent": false },
+    { "source": "/games/pipyaki-pro", "destination": "/games/pipyaki-pro/web-port/index.html", "permanent": false }
   ],
   "headers": [
     {
       "source": "/",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-store, no-cache, must-revalidate, max-age=0" },
+        { "key": "Pragma", "value": "no-cache" },
+        { "key": "Expires", "value": "0" },
+        { "key": "CDN-Cache-Control", "value": "no-store" },
+        { "key": "Vercel-CDN-Cache-Control", "value": "no-store" }
+      ]
+    },
+    {
+      "source": "/games/(.*)/",
       "headers": [
         { "key": "Cache-Control", "value": "no-store, no-cache, must-revalidate, max-age=0" },
         { "key": "Pragma", "value": "no-cache" },
@@ -40,7 +53,7 @@
       ]
     },
     {
-      "source": "/assets/(.*)",
+      "source": "/games/(.*)/assets/(.*)",
       "headers": [
         {
           "key": "Cache-Control",
