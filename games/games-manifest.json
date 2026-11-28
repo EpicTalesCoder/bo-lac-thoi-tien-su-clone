@@ -116,7 +116,7 @@
     "features": [
       "1:1 J2ME 320×240 Engine: giải mã trực tiếp /index + df0_0..df10_0, RLE 50/51, 31 pack sprite ac, PLTE swap & bitmap font VI/EN/TH gốc",
       "Địa hình phá hủy 832×448 thời gian thực (B-spline + mặt nạ bit + hố bom Bresenham + minimap 170×64 + 5 chủ đề & pháo đài)",
-      "Đầy đủ 36 vũ khí, thanh Menu chọn vũ khí trái/phải, đồng bộ hướng bắn theo tâm ngắm 1:1, Chiến dịch 28 màn & Shop",
+      "Đầy đủ 36 vũ khí, menu bật trái/phải trong game như bản gốc, đồng bộ tâm ngắm 1:1, Chiến dịch 28 màn & Shop",
       "Đấu trường Online 2–4 đội (?mp=WRxxxx, Host-authoritative Blob Worker + đồng bộ hố bom / vật phẩm / lượt bắn thời gian thực)"
     ]
   },
